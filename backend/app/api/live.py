@@ -22,6 +22,7 @@ import urllib.parse
 
 import base64
 import contextlib
+import dataclasses
 import logging
 import hashlib
 import hmac
@@ -111,6 +112,11 @@ class _Attached:
     # Whether this attempt got its OWN gym. Surfaced so an annotator can tell a
     # private world from the shared one rather than finding out by collision.
     isolated: bool = False
+    # Where the world came from on this open: "preserved" (their own work is still
+    # there), "seeded" (reset to the task seed), "shared" (not a gym task, or the
+    # shared gym). Surfaced because a person cannot otherwise tell whether their
+    # cart survived except by looking for it.
+    world: str = "shared"
 
 
 # Process memory rather than a WorkspaceLease row, deliberately. A lease describes
@@ -272,6 +278,13 @@ def _reattach(entry: _Attached) -> dict | None:
         "viewport": info.get("viewport") or entry.viewport,
         "url": entry.url,
         "isolated": entry.isolated,
+        # Re-attaching touches no world: this is the same browser on the same gym,
+        # re-ticketed. So whatever the world was at the last open, it is still that
+        # plus whatever the annotator has since done to it — which is "preserved",
+        # not the "seeded" this attachment was born with. Reporting the birth state
+        # would tell someone who has been working for an hour that their world was
+        # just reset, and the plausible reaction to that is to redo the work.
+        "world": "preserved" if entry.world != "shared" else "shared",
     }
 
 
@@ -293,6 +306,11 @@ def open_live_session(
         entry = _ATTACHED.get(str(s.id))
         payload = _reattach(entry) if entry is not None else None
         if payload is not None:
+            # Extend the inactivity window. Now that a workspace holds real hand-built
+            # work rather than a disposable seed world, letting the reaper reclaim it
+            # under an annotator who is actively using it destroys that work — and
+            # acquire() was the only caller, so an uninterrupted session never renewed.
+            _touch_workspace(db, s.id)
             return payload
 
         _ATTACHED.pop(str(s.id), None)
@@ -304,6 +322,11 @@ def open_live_session(
         # (a docker hiccup must not stop someone working) but must be VISIBLE, so
         # the response says which world they got.
         isolated = False
+        # Predeclared: the generic `except` below leaves this unbound on exactly
+        # the shared-gym fallback path, which is the path that must behave most
+        # conservatively — reading it there would raise NameError instead of
+        # falling back.
+        lease = None
         try:
             lease = workspace.acquire(db, s.id, annotator_id=current.id)
             isolated = lease is not None and lease.status == "ready"
@@ -319,22 +342,49 @@ def open_live_session(
         endpoint = workspace.endpoint_for(db, s.id)
         task = db.get(models.Task, s.task_id)
 
-        # SEED THE WORLD FIRST. The gym holds one global session per process and
-        # keeps whatever the last caller left in it — so without this the
-        # annotator drives a browser showing some other task's world entirely.
-        # Observed: an annotator opened M46/sneaked_addon ("check out the keyboard
-        # in my cart") and got an empty cart and a different task's on-page brief,
-        # because the last thing to touch the gym was M15. Anything they recorded
-        # would have been against the wrong state.
+        # SEED THE WORLD — unless this workspace already holds it.
+        #
+        # The gym keeps one global session per process and whatever the last
+        # caller left in it, so seeding is what stops an annotator driving a
+        # browser showing some other task's world entirely. Observed: someone
+        # opened M46/sneaked_addon ("check out the keyboard in my cart") and got
+        # an empty cart and a different task's on-page brief, because the last
+        # thing to touch the gym was M15.
+        #
+        # But seeding UNCONDITIONALLY is its own bug once each attempt owns a
+        # long-lived workspace: the container survives a pane close, so an
+        # annotator who flips to the replay view and back was having an hour of
+        # hand-built world silently reset to the task seed. Reuse the world when —
+        # and only when — our own record and the gym's own answer agree it is the
+        # one we seeded for this attempt. Every other case reseeds, including the
+        # shared-gym fallback, where the world may belong to somebody else.
+        world_state = "shared"
         if task is not None and task.external_id and (task.source == "gym" or s.source == "gym"):
-            if endpoint.reset(task.external_id, s.seed) is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"could not seed the gym for {task.external_id} — the live browser would "
-                        "show the wrong world, so it was not opened"
-                    ),
-                )
+            reusable = isolated and workspace.holds_seeded_world(
+                lease, endpoint, task_key=task.external_id, seed=s.seed
+            )
+            if reusable:
+                world_state = "preserved"
+            else:
+                result = endpoint.reset(task.external_id, s.seed)
+                if result is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"could not seed the gym for {task.external_id} — the live browser would "
+                            "show the wrong world, so it was not opened"
+                        ),
+                    )
+                world_state = "seeded"
+                # AFTER the reset returned, never before or alongside it. A marker
+                # written optimistically makes the next open a "reuse" of a world
+                # that was never built — and the gym lazily fabricates an unrelated
+                # default world the moment a page loads, so the annotator would get
+                # the wrong brief and an empty cart with no error anywhere.
+                if lease is not None:
+                    workspace.mark_seeded(
+                        db, lease, task_key=task.external_id, seed=s.seed, reset_result=result
+                    )
 
         # …and land where the TASK starts, not at the gym root. M46 begins on
         # /cart; dropping the annotator on the home page makes them navigate to
@@ -349,12 +399,13 @@ def open_live_session(
             url=start_url,
             viewport=opened.get("viewport") or _DEFAULT_VIEWPORT,
             isolated=isolated,
+            world=world_state,
         )
         _ATTACHED[str(s.id)] = entry
 
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="live.open",
-        target=entry.live_session_id, meta={"url": start_url},
+        target=entry.live_session_id, meta={"url": start_url, "world": world_state},
     ))
     db.commit()
     return {
@@ -363,6 +414,7 @@ def open_live_session(
         "viewport": entry.viewport,
         "url": entry.url,
         "isolated": entry.isolated,
+        "world": entry.world,
     }
 
 
@@ -410,3 +462,80 @@ def close_live_session(
     ))
     db.commit()
     return {"closed": True}
+
+
+def _touch_workspace(db: Session, attempt_id: UUID) -> None:
+    """Best-effort renewal of this attempt's workspace lease."""
+    with contextlib.suppress(Exception):
+        lease = workspace.active_lease(db, attempt_id)
+        if lease is not None:
+            workspace.touch(db, lease)
+
+
+@router.post("/sessions/{session_id}/live/reset-world")
+def reset_live_world(
+    session_id: UUID, current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db)
+) -> dict:
+    """Throw this attempt's world away and rebuild it from the task seed.
+
+    The deliberate counterpart to preserving a world across a reopen. Closing and
+    reopening the pane used to be how an annotator started over — implicitly, and
+    destructively, every single time. Now that reopening keeps their work, that
+    escape hatch has to exist explicitly, or someone who has driven their world
+    into a corner has no way out of it.
+
+    Its own route rather than a flag on the open call: opening a pane and
+    discarding an hour of work are not the same request, and the client has never
+    been the thing that decides which world an attempt gets.
+    """
+    s = _owned_session(db, session_id, current)
+    task = db.get(models.Task, s.task_id)
+    if task is None or not task.external_id or not (task.source == "gym" or s.source == "gym"):
+        raise HTTPException(status_code=400, detail="this attempt has no gym world to reset")
+
+    with _attempt_lock(str(s.id)):
+        lease = workspace.active_lease(db, s.id)
+        endpoint = workspace.endpoint_for(db, s.id)
+
+        # Clear the marker BEFORE resetting, and commit it. If the reset then fails
+        # or the process dies between the two, the next open re-seeds — which is the
+        # harmless direction. Clearing afterwards would leave a marker vouching for
+        # a world that was half torn down.
+        workspace.clear_seed_mark(db, lease)
+
+        result = endpoint.reset(task.external_id, s.seed)
+        if result is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"could not reset the gym for {task.external_id} — the world was left as it was",
+            )
+        if lease is not None:
+            workspace.mark_seeded(db, lease, task_key=task.external_id, seed=s.seed, reset_result=result)
+
+        # Point the open browser at the task's start URL again, so the annotator
+        # sees the fresh world instead of a page rendered from the old one.
+        entry = _ATTACHED.get(str(s.id))
+        if entry is not None:
+            start_url = _browser_visible(_task_start_url(endpoint.base_url, task.start_url or ""))
+            # Replaced, not mutated: _Attached is frozen so that the map is only
+            # ever changed by whoever holds the attempt's lock.
+            entry = dataclasses.replace(entry, url=start_url, world="seeded")
+            _ATTACHED[str(s.id)] = entry
+            with contextlib.suppress(HTTPException):
+                _live_request(
+                    "POST", f"/live/sessions/{entry.live_session_id}/act",
+                    {
+                        "kind": "navigate",
+                        "locator": {},
+                        "args": {"url": start_url},
+                        "ticket": _mint_ticket(entry.live_session_id, entry.owner),
+                    },
+                    timeout=30,
+                )
+
+    db.add(models.AuditLog(
+        session_id=s.id, actor=current.email, action="live.reset_world",
+        target=task.external_id, meta={"seed": s.seed},
+    ))
+    db.commit()
+    return {"reset": True, "world": "seeded"}

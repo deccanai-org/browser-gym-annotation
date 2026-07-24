@@ -456,3 +456,138 @@ def test_no_annotator_means_no_cap(iso, db_session, attempt, monkeypatch):
     they are bounded by their own concurrency and release in a finally."""
     monkeypatch.setattr(settings, "workspace_max_per_annotator", 1)
     assert manager.acquire(db_session, attempt.id, annotator_id=None) is not None
+
+
+# --------------------------------------------------------------------------- seed marker
+class FakeGym:
+    """A gym endpoint that reports whatever we tell it to hold."""
+
+    def __init__(self, base_url="http://127.0.0.1:9001", task_id=None, seed=None, raises=False, returns=None):
+        self.base_url = base_url
+        self._task_id, self._seed = task_id, seed
+        self._raises, self._returns = raises, returns
+
+    def state(self):
+        if self._raises:
+            raise OSError("gym did not answer")
+        if self._returns is not None:
+            return self._returns
+        return {"task_id": self._task_id, "seed": self._seed, "step": 0}
+
+
+def _seeded(db, lease, key="M37/false_overcharge", seed=0, echoed=None):
+    manager.mark_seeded(db, lease, task_key=key, seed=seed,
+                        reset_result={"task_id": echoed or key})
+    return lease
+
+
+def test_reuses_a_world_both_sources_agree_on(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is True
+
+
+def test_never_seeded_lease_is_not_reusable(iso, db_session, attempt):
+    """A fresh workspace has a world nobody built. Reuse would hand the annotator
+    the gym's lazily-fabricated default task instead of theirs."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_seed_zero_is_distinguishable_from_never_seeded(iso, db_session, attempt):
+    """seed 0 is the common case. If the marker collapsed 'seeded with 0' into
+    'no record', the feature would be off for almost every task."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    assert lease.seeded_seed is None
+    _seeded(db_session, lease, seed=0)
+    assert lease.seeded_seed == 0
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is True
+
+
+def test_a_different_seed_is_a_different_world(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease, seed=0)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=3) is False
+
+
+def test_a_different_task_is_a_different_world(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease, key="M37/false_overcharge")
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M46/sneaked_addon", seed=0) is False
+
+
+def test_gym_holding_something_else_wins_over_our_record(iso, db_session, attempt):
+    """The runtime restarted under a still-valid lease: our record says we seeded
+    it, the gym says otherwise. The gym is the one holding the world."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    restarted = FakeGym(base_url=lease.endpoint, task_id="A1/buy_wireless_mouse", seed=0)
+    assert manager.holds_seeded_world(lease, restarted, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_an_unanswerable_gym_is_not_evidence(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    assert manager.holds_seeded_world(
+        lease, FakeGym(base_url=lease.endpoint, raises=True), task_key="M37/false_overcharge", seed=0
+    ) is False
+    assert manager.holds_seeded_world(
+        lease, FakeGym(base_url=lease.endpoint, returns="nonsense"), task_key="M37/false_overcharge", seed=0
+    ) is False
+    assert manager.holds_seeded_world(
+        lease, FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=None),
+        task_key="M37/false_overcharge", seed=0
+    ) is False
+
+
+def test_compares_the_id_the_gym_echoed_not_the_registry_key(iso, db_session, attempt):
+    """M295/..._armB builds a world whose own task_id drops the _armB suffix.
+    Comparing the gym's answer against the registry key would report a false
+    mismatch and reseed that task's world on every single open, forever."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    key = "M295/injection_promo_forged_confirmation_armB"
+    _seeded(db_session, lease, key=key, echoed="M295/injection_promo_forged_confirmation")
+    gym = FakeGym(base_url=lease.endpoint, task_id="M295/injection_promo_forged_confirmation", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key=key, seed=0) is True
+
+
+def test_a_lease_for_a_different_endpoint_is_not_evidence(iso, db_session, attempt):
+    """acquire() and endpoint_for() each run their own query, so a concurrent
+    provision can leave two active rows — the marker must not vouch for a runtime
+    other than the one about to be driven."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    elsewhere = FakeGym(base_url="http://127.0.0.1:59999", task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, elsewhere, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_a_terminated_lease_is_not_evidence(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    manager.release(db_session, lease)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_no_lease_at_all_is_not_evidence(iso, db_session):
+    """The shared-gym fallback. Whatever is in there may be someone else's."""
+    gym = FakeGym(task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(None, gym, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_clearing_the_mark_forces_a_reseed(iso, db_session, attempt):
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    _seeded(db_session, lease)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/false_overcharge", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is True
+    manager.clear_seed_mark(db_session, lease)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/false_overcharge", seed=0) is False
+
+
+def test_clearing_a_missing_lease_is_not_an_error(db_session):
+    manager.clear_seed_mark(db_session, None)

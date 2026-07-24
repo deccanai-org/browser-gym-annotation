@@ -285,6 +285,27 @@ class DockerRuntimeProvider:
         return self._docker("image", "inspect", self.image, "-f", "{{.Id}}") or ""
 
     def health(self, handle: WorkspaceHandle) -> bool:
+        """Healthy means *this* container is answering — not merely that something
+        is.
+
+        `-p 0:8000` takes an ephemeral host port, and the OS recycles those. A dead
+        lease's stored endpoint can therefore come to point at a port some other
+        container has since been given, where `_harness_ok` cheerfully returns True
+        and the caller adopts a stranger's gym. That was survivable while a lease
+        was only ever used to route a reset; it is not survivable now that a lease
+        is also the evidence for REUSING a world, where a wrong yes means an
+        annotator records against somebody else's state.
+
+        So identity is checked first: the container must still be running, and the
+        port it publishes must be the port our endpoint names.
+        """
+        if not handle.external_ref:
+            return False
+        if self._docker("inspect", "-f", "{{.State.Running}}", handle.external_ref, timeout=15) != "true":
+            return False
+        port = self._published_port(handle.external_ref)
+        if port is None or f":{port}" not in handle.endpoint:
+            return False
         return _harness_ok(handle.endpoint)
 
     def terminate(self, handle: WorkspaceHandle) -> None:

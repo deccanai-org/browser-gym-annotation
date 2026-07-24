@@ -173,15 +173,39 @@ describe("entering and leaving the live view", () => {
     expect(calls, "the toggle must mint a session, not render an empty pane").toContain("POST /api/sessions/att-1/live");
   });
 
-  it("gives the browser back when the annotator returns to the replay", async () => {
-    // A live Chromium per task view is how this runs out of memory.
+  it("KEEPS the browser when the annotator glances at the replay", async () => {
+    // This used to close it, and that made the toggle quietly destructive: the
+    // server reseeds the gym on a fresh open, so checking a step on the replay
+    // and coming back reset an hour of hand-built world to the task seed. The
+    // Chromium-per-view leak this once guarded against is handled where it
+    // actually belongs — leaving the task, covered by the next test.
     const calls = await mount();
     fireEvent.click(screen.getByTitle(LIVE_TAB));
     await screen.findByText(/live-7 · 1280×800/);
 
     fireEvent.click(screen.getByTitle(REPLAY_TAB));
-    await waitFor(() => expect(calls).toContain("POST /api/sessions/att-1/live/close"));
-    expect(screen.queryByText(/live-7/), "the pane is gone, not merely disconnected").toBeNull();
+    // The pane is unmounted (the socket drops) but the browser is not given back.
+    await waitFor(() => expect(screen.queryByText(/live-7/)).toBeNull());
+    expect(calls, "the browser must survive a look at the replay").not.toContain(
+      "POST /api/sessions/att-1/live/close",
+    );
+  });
+
+  it("re-mints a ticket when the annotator comes back to the live pane", async () => {
+    // The browser survived, but its ticket does not: tickets expire, and a socket
+    // opened with a stale one closes 4401, which is terminal in the client. So
+    // returning must still go through the open call — the server re-tickets the
+    // SAME browser rather than starting a second one.
+    const calls = await mount();
+    fireEvent.click(screen.getByTitle(LIVE_TAB));
+    await screen.findByText(/live-7 · 1280×800/);
+    fireEvent.click(screen.getByTitle(REPLAY_TAB));
+    await waitFor(() => expect(screen.queryByText(/live-7/)).toBeNull());
+
+    const before = calls.filter((c) => c === "POST /api/sessions/att-1/live").length;
+    fireEvent.click(screen.getByTitle(LIVE_TAB));
+    await screen.findByText(/live-7 · 1280×800/);
+    expect(calls.filter((c) => c === "POST /api/sessions/att-1/live").length).toBe(before + 1);
   });
 
   it("closes the browser when the annotator leaves the task", async () => {

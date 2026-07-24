@@ -238,3 +238,102 @@ def reconcile_on_startup(db: Session) -> int:
         else:
             _terminate_row(db, lease, reason="restart-orphan")
     return adopted
+
+
+# --------------------------------------------------------------------------- seeding
+# A workspace outlives the live browser attached to it. Reopening a pane must not
+# re-seed a world the annotator has spent an hour building by hand — but skipping
+# a reset is a much stronger act than performing one, so it happens only when two
+# INDEPENDENT sources agree: our own durable record of what we seeded, and the
+# gym's own answer about what it is holding. Either one silent → reset.
+
+
+def mark_seeded(db: Session, lease: models.WorkspaceLease, *, task_key: str, seed: int, reset_result: dict | None) -> None:
+    """Record what this workspace was seeded with. Call ONLY after the reset
+    actually succeeded.
+
+    `task_key` is the registry key we posted; `seeded_task_id` is the id the GYM
+    ECHOED BACK, and they are not always the same string. `M295/..._armB` builds a
+    world whose own task_id drops the `_armB` suffix, so comparing the gym's answer
+    against the registry key reports a false mismatch and re-seeds forever. Store
+    both: the key is what we send, the echo is what we later compare against.
+    """
+    lease.seeded_task_key = task_key
+    lease.seeded_seed = int(seed)
+    echoed = (reset_result or {}).get("task_id")
+    lease.seeded_task_id = str(echoed) if echoed else task_key
+    db.commit()
+
+
+def clear_seed_mark(db: Session, lease: models.WorkspaceLease | None) -> None:
+    """Forget what we think is in there. Anything that resets or reloads this
+    attempt's gym behind the live pane's back must call this, or the pane will
+    later vouch for a world it never seeded."""
+    if lease is None:
+        return
+    lease.seeded_task_key = None
+    lease.seeded_task_id = None
+    lease.seeded_seed = None
+    db.commit()
+
+
+def holds_seeded_world(
+    lease: models.WorkspaceLease | None, endpoint: GymEndpoint, *, task_key: str, seed: int
+) -> bool:
+    """Is it safe to reuse this workspace's world instead of re-seeding it?
+
+    Fails closed at every step. The cost of a wrong NO is one reseed; the cost of a
+    wrong YES is an annotator recording steps against somebody else's world, which
+    is the M46/M15 bug this reset was added to prevent in the first place.
+
+    Two factors, both required:
+
+    1. **Our record.** The lease must be `ready`, its endpoint must be the one we
+       are about to drive (``acquire`` and ``endpoint_for`` each run their own
+       query, so a concurrent provision can leave two active rows), and its seed
+       marker must match this exact (task, seed).
+    2. **The gym's own answer.** A live read of ``/_harness/state``, whose task_id
+       must equal the id the gym echoed at seed time and whose seed must match.
+       This is what catches a runtime that restarted underneath a still-valid
+       lease — a healthy endpoint holding a world nobody seeded.
+
+    Note on the probe: ``/_harness/state`` LAZILY BUILDS ``A1/buy_wireless_mouse``
+    seed 0 on a virgin process rather than erroring, so the probe can itself
+    construct a world. That is safe here, and deliberately so. If the attempt's
+    task is not A1/seed-0 the fabricated world mismatches and we reset. If it IS
+    A1/seed-0 we skip the reset — and the lazy path calls the same
+    ``_reset_inline`` a real reset does, so the world is byte-identical to one we
+    would have built (measured). Either way the annotator gets a correct world;
+    the only loss is work that a restarted runtime had already destroyed.
+
+    Deliberately NOT used as evidence:
+
+    * ``/_harness/snapshot`` — omits ``seed``, so a seed-3 world reads as seed-0.
+    * ``/_harness/verify`` — writes ``step`` AND permanently latches each
+      milestone's ``fired_at_step``. Probing with it would corrupt the score of the
+      very episode we are trying to preserve.
+    * ``state["step"]`` as a has-been-driven signal — only ``load_state`` and
+      ``verify`` ever assign it, so a world built entirely through the live browser
+      reports step 0 forever.
+    """
+    if lease is None or lease.status != "ready" or not lease.endpoint:
+        return False
+    if lease.endpoint != endpoint.base_url:
+        return False
+    if lease.seeded_seed is None or lease.seeded_task_key != task_key:
+        return False
+    if int(lease.seeded_seed) != int(seed):
+        return False
+
+    try:
+        live = endpoint.state()
+    except Exception:  # noqa: BLE001 — an unanswerable gym is an unusable witness
+        return False
+    if not isinstance(live, dict):
+        return False
+    if str(live.get("task_id") or "") != str(lease.seeded_task_id or ""):
+        return False
+    try:
+        return int(live.get("seed")) == int(seed)
+    except (TypeError, ValueError):
+        return False

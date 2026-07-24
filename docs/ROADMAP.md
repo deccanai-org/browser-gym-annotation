@@ -155,11 +155,30 @@ needs replacing with the Kubernetes provider (the `WorkspaceRuntimeProvider`
 interface already has the seam) or a socket proxy restricted to container create /
 inspect / rm.
 
+**World preservation** landed on top of it. Opening a pane used to reseed the gym
+unconditionally, so an annotator who flipped to the replay view and back had an
+hour of hand-built world silently reset to the task seed. A workspace now records
+what it was seeded with (`workspace_lease.seeded_task_*`, migration
+`b9c0d1e2f3a4`), and a reopen reuses that world when — and only when — the
+platform's durable record and the gym's own `/_harness/state` answer agree it is
+the one seeded for this attempt. Everything else reseeds, including the
+shared-gym fallback, so the M46/M15 wrong-world guard survives intact.
+
+The frontend stopped closing the browser on the replay toggle, which removes the
+dominant case entirely; the marker covers the ones it cannot (explicit close,
+page reload, backend restart). `POST /live/reset-world` is the deliberate way to
+start over, since closing the pane no longer does it implicitly. The pane shows
+which world it got.
+
+Verified end to end against the running stack: a cart line removed by hand
+survived a close/reopen; an email opened through the live UI survived a full
+backend restart with a brand-new browser; `Reset world` restored the seed.
+
 Two residuals, neither blocking:
 
 | Residual | Effect |
 |---|---|
-| `open_live_session` reseeds the gym on every fresh open | The container survives a pane close, but reopening still returns the world to the task seed. Preserving hand-driven state across a reopen needs the recorded prefix replayed back in. Bounded: finalize replays from scratch and fails closed, so nothing wrong can *ship* — it costs the annotator repeated work, it does not corrupt data |
+| A fresh open after a fork does not replay the recorded prefix | The world is the task seed, not the fork point, so the first manual open of a fork still requires performing the prefix by hand. Bounded: finalize replays from scratch and fails closed, so nothing wrong can *ship*. This is a separate feature ("prefix restore on open"), not a residual of preservation |
 | Agent-branch leases pass no `annotator_id` | They bypass the per-annotator cap. Bounded by their own concurrency and released in a `finally`, so this leaks only under repeated crash-during-run |
 
 ### 2.3 Multi-annotator operations

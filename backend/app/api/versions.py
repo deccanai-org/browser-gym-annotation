@@ -307,6 +307,15 @@ def finalize_attempt(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         live_api.close_scratch_browser(live_sid)
+        # Finalization resets this attempt's OWN gym and replays the whole
+        # trajectory into it, so whatever the annotator was exploring is gone
+        # regardless of how this call ended. Forget the seed marker: on success the
+        # lease is released below and the marker goes with the row, but on FAILURE
+        # the workspace survives holding a replayed world under a marker that would
+        # otherwise vouch for it as the annotator's own. One extra reseed is the
+        # right price for never handing back a world we did not build for them.
+        with contextlib.suppress(Exception):
+            workspace.clear_seed_mark(db, workspace.active_lease(db, s.id))
 
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="attempt.finalize", target=out["submissionId"],
@@ -557,6 +566,13 @@ def commit_actions(
     except checkpoints.DivergenceError as exc:
         raise HTTPException(status_code=409, detail=f"could not restore the branch start: {exc}") from exc
 
+    # NOTE: deliberately NOT clearing the workspace seed marker here. Committing
+    # restores the fork checkpoint and replays the committed actions into this
+    # attempt's own gym, so the world legitimately MOVES — but it is still this
+    # attempt's world for this (task, seed), which is exactly what the marker
+    # asserts. Reopening the pane onto fork+committed-actions is correct; it is
+    # simply not the exploration that was in progress, which is why the pane
+    # reports where its world came from rather than implying nothing moved.
     if body.dryRun or not result.ok:
         return {"ok": result.ok, "rejectedAt": result.rejected_at, "reason": result.reason,
                 "steps": result.steps, "committed": 0}

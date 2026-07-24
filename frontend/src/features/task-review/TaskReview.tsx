@@ -44,7 +44,7 @@ import { useAuth } from "../auth/AuthContext";
 import { ProfilePanel } from "../auth/ProfilePanel";
 import type { Annotator } from "../auth/authApi";
 import { LiveBrowserPane } from "../live-gym/LiveBrowserPane";
-import { attachLiveBrowser, closeLiveBrowser, currentLiveBrowser, type LiveSession } from "../live-gym/liveSessionApi";
+import { attachLiveBrowser, closeLiveBrowser, currentLiveBrowser, resetLiveWorld, type LiveSession } from "../live-gym/liveSessionApi";
 import { useVersionGraph, VersionGraph } from "../versions/VersionGraph";
 import { useVersionSteps, VersionSteps } from "../versions/VersionSteps";
 import { Header } from "./components/Header";
@@ -93,6 +93,56 @@ function PaneToggle({ view, opening, onReplay, onLive }: { view: PaneView; openi
       </span>
       <span onClick={view === "live" || opening ? undefined : onLive} title="Open a browser in the gym and drive the same page the agent uses" style={seg(view === "live")}>
         {opening ? "Opening…" : "Live browser"}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Where the live world came from, and the way back to a clean one.
+ *
+ * A workspace outlives the pane attached to it, so reopening now KEEPS whatever
+ * the annotator built rather than resetting it. That is the behaviour they want
+ * and also an invisible one: without this badge the only way to find out whether
+ * an hour of cart-building survived is to go and look for it.
+ *
+ * The reset is here rather than hidden because closing the pane used to be how
+ * you started over. Taking that away without putting something in its place
+ * would strand anyone who has driven their world into a corner.
+ */
+function WorldBadge({ world, isolated, onReset, resetting }: {
+  world?: "preserved" | "seeded" | "shared";
+  isolated?: boolean;
+  onReset: () => void;
+  resetting: boolean;
+}) {
+  if (!world || world === "shared") return null;
+  const preserved = world === "preserved";
+  const pill = {
+    display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px",
+    borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9,
+    fontSize: "0.75rem", fontWeight: weight.semibold, whiteSpace: "nowrap" as const,
+  };
+  return (
+    <span style={{ display: "inline-flex", gap: 6 }}>
+      <span
+        style={{ ...pill, color: preserved ? t.primary6 : t.n1 }}
+        title={
+          preserved
+            ? "Your work in this world was kept — this is the same world you left."
+            : isolated
+              ? "This world was rebuilt from the task's seed state."
+              : "Reset from the task's seed state (shared gym — not isolated to this attempt)."
+        }
+      >
+        {preserved ? "● World kept" : "○ Fresh seed"}
+      </span>
+      <span
+        onClick={resetting ? undefined : onReset}
+        title="Throw this world away and rebuild it from the task's seed state"
+        style={{ ...pill, color: t.n1, cursor: resetting ? "default" : "pointer" }}
+      >
+        {resetting ? "Resetting…" : "⟲ Reset world"}
       </span>
     </span>
   );
@@ -523,6 +573,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   // browser is entered deliberately and never on load.
   const [pane, setPane] = useState<PaneView>("replay");
   const [liveSession, setLiveSession] = useState<LiveSession | null>(null);
+  const [resettingWorld, setResettingWorld] = useState(false);
   const [liveOpening, setLiveOpening] = useState(false);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
   // Whether a browser is open server-side for this attempt. A ref, not state:
@@ -664,12 +715,32 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
     setPane("live");
   };
 
+  const resetWorld = async () => {
+    if (!sessionId || resettingWorld) return;
+    // Destructive and not undoable — the whole point is that it discards work.
+    if (!window.confirm("Throw away this world and rebuild it from the task's seed state?")) return;
+    setResettingWorld(true);
+    const res = await resetLiveWorld(sessionId);
+    setResettingWorld(false);
+    if (!res.ok) {
+      setLiveNotice(res.message);
+      return;
+    }
+    setLiveSession((prev) => (prev ? { ...prev, world: "seeded" } : prev));
+  };
+
   const showReplay = () => {
+    // Switch the view, KEEP the browser. Closing here made the toggle destructive:
+    // the server reseeds the gym on every fresh open, so flipping to the replay to
+    // check a step and flipping back reset an annotator's hand-built world to the
+    // task seed. The backend now preserves that world, but a close still costs a
+    // Chromium relaunch and several seconds on every glance at the replay.
+    //
+    // Returning to the live pane still goes through attachLiveBrowser: tickets
+    // expire after LIVE_TICKET_TTL_S and a socket opened with a stale one closes
+    // 4401 — which is terminal in the client — so the ticket must be re-minted
+    // even though the browser is the same one.
     setPane("replay");
-    if (!sessionId || !liveOpenRef.current) return;
-    liveOpenRef.current = false;
-    setLiveSession(null);
-    void closeLiveBrowser(sessionId);
   };
 
   // Run the verifier suite through the backend execution engine (M5). Falls
@@ -786,6 +857,14 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
         <SectionHeader n={1} title="Review & correct the agent run" subtitle="Verify each step; correct any step to re-run the agent from that state." right={
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <PaneToggle view={pane} opening={liveOpening} onReplay={showReplay} onLive={() => void showLive()} />
+            {pane === "live" && (
+              <WorldBadge
+                world={liveSession?.world}
+                isolated={liveSession?.isolated}
+                onReset={() => void resetWorld()}
+                resetting={resettingWorld}
+              />
+            )}
             <SaveBadge sessionId={sessionId} status={status} />
             {/* Every control below writes (or replays) a legacy correction
                 branch, which no version can contain and finalize cannot ship.

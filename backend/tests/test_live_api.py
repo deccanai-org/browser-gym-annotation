@@ -192,11 +192,14 @@ def test_opening_returns_a_ticket_the_service_will_honour_for_this_annotator(cli
     assert live_service.check_ticket(body["sessionId"], body["ticket"]) == OWNER, \
         "the live service must resolve the ticket to the signed-in annotator"
     assert body["viewport"] == {"width": 1280, "height": 800}
-    assert set(body) == {"sessionId", "ticket", "viewport", "url", "isolated"}
+    assert set(body) == {"sessionId", "ticket", "viewport", "url", "isolated", "world"}
     # False, not absent: isolation is off in tests, and the annotator is entitled
     # to know they are in the SHARED world rather than having to infer it from a
     # missing key.
     assert body["isolated"] is False
+    # Isolation off => the world was reseeded, and the response says so. A person
+    # must be able to tell whether the cart they left is still there.
+    assert body["world"] == "seeded"
 
 
 def test_the_browser_is_opened_against_the_running_live_service(client, attempt, live_service):
@@ -453,3 +456,99 @@ def test_the_query_string_survives():
     from app.api.live import _task_start_url
 
     assert _task_start_url("http://g:8000", "/mail?sent=1") == "http://g:8000/mail?sent=1"
+
+
+# --------------------------------------------------------------------------- world preservation
+def test_the_reset_world_route_is_registered():
+    assert sorted(app.openapi()["paths"]["/api/sessions/{session_id}/live/reset-world"]) == ["post"]
+
+
+def _isolated(monkeypatch, *, preserved: bool):
+    """Pretend this attempt owns a healthy workspace whose world may be reused."""
+    class _Lease:
+        id, status, endpoint = uuid4(), "ready", "http://127.0.0.1:9931"
+    monkeypatch.setattr(live.workspace, "acquire", lambda db, aid, **kw: _Lease())
+    monkeypatch.setattr(live.workspace, "active_lease", lambda db, aid, **kw: _Lease())
+    monkeypatch.setattr(live.workspace, "mark_seeded", lambda db, lease, **kw: None)
+    monkeypatch.setattr(live.workspace, "clear_seed_mark", lambda db, lease: None)
+    monkeypatch.setattr(live.workspace, "touch", lambda db, lease: None)
+    monkeypatch.setattr(live.workspace, "holds_seeded_world", lambda *a, **kw: preserved)
+
+
+def test_a_reusable_world_is_not_reseeded(client, attempt, live_service, monkeypatch):
+    """The whole point. An annotator who closed the pane and came back must find
+    the world they were building, not the task seed."""
+    _isolated(monkeypatch, preserved=True)
+    r = client.post(f"/api/sessions/{attempt}/live")
+    assert r.status_code == 200, r.text
+    assert r.json()["world"] == "preserved"
+    assert live_service.reset_calls == [], "reusing a world must not reset it"
+
+
+def test_a_world_that_cannot_be_vouched_for_is_reseeded(client, attempt, live_service, monkeypatch):
+    """Fail closed: the cost of a needless reseed is a few seconds, the cost of a
+    wrong reuse is an annotator recording against somebody else's world."""
+    _isolated(monkeypatch, preserved=False)
+    r = client.post(f"/api/sessions/{attempt}/live")
+    assert r.status_code == 200, r.text
+    assert r.json()["world"] == "seeded"
+    assert len(live_service.reset_calls) == 1
+
+
+def test_the_shared_gym_is_always_reseeded(client, attempt, live_service, monkeypatch):
+    """Isolation off means the world may be someone else's, no matter what any
+    marker claims. This is the M46/M15 guard and it must survive the feature."""
+    monkeypatch.setattr(live.workspace, "holds_seeded_world", lambda *a, **kw: True)
+    r = client.post(f"/api/sessions/{attempt}/live")
+    assert r.status_code == 200, r.text
+    assert r.json()["world"] == "seeded"
+    assert len(live_service.reset_calls) == 1
+
+
+def test_reset_world_rebuilds_from_the_seed(client, attempt, live_service, monkeypatch):
+    _isolated(monkeypatch, preserved=True)
+    assert client.post(f"/api/sessions/{attempt}/live").json()["world"] == "preserved"
+    assert live_service.reset_calls == []
+
+    r = client.post(f"/api/sessions/{attempt}/live/reset-world")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"reset": True, "world": "seeded"}
+    assert len(live_service.reset_calls) == 1, "the escape hatch must actually reset"
+
+
+def test_reset_world_is_audited(client, attempt, db_session, live_service, monkeypatch):
+    _isolated(monkeypatch, preserved=True)
+    client.post(f"/api/sessions/{attempt}/live")
+    client.post(f"/api/sessions/{attempt}/live/reset-world")
+    actions = [a.action for a in db_session.scalars(select(models.AuditLog))]
+    assert "live.reset_world" in actions, "discarding an annotator's work must leave a trace"
+
+
+def test_reset_world_belongs_to_its_owner(client_for, attempt, live_service, monkeypatch):
+    """404, not 403 — ownership is never disclosed. Discarding somebody else's
+    hour of work is exactly the kind of thing an ownership check is for."""
+    _isolated(monkeypatch, preserved=True)
+    stranger = client_for("stranger@test")
+    assert stranger.post(f"/api/sessions/{attempt}/live/reset-world").status_code == 404
+    assert live_service.reset_calls == []
+
+
+def test_a_failed_reset_leaves_the_world_alone(client, attempt, live_service, monkeypatch):
+    _isolated(monkeypatch, preserved=True)
+    client.post(f"/api/sessions/{attempt}/live")
+    monkeypatch.setattr(GymEndpoint, "reset", lambda self, task_id, seed=0: None)
+    r = client.post(f"/api/sessions/{attempt}/live/reset-world")
+    assert r.status_code == 409
+    assert "left as it was" in r.json()["detail"]
+
+
+def test_reattaching_reports_the_world_as_preserved(client, attempt, live_service, monkeypatch):
+    """Re-attach resets nothing, so it must not report "seeded" — an annotator an
+    hour into a world would read that as their work having just been discarded."""
+    _isolated(monkeypatch, preserved=False)
+    first = client.post(f"/api/sessions/{attempt}/live").json()
+    assert first["world"] == "seeded"
+    again = client.post(f"/api/sessions/{attempt}/live").json()
+    assert again["sessionId"] == first["sessionId"], "this must be a re-attach, not a new browser"
+    assert again["world"] == "preserved"
+    assert len(live_service.reset_calls) == 1, "re-attaching must never reseed"

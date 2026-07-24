@@ -23,6 +23,15 @@ export interface LiveSession {
   /** Where the server opened the browser — the attempt's own workspace
    *  endpoint, so an isolated workspace is honoured. */
   url: string;
+  /** Whether this attempt got its OWN gym, or fell back to the shared one. */
+  isolated?: boolean;
+  /** Where the world in that gym came from on this open:
+   *  - "preserved" — the work already in there was kept
+   *  - "seeded"    — reset to the task's seed state
+   *  - "shared"    — not a gym task, or the shared gym
+   *  Surfaced because an annotator cannot otherwise tell whether the cart they
+   *  spent an hour filling is still there except by going to look for it. */
+  world?: "preserved" | "seeded" | "shared";
 }
 
 export type LiveFailureKind =
@@ -106,6 +115,22 @@ export function attachLiveBrowser(attemptId: string): Promise<LiveResult<LiveSes
 export async function currentLiveBrowser(attemptId: string): Promise<LiveResult<LiveSession | null>> {
   const res = await request<{ session: LiveSession | null }>(`${at(attemptId)}/live`);
   return res.ok ? { ok: true, value: res.value.session ?? null } : res;
+}
+
+/**
+ * Throw this attempt's world away and rebuild it from the task seed.
+ *
+ * The deliberate counterpart to preserving a world across a reopen. Closing and
+ * reopening the pane used to start an annotator over — implicitly, and every
+ * time. Now that reopening keeps their work, this is the way out for someone who
+ * has driven their world into a corner.
+ */
+export function resetLiveWorld(attemptId: string): Promise<LiveResult<{ reset: boolean; world: string }>> {
+  return request<{ reset: boolean; world: string }>(`${at(attemptId)}/live/reset-world`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
 }
 
 /**

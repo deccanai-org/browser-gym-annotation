@@ -457,6 +457,18 @@ class WorkspaceLease(Base):
     external_ref: Mapped[str] = mapped_column(Text, default="")  # pid / pod name
     status: Mapped[str] = mapped_column(String(16), default="provisioning", index=True)  # provisioning|ready|expired|terminated
     environment_image_digest: Mapped[str] = mapped_column(String(96), default="")
+    # What this workspace's gym was last SEEDED with, written only after a reset
+    # actually succeeded. A workspace outlives the live browser attached to it, so
+    # reopening a pane must not re-seed a world the annotator has been building by
+    # hand — but "skip the reset" is only safe against a durable record of what is
+    # in there. Process memory cannot answer it: a backend restart is precisely one
+    # of the events that drops the attachment while the container keeps running.
+    #
+    # Nullable, and `seeded_seed` is a nullable Integer rather than defaulting to 0,
+    # so "seeded with seed 0" stays distinguishable from "never seeded".
+    seeded_task_key: Mapped[str | None] = mapped_column(Text, nullable=True)   # the registry key we POSTed
+    seeded_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)    # the id the GYM echoed back
+    seeded_seed: Mapped[int | None] = mapped_column(nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
