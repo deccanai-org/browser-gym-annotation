@@ -192,7 +192,11 @@ def test_opening_returns_a_ticket_the_service_will_honour_for_this_annotator(cli
     assert live_service.check_ticket(body["sessionId"], body["ticket"]) == OWNER, \
         "the live service must resolve the ticket to the signed-in annotator"
     assert body["viewport"] == {"width": 1280, "height": 800}
-    assert set(body) == {"sessionId", "ticket", "viewport", "url"}
+    assert set(body) == {"sessionId", "ticket", "viewport", "url", "isolated"}
+    # False, not absent: isolation is off in tests, and the annotator is entitled
+    # to know they are in the SHARED world rather than having to infer it from a
+    # missing key.
+    assert body["isolated"] is False
 
 
 def test_the_browser_is_opened_against_the_running_live_service(client, attempt, live_service):

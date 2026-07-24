@@ -20,13 +20,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import models
 from app.config import settings
 from app.gym_client import GymEndpoint
 from app.workspace.provider import (
+    DockerRuntimeProvider,
     LocalProcessRuntimeProvider,
     WorkspaceHandle,
     WorkspaceRuntimeProvider,
@@ -40,9 +41,40 @@ AGENT_BRANCH = "agent_branch"
 _ACTIVE = ("provisioning", "ready")
 
 
+class WorkspaceCapacityError(RuntimeError):
+    """This annotator already holds the maximum number of workspaces.
+
+    Distinct from a provisioning failure on purpose: a failure means fall back to
+    the shared gym, whereas hitting the cap means the caller is being told to let
+    something go first. Collapsing the two would silently hand the shared world to
+    the person the cap was protecting everyone else from.
+    """
+
+
+def _live_count(db: Session, annotator_id: UUID) -> int:
+    """Workspaces this annotator currently holds, across all attempts."""
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(models.WorkspaceLease)
+            .where(
+                models.WorkspaceLease.annotator_id == annotator_id,
+                models.WorkspaceLease.status.in_(_ACTIVE),
+            )
+        )
+        or 0
+    )
+
+
 def _provider() -> WorkspaceRuntimeProvider:
-    # Only one implementation today; the Kubernetes provider slots in here without
-    # any caller learning about it.
+    """The runtime this deployment can actually use.
+
+    `docker` is what a CONTAINERISED backend needs: the process provider spawns
+    uvicorn from a gym checkout, and the backend image holds neither the gym
+    source nor Playwright. The Kubernetes provider slots in here the same way.
+    """
+    if settings.workspace_runtime == "docker":
+        return DockerRuntimeProvider()
     return LocalProcessRuntimeProvider()
 
 
@@ -63,7 +95,7 @@ def isolation_available() -> bool:
     """Isolation requires both the feature flag AND a usable gym checkout. If it
     is unavailable we fall back to the shared gym — but the caller must know, so
     two annotators are never silently placed in the same world."""
-    return bool(settings.workspace_isolation) and LocalProcessRuntimeProvider().available
+    return bool(settings.workspace_isolation) and _provider().available
 
 
 def endpoint_for(db: Session, attempt_id: UUID | None) -> GymEndpoint:
@@ -112,6 +144,20 @@ def acquire(
             return existing
         # Dead or half-provisioned — reclaim before replacing it.
         _terminate_row(db, existing, reason="unhealthy")
+
+    # Capacity. Each workspace is a whole gym runtime — under `docker`, a real
+    # container with a real memory footprint — so an unbounded acquire loop is a
+    # way to fill the host, not merely a policy violation. Reap first: the usual
+    # reason someone is at the cap is abandoned work, and reclaiming that is the
+    # correct answer rather than refusing a live annotator.
+    if annotator_id is not None and settings.workspace_max_per_annotator > 0:
+        if _live_count(db, annotator_id) >= settings.workspace_max_per_annotator:
+            reap_expired(db)
+        if _live_count(db, annotator_id) >= settings.workspace_max_per_annotator:
+            raise WorkspaceCapacityError(
+                f"already holding {settings.workspace_max_per_annotator} workspaces — "
+                "close one of your open attempts before starting another"
+            )
 
     lease = models.WorkspaceLease(
         attempt_id=attempt_id,

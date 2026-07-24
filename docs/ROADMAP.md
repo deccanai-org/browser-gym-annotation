@@ -137,11 +137,30 @@ Move to GitHub, split the annotator into separate front-end and back-end repos. 
 boundary is already clean — the frontend talks to the backend only over HTTP, with
 no shared build — so this is mechanical.
 
-### 2.2 Turn on workspace isolation
+### 2.2 Turn on workspace isolation — ✅ **on**
 
-Implemented and tested, off by default. The gym holds **one global session per
-process**, so two annotators driving live browsers against a shared gym corrupt each
-other's world. This must be on before more than one person works live simultaneously.
+The gym holds **one global session per process**, so two annotators driving live
+browsers against a shared gym corrupt each other's world. Each attempt now leases
+its own gym **container**, provisioned on live-browser open and released at
+submission. Verified against the running stack: two annotators, two attempts, two
+containers on their own ports — and resetting one attempt's gym left the other's
+world byte-identical.
+
+The process runtime cannot serve a containerised backend (the backend image holds
+neither the gym source nor Playwright), so `WORKSPACE_RUNTIME=docker` is what is
+actually in use. **That requires mounting the Docker socket into the backend, which
+is a genuine privilege escalation** — a container that can reach the daemon can
+control the host. Acceptable on a single-host dev box; before this runs on GCP it
+needs replacing with the Kubernetes provider (the `WorkspaceRuntimeProvider`
+interface already has the seam) or a socket proxy restricted to container create /
+inspect / rm.
+
+Two residuals, neither blocking:
+
+| Residual | Effect |
+|---|---|
+| `open_live_session` reseeds the gym on every fresh open | The container survives a pane close, but reopening still returns the world to the task seed. Preserving hand-driven state across a reopen needs the recorded prefix replayed back in. Bounded: finalize replays from scratch and fails closed, so nothing wrong can *ship* — it costs the annotator repeated work, it does not corrupt data |
+| Agent-branch leases pass no `annotator_id` | They bypass the per-annotator cap. Bounded by their own concurrency and released in a `finally`, so this leaks only under repeated crash-during-run |
 
 ### 2.3 Multi-annotator operations
 

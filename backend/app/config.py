@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     # gym process and `gym_url` becomes a fallback only. Off until gym_repo_path
     # is configured and verified, so the default stays the known-good behaviour.
     workspace_isolation: bool = False
-    workspace_runtime: str = "local_process"   # local_process | kubernetes
+    workspace_runtime: str = "local_process"   # local_process | docker | kubernetes
+    # The image a `docker` workspace runs. Build it from the gym repo:
+    #   docker build -t browser-gym:local .
+    gym_image: str = "browser-gym:local"
+    # How the BACKEND reaches a port published on the host. Inside a container
+    # localhost is the container itself, so a published workspace port is only
+    # reachable through the gateway.
+    docker_host_gateway: str = "host.docker.internal"
     workspace_idle_ttl_minutes: int = 75       # INACTIVITY-based; extended by human control or a running job
     workspace_max_per_annotator: int = 2       # a human workspace + one agent branch worker
     gym_image_digest: str = ""                 # environment version stamped onto checkpoints/versions

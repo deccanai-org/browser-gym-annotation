@@ -8,6 +8,7 @@ branch the annotator already moved past.
 
 from __future__ import annotations
 
+import contextlib
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -313,6 +314,27 @@ def finalize_attempt(
     ))
     s.status = "submitted"
     db.commit()
+
+    # The attempt is over, so give its gym back. This — not closing the live
+    # browser — is the right release point. Closing a pane is not a statement
+    # that the attempt is done: an annotator flips to the replay view and back
+    # constantly, and tearing the workspace down each time would mean a container
+    # boot on every toggle and, under the per-annotator cap, churn against a
+    # limit meant to bound genuinely concurrent work. Submission is the one
+    # moment the world is provably finished with.
+    #
+    # Note what this does NOT yet buy: open_live_session reseeds the gym on every
+    # fresh open, so reopening a pane still returns the world to the task seed
+    # even though the container survived. Preserving hand-driven world state
+    # across a reopen needs the recorded prefix replayed back in, which is not
+    # wired up — see ROADMAP 2.3.
+    #
+    # Best-effort: the sample has shipped, and a leaked container is the reaper's
+    # problem, not a reason to fail a successful finalize.
+    lease = workspace.active_lease(db, s.id)
+    if lease is not None:
+        with contextlib.suppress(Exception):
+            workspace.release(db, lease)
     return out
 
 

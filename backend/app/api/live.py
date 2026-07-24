@@ -22,6 +22,7 @@ import urllib.parse
 
 import base64
 import contextlib
+import logging
 import hashlib
 import hmac
 import json
@@ -68,6 +69,8 @@ def _browser_visible(base_url: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, netloc, path, parsed.query, ""))
 
 
+log = logging.getLogger("annotator.live")
+
 router = APIRouter(prefix="/api", tags=["live"])
 
 # Resolved EXACTLY as live_browser/service.py resolves it, fallback chain
@@ -105,6 +108,9 @@ class _Attached:
     owner: str
     url: str
     viewport: dict
+    # Whether this attempt got its OWN gym. Surfaced so an annotator can tell a
+    # private world from the shared one rather than finding out by collision.
+    isolated: bool = False
 
 
 # Process memory rather than a WorkspaceLease row, deliberately. A lease describes
@@ -121,9 +127,24 @@ class _Attached:
 # under us — is caught by asking it about the session before every re-attach and
 # forgetting the entry when it reports it gone.
 _ATTACHED: dict[str, _Attached] = {}
-# Opening is slow (a real Chromium launch). Two concurrent opens for one attempt
-# would leave a second browser running that nobody holds the id for.
+# Opening is slow (a real Chromium launch, and under isolation a gym container
+# boot on top of it). Two concurrent opens for ONE attempt would leave a second
+# browser running that nobody holds the id for — so opens are serialised, but
+# PER ATTEMPT rather than globally.
+#
+# The distinction is not academic once isolation is on. A global lock would make
+# every annotator's open queue behind whatever container is currently booting,
+# which turns the feature that exists to let people work simultaneously into the
+# thing that stops them. Nothing about attempt A's open is a hazard for attempt
+# B; the only true invariant is one open at a time per attempt.
+_ATTACH_LOCKS: dict[str, threading.Lock] = {}
+# Guards the lock TABLE only — held for a dict lookup, never across slow work.
 _LOCK = threading.Lock()
+
+
+def _attempt_lock(attempt_id: str) -> threading.Lock:
+    with _LOCK:
+        return _ATTACH_LOCKS.setdefault(attempt_id, threading.Lock())
 
 
 # --------------------------------------------------------------------------- the service
@@ -250,6 +271,7 @@ def _reattach(entry: _Attached) -> dict | None:
         "ticket": ticket,
         "viewport": info.get("viewport") or entry.viewport,
         "url": entry.url,
+        "isolated": entry.isolated,
     }
 
 
@@ -267,13 +289,33 @@ def open_live_session(
     belongs to somebody else.
     """
     s = _owned_session(db, session_id, current)
-    with _LOCK:
+    with _attempt_lock(str(s.id)):
         entry = _ATTACHED.get(str(s.id))
         payload = _reattach(entry) if entry is not None else None
         if payload is not None:
             return payload
 
         _ATTACHED.pop(str(s.id), None)
+
+        # ACQUIRE this attempt's own gym before resolving the endpoint.
+        # `endpoint_for` only READS an existing lease — it never provisions — so
+        # without this every annotator silently shares one gym, which is exactly
+        # the corruption isolation exists to prevent. Falling back is deliberate
+        # (a docker hiccup must not stop someone working) but must be VISIBLE, so
+        # the response says which world they got.
+        isolated = False
+        try:
+            lease = workspace.acquire(db, s.id, annotator_id=current.id)
+            isolated = lease is not None and lease.status == "ready"
+        except workspace.WorkspaceCapacityError as exc:
+            # NOT a fallback case. The cap exists to stop one annotator filling
+            # the host; quietly handing them the shared gym instead would put
+            # them in someone else's world, which is the exact failure isolation
+            # is here to prevent. Tell them to close something.
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — provisioning is best-effort
+            log.warning("workspace provisioning failed for %s (%s) — using the shared gym", s.id, exc)
+
         endpoint = workspace.endpoint_for(db, s.id)
         task = db.get(models.Task, s.task_id)
 
@@ -306,6 +348,7 @@ def open_live_session(
             owner=current.email,
             url=start_url,
             viewport=opened.get("viewport") or _DEFAULT_VIEWPORT,
+            isolated=isolated,
         )
         _ATTACHED[str(s.id)] = entry
 
@@ -319,6 +362,7 @@ def open_live_session(
         "ticket": opened["ticket"],
         "viewport": entry.viewport,
         "url": entry.url,
+        "isolated": entry.isolated,
     }
 
 
@@ -338,7 +382,7 @@ def live_session(
         return {"session": None}
     payload = _reattach(entry)
     if payload is None:
-        with _LOCK:
+        with _attempt_lock(str(s.id)):
             _ATTACHED.pop(str(s.id), None)
         return {"session": None}
     return {"session": payload}
@@ -351,7 +395,7 @@ def close_live_session(
     """Give the browser back. Closing twice is not an error — a client that has
     already been disconnected got what it asked for."""
     s = _owned_session(db, session_id, current)
-    with _LOCK:
+    with _attempt_lock(str(s.id)):
         entry = _ATTACHED.pop(str(s.id), None)
     if entry is None:
         return {"closed": True}

@@ -21,6 +21,13 @@ services:
 
   backend:
     build: ../backend
+    volumes:
+      # Lets the backend start one gym container per attempt (workspace
+      # isolation). This is a real privilege — a container that can reach the
+      # daemon can control the host — which is why isolation is opt-in per
+      # runtime rather than assumed, and why production should use the
+      # Kubernetes provider instead of a mounted socket.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-annotator}:${POSTGRES_PASSWORD:-annotator}@postgres:5432/${POSTGRES_DB:-browser_gym_annotator}
       CORS_ORIGINS: '["http://localhost:8080"]'
@@ -39,6 +46,13 @@ services:
       # …and the browser is on the host, so it must be told the gym's HOST-side
       # name. host.docker.internal is meaningful only inside this container.
       GYM_HOST_FOR_BROWSER: ${GYM_HOST_FOR_BROWSER:-localhost}
+      # Workspace isolation. The gym holds ONE global session per process, so two
+      # annotators sharing one gym overwrite each other's world. Each attempt now
+      # leases its own gym CONTAINER; `docker` is the only runtime that works from
+      # a containerised backend.
+      WORKSPACE_ISOLATION: ${WORKSPACE_ISOLATION:-1}
+      WORKSPACE_RUNTIME: ${WORKSPACE_RUNTIME:-docker}
+      GYM_IMAGE: ${GYM_IMAGE:-browser-gym:local}
       GYM_HARNESS_TOKEN: ${GYM_HARNESS_TOKEN:-}
       # Rerun cap (§3.9): three agent runs per ATTEMPT, then the annotator
       # finishes by hand — the path tests/test_e2e_correction_loop.py walks end to
