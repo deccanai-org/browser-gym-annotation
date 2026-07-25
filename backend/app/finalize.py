@@ -25,7 +25,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import backfill, checkpoints, models, replay, versions
+from app import checkpoints, models, replay, versions
 
 
 class NotApproved(RuntimeError):
@@ -118,18 +118,15 @@ def finalize(
         # from the task's own starting conditions.
         if gym.reset(task_external_id, attempt.seed) is None:
             raise replay.ReplayRejected(0, "could not reset the task for a clean replay")
-        # Whether this task schedules async events is read off the gym's own seed
-        # world, right after the reset that produced it — the same decision the
-        # backfill makes, from the same source, so a trajectory reconstructed with
-        # a tick is replayed with one.
-        scheduled = backfill.scheduled_events(gym.world() if hasattr(gym, "world") else None) > 0
         result = replay.replay(
             actions, executor,
             expected_hashes=[a["expectedHash"] for a in actions],
             # The clean replay must reproduce the RECORDING's protocol, clock and
             # all. Without the tick the replayed world trails by one step and a
-            # correct trajectory is rejected as diverged.
-            clock=replay.advance_clock(gym, scheduled=scheduled),
+            # correct trajectory is rejected as diverged. The scheduled-tick
+            # decision is read off the gym's own seed world (the shared helper), so
+            # a trajectory reconstructed with a tick is replayed with one.
+            clock=replay.scheduled_clock(gym),
             strict=True,
         )
 

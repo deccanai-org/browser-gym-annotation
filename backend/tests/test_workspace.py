@@ -591,3 +591,28 @@ def test_clearing_the_mark_forces_a_reseed(iso, db_session, attempt):
 
 def test_clearing_a_missing_lease_is_not_an_error(db_session):
     manager.clear_seed_mark(db_session, None)
+
+
+# --------------------------------------------------------------------------- version-aware reuse
+def test_switching_versions_forbids_reuse(iso, db_session, attempt):
+    """Two versions of an attempt share a (task, seed). Reusing v1's world for v2
+    would drive v2's branch against v1's world — the exact two-versions-one-world
+    hazard the fork rebuild exists to remove."""
+    from uuid import uuid4
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    v1, v2 = uuid4(), uuid4()
+    manager.mark_seeded(db_session, lease, task_key="M37/x", seed=0,
+                        reset_result={"task_id": "M37/x"}, version_id=v1)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/x", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/x", seed=0, version_id=v1) is True
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/x", seed=0, version_id=v2) is False
+
+
+def test_a_plain_seed_carries_no_version(iso, db_session, attempt):
+    """An unforked attempt seeds with version_id=None and must still be reusable
+    for the same None on reopen."""
+    lease = manager.acquire(db_session, attempt.id, annotator_id=attempt.annotator_id)
+    manager.mark_seeded(db_session, lease, task_key="M37/x", seed=0,
+                        reset_result={"task_id": "M37/x"}, version_id=None)
+    gym = FakeGym(base_url=lease.endpoint, task_id="M37/x", seed=0)
+    assert manager.holds_seeded_world(lease, gym, task_key="M37/x", seed=0, version_id=None) is True

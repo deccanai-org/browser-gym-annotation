@@ -44,7 +44,7 @@ import { useAuth } from "../auth/AuthContext";
 import { ProfilePanel } from "../auth/ProfilePanel";
 import type { Annotator } from "../auth/authApi";
 import { LiveBrowserPane } from "../live-gym/LiveBrowserPane";
-import { attachLiveBrowser, closeLiveBrowser, currentLiveBrowser, resetLiveWorld, type LiveSession } from "../live-gym/liveSessionApi";
+import { attachLiveBrowser, closeLiveBrowser, currentLiveBrowser, resetLiveWorld, type LiveSession, type RestoreProgress } from "../live-gym/liveSessionApi";
 import { useVersionGraph, VersionGraph } from "../versions/VersionGraph";
 import { useVersionSteps, VersionSteps } from "../versions/VersionSteps";
 import { Header } from "./components/Header";
@@ -110,9 +110,10 @@ function PaneToggle({ view, opening, onReplay, onLive }: { view: PaneView; openi
  * you started over. Taking that away without putting something in its place
  * would strand anyone who has driven their world into a corner.
  */
-function WorldBadge({ world, isolated, onReset, resetting }: {
+export function WorldBadge({ world, isolated, restore, onReset, resetting }: {
   world?: "preserved" | "seeded" | "shared";
   isolated?: boolean;
+  restore?: RestoreProgress | null;
   onReset: () => void;
   resetting: boolean;
 }) {
@@ -123,6 +124,17 @@ function WorldBadge({ world, isolated, onReset, resetting }: {
     borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9,
     fontSize: "0.75rem", fontWeight: weight.semibold, whiteSpace: "nowrap" as const,
   };
+  // A fork's world was rebuilt to the fork point. Say how far — a partial rebuild
+  // is drivable but the annotator has to know they are at step `done`, not `total`,
+  // or they will build the correction on top of a world that is short of where they
+  // think it is.
+  const rebuilt = restore
+    ? restore.partial
+      ? { label: `⚠ Rebuilt ${restore.done}/${restore.total}`, color: t.deltaAmber,
+          title: `The branch was rebuilt to step ${restore.done} of ${restore.total}. ${restore.reason} You can still drive from here, but the world is short of the full prefix.` }
+      : { label: `↺ Rebuilt to step ${restore.total}`, color: t.primary6,
+          title: `The ${restore.total} step(s) before this fork were replayed for you — the world is at the fork point, ready to correct.` }
+    : null;
   return (
     <span style={{ display: "inline-flex", gap: 6 }}>
       <span
@@ -137,9 +149,14 @@ function WorldBadge({ world, isolated, onReset, resetting }: {
       >
         {preserved ? "● World kept" : "○ Fresh seed"}
       </span>
+      {rebuilt && (
+        <span style={{ ...pill, color: rebuilt.color }} title={rebuilt.title}>
+          {rebuilt.label}
+        </span>
+      )}
       <span
         onClick={resetting ? undefined : onReset}
-        title="Throw this world away and rebuild it from the task's seed state"
+        title="Throw this world away and rebuild it to where this branch begins"
         style={{ ...pill, color: t.n1, cursor: resetting ? "default" : "pointer" }}
       >
         {resetting ? "Resetting…" : "⟲ Reset world"}
@@ -718,7 +735,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   const resetWorld = async () => {
     if (!sessionId || resettingWorld) return;
     // Destructive and not undoable — the whole point is that it discards work.
-    if (!window.confirm("Throw away this world and rebuild it from the task's seed state?")) return;
+    if (!window.confirm("Discard your changes to this world and rebuild it to where this branch begins?")) return;
     setResettingWorld(true);
     const res = await resetLiveWorld(sessionId);
     setResettingWorld(false);
@@ -726,7 +743,12 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
       setLiveNotice(res.message);
       return;
     }
-    setLiveSession((prev) => (prev ? { ...prev, world: "seeded" } : prev));
+    // Take the server's own account of the rebuilt world rather than restating it.
+    // On a fork the reset replays the prefix again, so `restore` describes how far
+    // the world was taken — dropping it would leave the badge showing stale progress.
+    setLiveSession((prev) =>
+      prev ? { ...prev, world: res.value.world as LiveSession["world"], restore: res.value.restore } : prev,
+    );
   };
 
   const showReplay = () => {
@@ -861,6 +883,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
               <WorldBadge
                 world={liveSession?.world}
                 isolated={liveSession?.isolated}
+                restore={liveSession?.restore}
                 onReset={() => void resetWorld()}
                 resetting={resettingWorld}
               />

@@ -88,6 +88,22 @@ def advance_clock(gym, *, scheduled: bool = False) -> "Clock | None":
     return _advance
 
 
+def scheduled_clock(gym) -> "Clock | None":
+    """`advance_clock` with the scheduled-tick decision read from the gym's own
+    seed world — the shared choice a fresh-reset replay makes.
+
+    Whether to tick for async events is decided from the world the reset produced,
+    not argued about per caller. Both the finalize replay and the fork-prefix
+    rebuild reset first and then replay, so both make exactly this decision; keeping
+    it in one place stops the subtle write-path/read-path split (an unconditional
+    tick is a measured regression) from being re-derived and drifting.
+    """
+    from app import backfill  # local: backfill imports models/gym_client, not replay
+
+    world = gym.world() if hasattr(gym, "world") else None
+    return advance_clock(gym, scheduled=backfill.scheduled_events(world) > 0)
+
+
 def replay(
     actions: list[dict],
     executor: Executor,

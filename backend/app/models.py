@@ -469,6 +469,19 @@ class WorkspaceLease(Base):
     seeded_task_key: Mapped[str | None] = mapped_column(Text, nullable=True)   # the registry key we POSTed
     seeded_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)    # the id the GYM echoed back
     seeded_seed: Mapped[int | None] = mapped_column(nullable=True)
+    # Which VERSION's world this workspace holds. A fork's world is the fork point
+    # of one specific version, and two versions of the same attempt share a
+    # (task, seed) — so without this, switching versions and reopening would reuse
+    # the previous version's world under a marker that only checks (task, seed).
+    # NULL = a plain seed with no branch prefix (an unforked attempt).
+    seeded_version_id: Mapped[UUID | None] = _fk("trajectory_version.id", nullable=True, ondelete="SET NULL")
+    # How far the branch prefix was replayed into this workspace's world on the
+    # last seed. NULL total = no rebuild was attempted (an unforked attempt).
+    # Kept here, not in process memory, because the claim is about what is in THAT
+    # gym — it must survive a backend restart and die with the workspace.
+    restore_done: Mapped[int | None] = mapped_column(nullable=True)
+    restore_total: Mapped[int | None] = mapped_column(nullable=True)
+    restore_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())

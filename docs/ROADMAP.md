@@ -174,12 +174,30 @@ Verified end to end against the running stack: a cart line removed by hand
 survived a close/reopen; an email opened through the live UI survived a full
 backend restart with a brand-new browser; `Reset world` restored the seed.
 
-Two residuals, neither blocking:
+**Prefix restore on fork open** then closed the other half. Forking before step 9
+to correct it used to drop the annotator on the task seed — they re-performed the
+first eight steps by hand before they could begin. On a fork, the branch's own
+flattened prefix is now replayed into the freshly seeded world (`app/restore.py`),
+so the pane opens at the fork point. Best-effort by design — finalize (clean reset,
+`strict=True`) and commit (restores the fork checkpoint first) are the strict gates,
+so a partial rebuild costs an annotator context, never a wrong shipped sample — and
+the pane reports how far it got (`↺ Rebuilt to step k`, or `⚠ Rebuilt k/n`). The
+seed marker gained `seeded_version_id` (migration `c0d1e2f3a4b5`) so switching
+versions forces a rebuild instead of reusing the previous branch's world. Verified
+against the running stack: a fork whose prefix adds a product opened with that
+product already in the cart; reopening preserved it without double-applying.
+
+One residual, not blocking:
 
 | Residual | Effect |
 |---|---|
-| A fresh open after a fork does not replay the recorded prefix | The world is the task seed, not the fork point, so the first manual open of a fork still requires performing the prefix by hand. Bounded: finalize replays from scratch and fails closed, so nothing wrong can *ship*. This is a separate feature ("prefix restore on open"), not a residual of preservation |
 | Agent-branch leases pass no `annotator_id` | They bypass the per-annotator cap. Bounded by their own concurrency and released in a `finally`, so this leaks only under repeated crash-during-run |
+
+Deferred deliberately (a bigger design than the ask): a durable per-attempt
+world-provenance state machine that would let `commit` **refuse** on a partial or
+stale world rather than rely on its own restore-and-replay to fail closed, plus
+moving the rebuild to a background job with a cancel. Worth doing when more than one
+annotator works forks concurrently; not needed for correctness today.
 
 ### 2.3 Multi-annotator operations
 

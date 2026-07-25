@@ -192,7 +192,7 @@ def test_opening_returns_a_ticket_the_service_will_honour_for_this_annotator(cli
     assert live_service.check_ticket(body["sessionId"], body["ticket"]) == OWNER, \
         "the live service must resolve the ticket to the signed-in annotator"
     assert body["viewport"] == {"width": 1280, "height": 800}
-    assert set(body) == {"sessionId", "ticket", "viewport", "url", "isolated", "world"}
+    assert set(body) == {"sessionId", "ticket", "viewport", "url", "isolated", "world", "restore"}
     # False, not absent: isolation is off in tests, and the annotator is entitled
     # to know they are in the SHARED world rather than having to infer it from a
     # missing key.
@@ -200,6 +200,8 @@ def test_opening_returns_a_ticket_the_service_will_honour_for_this_annotator(cli
     # Isolation off => the world was reseeded, and the response says so. A person
     # must be able to tell whether the cart they left is still there.
     assert body["world"] == "seeded"
+    # An unforked attempt has no prefix to rebuild — say nothing rather than "0/0".
+    assert body["restore"] is None
 
 
 def test_the_browser_is_opened_against_the_running_live_service(client, attempt, live_service):
@@ -467,6 +469,8 @@ def _isolated(monkeypatch, *, preserved: bool):
     """Pretend this attempt owns a healthy workspace whose world may be reused."""
     class _Lease:
         id, status, endpoint = uuid4(), "ready", "http://127.0.0.1:9931"
+        seeded_version_id = None
+        restore_done = restore_total = restore_reason = None
     monkeypatch.setattr(live.workspace, "acquire", lambda db, aid, **kw: _Lease())
     monkeypatch.setattr(live.workspace, "active_lease", lambda db, aid, **kw: _Lease())
     monkeypatch.setattr(live.workspace, "mark_seeded", lambda db, lease, **kw: None)
@@ -512,7 +516,7 @@ def test_reset_world_rebuilds_from_the_seed(client, attempt, live_service, monke
 
     r = client.post(f"/api/sessions/{attempt}/live/reset-world")
     assert r.status_code == 200, r.text
-    assert r.json() == {"reset": True, "world": "seeded"}
+    assert r.json() == {"reset": True, "world": "seeded", "restore": None}
     assert len(live_service.reset_calls) == 1, "the escape hatch must actually reset"
 
 

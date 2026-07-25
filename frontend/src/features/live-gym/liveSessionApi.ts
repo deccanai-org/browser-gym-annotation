@@ -32,6 +32,18 @@ export interface LiveSession {
    *  Surfaced because an annotator cannot otherwise tell whether the cart they
    *  spent an hour filling is still there except by going to look for it. */
   world?: "preserved" | "seeded" | "shared";
+  /** For a FORK: how far the branch's prefix was rebuilt into the world, so the
+   *  annotator does not have to re-perform it by hand. null when there was no
+   *  prefix to rebuild (an unforked attempt). `partial` means the rebuild stopped
+   *  short — the world is at `done` of `total`, and `reason` says why. */
+  restore?: RestoreProgress | null;
+}
+
+export interface RestoreProgress {
+  done: number;
+  total: number;
+  partial: boolean;
+  reason: string;
 }
 
 export type LiveFailureKind =
@@ -125,12 +137,17 @@ export async function currentLiveBrowser(attemptId: string): Promise<LiveResult<
  * time. Now that reopening keeps their work, this is the way out for someone who
  * has driven their world into a corner.
  */
-export function resetLiveWorld(attemptId: string): Promise<LiveResult<{ reset: boolean; world: string }>> {
-  return request<{ reset: boolean; world: string }>(`${at(attemptId)}/live/reset-world`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
+export function resetLiveWorld(
+  attemptId: string,
+): Promise<LiveResult<{ reset: boolean; world: LiveSession["world"]; restore: RestoreProgress | null }>> {
+  return request<{ reset: boolean; world: LiveSession["world"]; restore: RestoreProgress | null }>(
+    `${at(attemptId)}/live/reset-world`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
+  );
 }
 
 /**

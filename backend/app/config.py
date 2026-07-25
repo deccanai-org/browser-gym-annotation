@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # browser runs on the host, where that name does not resolve. Empty means the
     # two share a namespace, which is right on a single-host dev box.
     gym_host_for_browser: str = ""
+    # How many prefix actions a live open will replay to rebuild a fork's world.
+    # Capped because it runs inside the open call: an annotator waiting on a pane
+    # is waiting on this, and a pathological trajectory should degrade to "rebuilt
+    # 60 of 140" rather than to a minute of nothing. 0 disables the rebuild
+    # entirely, which is the operator kill switch.
+    live_restore_max_steps: int = 60
+
     # Rerun cap. 0 = OFF, which is the only safe default until manual capture has
     # passed E2E — capping reruns before an annotator can finish a task by hand
     # would strand them with no way forward.

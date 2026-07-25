@@ -38,7 +38,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import models, workspace
+from app import gym_client, models, restore, versions, workspace
 from app.api.sessions import _owned_session
 from app.auth import current_annotator
 from app.config import settings
@@ -117,6 +117,10 @@ class _Attached:
     # shared gym). Surfaced because a person cannot otherwise tell whether their
     # cart survived except by looking for it.
     world: str = "shared"
+    # How far a fork's prefix was rebuilt, or None when there was nothing to
+    # rebuild. None and "rebuilt 0 of 9" are different facts and must not render
+    # the same.
+    restore: dict | None = None
 
 
 # Process memory rather than a WorkspaceLease row, deliberately. A lease describes
@@ -285,7 +289,28 @@ def _reattach(entry: _Attached) -> dict | None:
         # would tell someone who has been working for an hour that their world was
         # just reset, and the plausible reaction to that is to redo the work.
         "world": "preserved" if entry.world != "shared" else "shared",
+        "restore": entry.restore,
     }
+
+
+def _rebuild_prefix(db, s, *, lease, endpoint, session_id: str, ticket: str) -> "restore.RestoreReport":
+    """Replay this attempt's branch prefix into a freshly seeded world and record
+    how far it got. A no-op that returns an empty report when the attempt is not a
+    fork. The executor is the pane's OWN browser, so the replay leaves the page
+    showing the rebuilt state rather than the start URL.
+
+    Both the open and the reset-world paths establish a fresh world the same way;
+    this is the shared half so the two handlers do not each re-derive it.
+    """
+    report = restore.restore_prefix(
+        db, s,
+        executor=gym_client.LiveBrowserClient(
+            base_url=settings.live_browser_url, session_id=session_id, ticket=ticket, gym=endpoint,
+        ),
+        gym=endpoint,
+    )
+    restore.record(db, lease, report)
+    return report
 
 
 # --------------------------------------------------------------------------- routes
@@ -360,8 +385,16 @@ def open_live_session(
         # shared-gym fallback, where the world may belong to somebody else.
         world_state = "shared"
         if task is not None and task.external_id and (task.source == "gym" or s.source == "gym"):
+            # Which version's world this is. A fork's world is the fork point of ONE
+            # version, and versions of an attempt share a (task, seed), so the reuse
+            # decision has to be version-aware or switching versions silently keeps
+            # the previous branch's world. head_id is version 1's own id for an
+            # unforked attempt (a real row) and None only when the attempt has no
+            # versions at all — either way it is simply "the world we built for".
+            head = versions.head(db, s)
+            head_id = head.id if head is not None else None
             reusable = isolated and workspace.holds_seeded_world(
-                lease, endpoint, task_key=task.external_id, seed=s.seed
+                lease, endpoint, task_key=task.external_id, seed=s.seed, version_id=head_id
             )
             if reusable:
                 world_state = "preserved"
@@ -383,7 +416,8 @@ def open_live_session(
                 # the wrong brief and an empty cart with no error anywhere.
                 if lease is not None:
                     workspace.mark_seeded(
-                        db, lease, task_key=task.external_id, seed=s.seed, reset_result=result
+                        db, lease, task_key=task.external_id, seed=s.seed,
+                        reset_result=result, version_id=head_id,
                     )
 
         # …and land where the TASK starts, not at the gym root. M46 begins on
@@ -393,6 +427,27 @@ def open_live_session(
             _task_start_url(endpoint.base_url, task.start_url if task is not None else "")
         )
         opened = _open_browser(start_url, current.email)
+        ticket = opened["ticket"]
+
+        # REBUILD A FORK'S WORLD. Only on the branch that just reset — a preserved
+        # world already holds the annotator's work and replaying into it would put
+        # the prefix on top of itself. The browser has to exist first: the prefix is
+        # replayed THROUGH it, which is also what leaves the page showing the state
+        # the actions produced rather than the start URL.
+        if world_state == "seeded":
+            report = _rebuild_prefix(
+                db, s, lease=lease, endpoint=endpoint,
+                session_id=str(opened["session_id"]), ticket=ticket,
+            )
+            if report.attempted:
+                # The rebuild can burn a real share of LIVE_TICKET_TTL_S. Handing
+                # back the ticket minted before it means a socket opened seconds
+                # later can close 4401, which is terminal in the client and whose
+                # only cure is a full round trip through the replay pane.
+                ticket = _mint_ticket(str(opened["session_id"]), current.email)
+        else:
+            report = restore.report_of(lease)
+
         entry = _Attached(
             live_session_id=str(opened["session_id"]),
             owner=current.email,
@@ -400,21 +455,24 @@ def open_live_session(
             viewport=opened.get("viewport") or _DEFAULT_VIEWPORT,
             isolated=isolated,
             world=world_state,
+            restore=restore.as_payload(report),
         )
         _ATTACHED[str(s.id)] = entry
 
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="live.open",
-        target=entry.live_session_id, meta={"url": start_url, "world": world_state},
+        target=entry.live_session_id,
+        meta={"url": start_url, "world": world_state, "restore": entry.restore},
     ))
     db.commit()
     return {
         "sessionId": entry.live_session_id,
-        "ticket": opened["ticket"],
+        "ticket": ticket,
         "viewport": entry.viewport,
         "url": entry.url,
         "isolated": entry.isolated,
         "world": entry.world,
+        "restore": entry.restore,
     }
 
 
@@ -496,6 +554,8 @@ def reset_live_world(
     with _attempt_lock(str(s.id)):
         lease = workspace.active_lease(db, s.id)
         endpoint = workspace.endpoint_for(db, s.id)
+        head = versions.head(db, s)
+        head_id = head.id if head is not None else None
 
         # Clear the marker BEFORE resetting, and commit it. If the reset then fails
         # or the process dies between the two, the next open re-seeds — which is the
@@ -510,17 +570,17 @@ def reset_live_world(
                 detail=f"could not reset the gym for {task.external_id} — the world was left as it was",
             )
         if lease is not None:
-            workspace.mark_seeded(db, lease, task_key=task.external_id, seed=s.seed, reset_result=result)
+            workspace.mark_seeded(
+                db, lease, task_key=task.external_id, seed=s.seed,
+                reset_result=result, version_id=head_id,
+            )
 
         # Point the open browser at the task's start URL again, so the annotator
         # sees the fresh world instead of a page rendered from the old one.
         entry = _ATTACHED.get(str(s.id))
+        report = restore.RestoreReport()
         if entry is not None:
             start_url = _browser_visible(_task_start_url(endpoint.base_url, task.start_url or ""))
-            # Replaced, not mutated: _Attached is frozen so that the map is only
-            # ever changed by whoever holds the attempt's lock.
-            entry = dataclasses.replace(entry, url=start_url, world="seeded")
-            _ATTACHED[str(s.id)] = entry
             with contextlib.suppress(HTTPException):
                 _live_request(
                     "POST", f"/live/sessions/{entry.live_session_id}/act",
@@ -532,10 +592,28 @@ def reset_live_world(
                     },
                     timeout=30,
                 )
+            # "Start over" means back to where this branch begins — NOT back to the
+            # task seed. On a fork those are different states, and handing back the
+            # seed would make the escape hatch re-impose exactly the by-hand prefix
+            # work the rebuild exists to remove.
+            report = _rebuild_prefix(
+                db, s, lease=lease, endpoint=endpoint,
+                session_id=entry.live_session_id,
+                ticket=_mint_ticket(entry.live_session_id, entry.owner),
+            )
+            # Replaced, not mutated: _Attached is frozen so that the map is only
+            # ever changed by whoever holds the attempt's lock.
+            entry = dataclasses.replace(
+                entry, url=start_url, world="seeded", restore=restore.as_payload(report),
+            )
+            _ATTACHED[str(s.id)] = entry
+        else:
+            restore.record(db, lease, report)
 
+    payload = restore.as_payload(report)
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="live.reset_world",
-        target=task.external_id, meta={"seed": s.seed},
+        target=task.external_id, meta={"seed": s.seed, "restore": payload},
     ))
     db.commit()
-    return {"reset": True, "world": "seeded"}
+    return {"reset": True, "world": "seeded", "restore": payload}

@@ -248,7 +248,15 @@ def reconcile_on_startup(db: Session) -> int:
 # gym's own answer about what it is holding. Either one silent → reset.
 
 
-def mark_seeded(db: Session, lease: models.WorkspaceLease, *, task_key: str, seed: int, reset_result: dict | None) -> None:
+def mark_seeded(
+    db: Session,
+    lease: models.WorkspaceLease,
+    *,
+    task_key: str,
+    seed: int,
+    reset_result: dict | None,
+    version_id: UUID | None = None,
+) -> None:
     """Record what this workspace was seeded with. Call ONLY after the reset
     actually succeeded.
 
@@ -257,11 +265,17 @@ def mark_seeded(db: Session, lease: models.WorkspaceLease, *, task_key: str, see
     world whose own task_id drops the `_armB` suffix, so comparing the gym's answer
     against the registry key reports a false mismatch and re-seeds forever. Store
     both: the key is what we send, the echo is what we later compare against.
+
+    `version_id` binds the world to the branch whose prefix was rebuilt into it, so
+    switching versions forces a rebuild rather than silently reusing the previous
+    version's world (two versions of an attempt share a (task, seed)). None for a
+    plain seed with no branch prefix.
     """
     lease.seeded_task_key = task_key
     lease.seeded_seed = int(seed)
     echoed = (reset_result or {}).get("task_id")
     lease.seeded_task_id = str(echoed) if echoed else task_key
+    lease.seeded_version_id = version_id
     db.commit()
 
 
@@ -274,11 +288,17 @@ def clear_seed_mark(db: Session, lease: models.WorkspaceLease | None) -> None:
     lease.seeded_task_key = None
     lease.seeded_task_id = None
     lease.seeded_seed = None
+    lease.seeded_version_id = None
     db.commit()
 
 
 def holds_seeded_world(
-    lease: models.WorkspaceLease | None, endpoint: GymEndpoint, *, task_key: str, seed: int
+    lease: models.WorkspaceLease | None,
+    endpoint: GymEndpoint,
+    *,
+    task_key: str,
+    seed: int,
+    version_id: UUID | None = None,
 ) -> bool:
     """Is it safe to reuse this workspace's world instead of re-seeding it?
 
@@ -323,6 +343,11 @@ def holds_seeded_world(
     if lease.seeded_seed is None or lease.seeded_task_key != task_key:
         return False
     if int(lease.seeded_seed) != int(seed):
+        return False
+    # The world holds ONE version's branch prefix. Reusing it for a different
+    # version would drive the new branch against the old branch's world — the
+    # two-versions-one-world hazard the rebuild exists to remove.
+    if lease.seeded_version_id != version_id:
         return False
 
     try:
