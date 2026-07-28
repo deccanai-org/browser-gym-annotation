@@ -480,12 +480,140 @@ def _gate_policies(brief: str, golden_trace: list[dict], actions: list[dict]) ->
     return out
 
 
+def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
+    """Discriminator + Orchestrator path: write from seed_initial only, validate
+    against initial + golden. Initial prefers live gym, then DB seed_state, then
+    disk snapshots; golden prefers a live oracle world, then disk seed_final."""
+    from app.verifier_construction import (
+        load_seed_golden,
+        load_seed_initial,
+        suite_to_platform,
+        validate_suite,
+        write_verifiers,
+    )
+    from app.verifier_construction.predicates import extract_task_brief
+    from app.verifier_construction.seed_io import fetch_seed_world_live
+
+    initial = None
+    source_initial = None
+    try:
+        with SessionLocal() as db:
+            try:
+                initial, source_initial = load_seed_initial(
+                    task_id, seed, db=db, prefer=("live", "db", "disk")
+                )
+            except FileNotFoundError as e:
+                raise jobs.JobFailure(str(e)) from e
+    except jobs.JobFailure:
+        raise
+    except Exception:
+        # DB unreachable — still allow live/disk sourcing without a session.
+        try:
+            initial, source_initial = load_seed_initial(
+                task_id, seed, db=None, prefer=("live", "disk")
+            )
+        except FileNotFoundError as e:
+            raise jobs.JobFailure(str(e)) from e
+
+    # Golden: mirror reward-agent (oracle run) when live gym works; else disk final.
+    oracle_world: dict | None = None
+    run: dict | None = None
+    # Probe live only when we did not already take the live initial (avoids a
+    # redundant reset), or when initial came from db/disk and we still want oracle.
+    try_oracle = source_initial == "live" or fetch_seed_world_live(task_id, seed) is not None
+    if try_oracle:
+        if gym_client.reset(task_id, seed) is not None:
+            run = gym_client.run_agent(task_id, "oracle", seed)
+            if run is not None:
+                oracle_world = gym_client.world() or {}
+
+    try:
+        golden, source_golden = load_seed_golden(
+            task_id, seed, prefer=("oracle", "disk"), oracle_world=oracle_world
+        )
+    except FileNotFoundError as e:
+        raise jobs.JobFailure(str(e)) from e
+
+    try:
+        brief = extract_task_brief(initial)
+    except ValueError:
+        brief = ((run or {}).get("trajectory") or {}).get("task_brief") or task_id
+
+    if not settings.anthropic_api_key.strip():
+        raise jobs.JobFailure(
+            "no ANTHROPIC_API_KEY configured — Discriminator needs the same key as generate_verifier_suite"
+        )
+
+    try:
+        vc_suite = write_verifiers(brief, initial)
+    except Exception as e:  # noqa: BLE001 — surface model / structural failures cleanly
+        raise jobs.JobFailure(f"discriminator write failed: {e}") from e
+
+    validation = validate_suite(vc_suite, initial, golden)
+    platform_suite, adapt_warnings = suite_to_platform(vc_suite)
+
+    revision_flags = list(validation.revision_flags)
+    incomplete = bool(
+        vc_suite.incomplete_forbidden_coverage or vc_suite.has_forbidden_coverage_gap()
+    )
+    if incomplete and "incomplete_forbidden_coverage" not in revision_flags:
+        revision_flags.append("incomplete_forbidden_coverage")
+
+    warnings = list(adapt_warnings)
+    if incomplete:
+        warnings.append(
+            "incomplete_forbidden_coverage: detected traps without a FORBIDDEN "
+            "checkpoint — do not approve until a harmful-signature check is added"
+        )
+    if not validation.accepted:
+        warnings.append(f"orchestrator_rejected: {validation.reason}")
+
+    return {
+        "engine": "discriminator",
+        "oracle": bool(validation.accepted),
+        "accepted": bool(validation.accepted),
+        "reason": validation.reason,
+        "iterations": 1,
+        "brief": brief,
+        "suite": platform_suite,
+        "stateChecks": len(platform_suite),
+        "policyChecks": 0,
+        "policyProposed": 0,
+        "gate": {
+            "initialReward": None,
+            "goldenReward": None,
+            "orchestrator": validation.to_dict(),
+        },
+        "history": [
+            {
+                "iteration": 1,
+                "checks": len(platform_suite),
+                "accepted": validation.accepted,
+                "reason": validation.reason,
+                "revisionFlags": revision_flags,
+            }
+        ],
+        "revisionFlags": revision_flags,
+        "incompleteForbiddenCoverage": incomplete,
+        "forbiddenCoveragePath": vc_suite.forbidden_coverage_path,
+        "detectedTraps": list(vc_suite.detected_traps),
+        "warnings": warnings,
+        "sourceInitial": source_initial,
+        "sourceGolden": source_golden,
+        "sourceModel": vc_suite.source_model,
+    }
+
+
 @_gym_job
-def _autogen_verifiers_job(task_id: str, seed: int, iterations: int) -> dict:
-    """The autonomous ORACLE LOOP (Kashyap's reward-agent design) on our stack:
-    capture the INITIAL world (reset) and the GOLDEN world (oracle run), then have
-    the reward agent author a verifier suite, gate it (must score 0 on initial, 1
-    on golden), and iterate with feedback until it passes or the budget runs out."""
+def _autogen_verifiers_job(
+    task_id: str, seed: int, iterations: int, engine: str = "reward_agent"
+) -> dict:
+    """Autogen entrypoint. Default ``reward_agent`` preserves the existing oracle
+    loop (initial=0, golden=1). ``engine=discriminator`` uses Discriminator write
+    + Orchestrator validate."""
+    if engine == "discriminator":
+        return _autogen_discriminator_job(task_id, seed)
+
     if gym_client.reset(task_id, seed) is None:
         raise jobs.JobFailure("gym unreachable or unknown task")
     initial = gym_client.world() or {}  # full multi-app world (paths are world-rooted)
@@ -540,6 +668,7 @@ def _autogen_verifiers_job(task_id: str, seed: int, iterations: int) -> dict:
     policy_checks = _gate_policies(brief, golden_trace, actions)
     validated = [p for p in policy_checks if p["discriminates"]]
     return {
+        "engine": "reward_agent",
         "oracle": bool(gate and gate.get("oracle")),
         "iterations": len(history),
         "brief": brief,
@@ -629,14 +758,28 @@ class AutogenBody(BaseModel):
     taskId: str
     seed: int = 0
     iterations: int = 5
+    # Default preserves the existing reward-agent oracle loop. ``discriminator``
+    # selects Discriminator write + Orchestrator validate (additive option).
+    engine: str = "reward_agent"
 
 
 @router.post("/autogen-verifiers")
 def gym_autogen_verifiers(body: AutogenBody) -> dict:
-    """Autonomously generate + oracle-validate a verifier suite for a gym task
-    (reward-agent loop: initial=0, golden=1, iterate). Slow (an oracle run + LLM
-    calls) — runs as a job; poll GET /api/gym/jobs/{id}."""
-    job = jobs.store.submit("autogen-verifiers", _autogen_verifiers_job, body.taskId, body.seed, body.iterations)
+    """Autonomously generate + validate a verifier suite for a gym task.
+
+    ``engine=reward_agent`` (default): oracle loop initial=0 / golden=1.
+    ``engine=discriminator``: Discriminator + Orchestrator path.
+    Slow — runs as a job; poll GET /api/gym/jobs/{id}.
+    """
+    engine = body.engine if body.engine in ("reward_agent", "discriminator") else "reward_agent"
+    job = jobs.store.submit(
+        "autogen-verifiers",
+        _autogen_verifiers_job,
+        body.taskId,
+        body.seed,
+        body.iterations,
+        engine,
+    )
     return {"jobId": job.id, "status": job.status}
 
 

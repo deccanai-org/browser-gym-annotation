@@ -273,15 +273,20 @@ def _parse_decompose_payload(text: str) -> dict[str, Any]:
 
 
 def _anthropic_api_key() -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if key:
-        return key
+    """Same key source as ``app.agent`` / ``generate_verifier_suite``.
+
+    ``settings.anthropic_api_key`` already loads ``ANTHROPIC_API_KEY`` via
+    pydantic-settings; fall back to the env var only if settings import fails.
+    """
     try:
         from app.config import settings
 
-        return (settings.anthropic_api_key or "").strip()
+        key = (settings.anthropic_api_key or "").strip()
+        if key:
+            return key
     except Exception:
-        return ""
+        pass
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
 
 def _call_claude(

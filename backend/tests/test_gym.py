@@ -123,6 +123,29 @@ def test_autogen_verifiers_is_async(client, monkeypatch):
     assert _poll(client, r.json()["jobId"])["status"] == "error"
 
 
+def test_autogen_discriminator_engine_is_async(client, monkeypatch):
+    """engine=discriminator is accepted and runs as a pollable job (additive)."""
+    monkeypatch.setattr("app.gym_client.reset", lambda *a, **k: None)
+    # Force disk miss as well so the job fails with a clean seed_initial error.
+    monkeypatch.setattr(
+        "app.verifier_construction.seed_io.load_seed_from_disk",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.verifier_construction.seed_io.fetch_seed_world_from_db",
+        lambda *a, **k: None,
+    )
+    r = client.post(
+        "/api/gym/autogen-verifiers",
+        json={"taskId": "A1/nope", "seed": 0, "iterations": 1, "engine": "discriminator"},
+    )
+    assert r.status_code == 200 and r.json().get("jobId")
+    jr = _poll(client, r.json()["jobId"])
+    assert jr["status"] == "error"
+    err = jr.get("error") or ""
+    assert "seed_initial" in err or "could not resolve" in err
+
+
 def test_resume_run_is_async_and_pollable(client, monkeypatch):
     monkeypatch.setattr("app.gym_client.resume_run", lambda *a, **k: None)  # drive fails → terminal error
     r = client.post("/api/gym/resume-run", json={"taskId": "A1/x", "seed": 0, "worldState": {"shop": {}}, "resumeUrl": "/"})

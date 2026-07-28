@@ -279,24 +279,44 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface ResumeResult { score: number; success: boolean; reward: number }
 
+export type AutogenEngine = "reward_agent" | "discriminator";
+
 export interface AutogenResult {
   oracle: boolean;
   stateChecks: number;
   policyChecks: number;
   iterations: number;
   brief: string;
-  suite: { id: string; level: string; assertion: string; check: Record<string, unknown> }[];
-  gate?: { initialReward: number; goldenReward: number };
+  suite: { id: string; level: string; assertion: string; check: Record<string, unknown>; axis?: string; veto?: boolean }[];
+  gate?: { initialReward: number | null; goldenReward: number | null; orchestrator?: Record<string, unknown> };
+  engine?: AutogenEngine;
+  accepted?: boolean;
+  reason?: string;
+  revisionFlags?: string[];
+  incompleteForbiddenCoverage?: boolean;
+  forbiddenCoveragePath?: string;
+  detectedTraps?: string[];
+  warnings?: string[];
+  sourceInitial?: string;
+  sourceGolden?: string;
+  sourceModel?: string;
 }
 
-/** Run the autonomous reward-agent oracle loop for a gym task (auto-generate +
- *  oracle-validate a verifier suite). Async job; polls to the result. */
+/** Run the autonomous verifier autogen job for a gym task (reward-agent oracle
+ *  loop by default, or Discriminator + Orchestrator when engine=discriminator).
+ *  Async job; polls to the result. */
 export async function autogenVerifiers(
   taskId: string,
   seed = 0,
-  opts?: { onStatus?: (s: GymJob["status"]) => void },
+  opts?: { onStatus?: (s: GymJob["status"]) => void; engine?: AutogenEngine; iterations?: number },
 ): Promise<AutogenResult | null> {
-  const out = await post<{ jobId: string }>("/api/gym/autogen-verifiers", { taskId, seed, iterations: 5 });
+  const engine = opts?.engine ?? "reward_agent";
+  const out = await post<{ jobId: string }>("/api/gym/autogen-verifiers", {
+    taskId,
+    seed,
+    iterations: opts?.iterations ?? 5,
+    engine,
+  });
   const jobId = out?.jobId;
   if (!jobId) return null;
   const deadline = Date.now() + 320_000;

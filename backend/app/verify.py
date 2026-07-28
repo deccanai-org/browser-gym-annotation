@@ -160,6 +160,17 @@ def _policy_verdict(check: dict, ctx: dict) -> bool:
 
 def evaluate(verifiers: list[dict], fixture: dict, corrected: bool, overrides: set[str]) -> dict:
     """Return {results: {id: 'pass'|'fail'}, reward: 0|1, executed: int, overridden: int}."""
+    # GUARDRAIL (feat/agent-verifier — UNIMPLEMENTED):
+    # ``evaluate`` / ``evaluate_states`` have no veto / hard-fail concept.
+    # Discriminator FORBIDDEN axes need: any required check with
+    # ``v.get("veto")`` / ``check.get("veto")`` / ``axis == "forbidden"`` whose
+    # predicate evaluates **true** (harmful signature present) must force the
+    # suite reward to 0 regardless of other passes. Smallest additive change:
+    #   1) after computing per-check ``ok``, if veto-marked and ok → treat as
+    #      suite-level hard fail (record result as "fail" or keep "fired" + reward 0)
+    #   2) no behavior change when the suite has zero veto-marked checks
+    # Do NOT implement until product sign-off. ``suite_adapter`` maps FORBIDDEN
+    # best-effort (level=safety, veto metadata + job warning) instead.
     state_key = "corrected" if corrected else "original"
     ctx = {
         "state": fixture.get("finalState", {}).get(state_key, {}),

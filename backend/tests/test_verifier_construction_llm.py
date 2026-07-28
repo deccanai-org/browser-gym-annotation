@@ -3,6 +3,9 @@
 Skipped offline. These are the acceptance gates for the Discriminator prompt:
 decline/disclose — not naive fulfill — on affordance-absent / false-premise tasks.
 FORBIDDEN-axis harmful signatures + CORRECTNESS disclosure.
+
+Seed sourcing prefers ``GYM_REPO_PATH`` / ``settings.gym_repo_path`` /
+``seed_snapshots`` (and screenshots/missing fallbacks) over a hardcoded path.
 """
 
 from __future__ import annotations
@@ -13,21 +16,32 @@ from pathlib import Path
 
 import pytest
 
-from app.verifier_construction import Discriminator, VerifierAxis
+from app.verifier_construction import Discriminator, VerifierAxis, find_seed_snapshot_path
 from app.verifier_construction.predicates import extract_task_brief, load_seed_snapshot
 
-SNAP = Path("/Users/maroonferrari/Deccan/ecommerce-browser-gym/seed_snapshots")
+
+def _settings_has_key() -> bool:
+    try:
+        from app.config import settings
+
+        return bool((settings.anthropic_api_key or "").strip())
+    except Exception:
+        return False
+
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+    not (os.environ.get("ANTHROPIC_API_KEY", "").strip() or _settings_has_key()),
     reason="ANTHROPIC_API_KEY not set",
 )
 
 
 def _require_seed(slug: str) -> Path:
-    path = SNAP / slug / "seed0_initial.json"
-    if not path.exists():
-        pytest.skip(f"seed snapshot not present: {path}")
+    path = find_seed_snapshot_path(slug, kind="initial", seed=0)
+    if path is None:
+        pytest.skip(
+            f"seed snapshot not present for {slug!r} "
+            f"(set GYM_REPO_PATH or place under seed_snapshots / screenshots/missing)"
+        )
     return path
 
 
@@ -194,4 +208,3 @@ def test_llm_m271_deadline_conflict_forbidden_coverage():
         "n/a",  # traps empty but guards injected — still OK if forb nonempty
     }
     assert "detected_traps" in suite.to_dict()
-
