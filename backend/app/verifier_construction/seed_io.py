@@ -112,9 +112,13 @@ def fetch_seed_world_live(task_id: str, seed: int = 0) -> dict[str, Any] | None:
     """
     from app import gym_client
 
-    if gym_client.reset(task_id, seed) is None:
+    try:
+        if gym_client.reset(task_id, seed) is None:
+            return None
+        world = gym_client.world()
+    except (gym_client.GymTaskNotFound, gym_client.GymBadRequest):
+        # Unknown task / bad request — callers fall through to db/disk.
         return None
-    world = gym_client.world()
     return world if isinstance(world, dict) else None
 
 

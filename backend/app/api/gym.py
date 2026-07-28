@@ -516,16 +516,24 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
             raise jobs.JobFailure(str(e)) from e
 
     # Golden: mirror reward-agent (oracle run) when live gym works; else disk final.
+    # Gyms without /_harness/run_agent (or unknown tasks) must fall through to
+    # disk seed_final — never abort the whole Discriminator job on GymTaskNotFound.
     oracle_world: dict | None = None
     run: dict | None = None
-    # Probe live only when we did not already take the live initial (avoids a
-    # redundant reset), or when initial came from db/disk and we still want oracle.
-    try_oracle = source_initial == "live" or fetch_seed_world_live(task_id, seed) is not None
-    if try_oracle:
-        if gym_client.reset(task_id, seed) is not None:
-            run = gym_client.run_agent(task_id, "oracle", seed)
-            if run is not None:
-                oracle_world = gym_client.world() or {}
+    try:
+        try_oracle = source_initial == "live" or fetch_seed_world_live(task_id, seed) is not None
+        if try_oracle:
+            reset_ok = gym_client.reset(task_id, seed)
+            if reset_ok is not None:
+                try:
+                    run = gym_client.run_agent(task_id, "oracle", seed)
+                except gym_client.GymTaskNotFound:
+                    run = None
+                if run is not None:
+                    oracle_world = gym_client.world() or {}
+    except (gym_client.GymTaskNotFound, gym_client.GymBadRequest):
+        run = None
+        oracle_world = None
 
     try:
         golden, source_golden = load_seed_golden(
