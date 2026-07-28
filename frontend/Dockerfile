@@ -4,6 +4,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Where the live pane reaches the live-browser service. Empty (default) keeps the
+# built-in localhost:8877 for local; a hosted build passes the live-browser's
+# public URL: docker build --build-arg VITE_LIVE_BASE=https://live-browser-...
+ARG VITE_LIVE_BASE=""
+ENV VITE_LIVE_BASE=$VITE_LIVE_BASE
 RUN npm run build
 
 FROM nginx:alpine

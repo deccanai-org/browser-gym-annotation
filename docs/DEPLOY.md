@@ -1,76 +1,139 @@
-# Deploying to GCP (Cloud Run + Cloud SQL)
+# Deploying the Browser-Gym platform
 
-Two Cloud Run services (backend API + nginx-served SPA) backed by a Cloud SQL
-Postgres instance. Schema is applied with Alembic migrations (not `create_all`)
-in prod.
+This is the whole system, not one service. Read the **Components** and **Shared
+secrets** sections first — most deploy failures are a missing secret or two
+services that don't agree on one.
 
-## Staged for a one-command deploy
+> Two repos are involved:
+> - **annotator** (this repo): frontend + backend + Postgres — the human review platform.
+> - **gym** (`E Commerce Broswer Gym`): the gym service + the live-browser service — the environment under test.
 
-Everything below has been verified locally so the billable deploy is low-risk:
+## Components (5 services)
 
-- ✅ **Both images build** exactly as Cloud Build will (`docker build backend/`, `docker build frontend/`).
-- ✅ **Prod boot path** — the backend image with `RUN_MIGRATIONS=1 AUTO_CREATE_ALL=false` against a fresh DB runs `alembic upgrade head`, builds all 11 tables at the head revision, and serves (exactly what Cloud Run does on boot).
-- ✅ **No schema drift** — `alembic check` reports the models match the migrations.
-- ✅ **nginx `/api` proxy** renders valid config against an HTTPS Cloud Run backend (Host + SNI set correctly — see the fix note below).
+| # | Service | Repo · path | Port | What it is |
+|---|---|---|---|---|
+| 1 | **frontend** | annotator · `frontend/` | 8080 | React SPA served by nginx; nginx proxies `/api` → backend |
+| 2 | **backend** | annotator · `backend/` | 8090 | FastAPI + Alembic; talks to Postgres, the gym, and the live-browser |
+| 3 | **postgres** | — | 5432 | the annotator's own DB (sessions, versions, verifiers, leases) |
+| 4 | **gym** | gym · `Dockerfile` | 8000 | the ecommerce world; serves `/_harness/*`. seed.db baked in, `SEEDDB_MODE=1` |
+| 5 | **live-browser** | gym · `live_browser/Dockerfile` | 8877 | CDP screencast + input for the live pane (a real Chromium) |
 
-## 1 · Pre-flight (read-only, spends nothing)
-
-```bash
-./infra/preflight.sh
 ```
-Checks gcloud is installed + authed, the project is accessible, billing is on,
-and your inputs are set. Fix any ✗, then deploy.
-
-## 2 · Deploy (billable)
-
-```bash
-gcloud auth login                       # project mlproject-501205, deccan.ai › MLTeam
-DB_PASS='<a-strong-password>' \
-ANTHROPIC_API_KEY='<optional>' \
-./infra/deploy-gcp.sh
+browser ──HTTP──> frontend(nginx) ──/api──> backend ──> postgres
+   │                                           │
+   │                                           ├──HTTP──> gym (/_harness/*)
+   └──────────WS + REST (live pane)──────────> live-browser (:8877)
 ```
-Re-run any time to ship an update (it rebuilds + redeploys; Cloud SQL is left as-is).
 
-## What the deploy does
-1. Enables the required APIs (Run, SQL Admin, Artifact Registry, Cloud Build, Secret Manager).
-2. Creates an Artifact Registry docker repo (`annotator`).
-3. Creates a Cloud SQL Postgres 16 instance (`annotator-db`, `db-f1-micro`), the database, and the user — **only on the first run**.
-4. Builds + pushes the backend and frontend images with Cloud Build.
-5. Deploys **annotator-backend** to Cloud Run (Cloud SQL socket; `RUN_MIGRATIONS=1` applies `alembic upgrade head` on boot; `AUTO_CREATE_ALL=false`). The catalog seeds on startup (3 fixtures always; the full 315 once `GYM_URL` is reachable).
-6. Deploys **annotator-frontend** to Cloud Run, wiring `BACKEND_ORIGIN` + `BACKEND_HOST` so its `/api` proxy reaches the backend.
-7. Prints the public backend + app URLs.
+The browser talks to the **frontend** (everything `/api` is proxied to the backend
+server-side) and **directly to the live-browser** for the live pane (a high-fps
+video + input channel deliberately not relayed through the backend).
 
-## Config (env vars, all overridable)
-| Var | Default | Notes |
+## Shared secrets — these MUST agree across services
+
+| Secret | Set on | Must equal |
 |---|---|---|
-| `PROJECT` | `mlproject-501205` | GCP project |
-| `REGION` | `us-central1` | Cloud Run + Cloud SQL region |
-| `DB_PASS` | — | **required on first run** (URL-encoded automatically; any chars OK) |
-| `DB_TIER` | `db-f1-micro` | smallest/cheapest; bump for load |
-| `ANTHROPIC_API_KEY` | — | optional — enables the live agents + reward agent |
-| `GYM_URL` | — | optional — a reachable gym URL (the live 312-task features) |
+| `AUTH_SECRET` | backend | — (any strong random string; **the prod backend refuses to boot without it**) |
+| `DB_PASS` | Postgres + backend `DATABASE_URL` | itself |
+| `GYM_HARNESS_TOKEN` (backend) ↔ `HARNESS_TOKEN` (gym) | backend + gym | **each other** — gates every `/_harness/*` call |
+| `LIVE_STREAM_SECRET` | backend + live-browser | **each other** — signs live-session tickets (both fall back to `HARNESS_TOKEN` if unset, so a matching `HARNESS_TOKEN` also works) |
+| `ANTHROPIC_API_KEY` | backend | — (optional; the live agent re-run) |
 
-## Cost (rough, us-central1)
-- **Cloud SQL** `db-f1-micro`: ~$8–10/mo (the main fixed cost).
-- **Cloud Run**: pay-per-use; ~free at low traffic, backend pinned to 1 instance.
-- **Artifact Registry / Cloud Build**: negligible (free tier covers this).
+Generate the random ones once: `openssl rand -hex 32`.
 
-## The gym (optional, `GYM_URL`)
-The live-agent-run, 312-task, resume, and autogen features need the
-`ecommerce-browser-gym` server reachable at `GYM_URL`. Without it they gate
-cleanly (the picker shows "gym not connected"); the sample tasks, verifier
-engine, scoring, correction, and persistence all still work.
+## Connection URLs — who points at whom
 
-To host the gym, a `Dockerfile` is provided in that repo. It drives a real
-headless browser and writes screenshots/trajectories to disk, so:
-- **Easiest:** a small **Compute Engine VM** (e2-small+) — writable FS, run the image, open the port. Set the annotator's `GYM_URL` to `http://<vm-ip>:8000` and match `HARNESS_TOKEN` ↔ `GYM_HARNESS_TOKEN`.
-- **Cloud Run:** works with `--memory 2Gi --cpu 2`, but mount tmpfs for `/app/screenshots` + `/app/trajectories` (its FS is read-only apart from `/tmp`).
+| Var | Set on | Value |
+|---|---|---|
+| `GYM_URL` | backend | the gym service URL (e.g. `https://gym-…run.app`) |
+| `LIVE_BROWSER_URL` | backend | the live-browser service URL (used server-side, e.g. at finalize) |
+| `VITE_LIVE_BASE` | frontend **build arg** | the live-browser's **public** URL — the browser connects here for the live pane |
+| `LIVE_ALLOWED_ORIGINS` | live-browser | the frontend's public origin(s), comma-separated (`*` dev only) — CORS + websocket Origin check |
 
-## Inspecting the DB (DBeaver)
-- **Local:** PostgreSQL · `localhost:5433` · db `browser_gym_annotator` · `annotator/annotator`. (Adminer web UI at `localhost:8081`.)
-- **Cloud SQL:** run the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) — `cloud-sql-proxy mlproject-501205:us-central1:annotator-db` — then point DBeaver at `localhost:5432` with the `annotator` user + your `DB_PASS`.
+---
 
-## Notes
-- **Migrations**: `alembic upgrade head` runs on backend boot. New schema change → `alembic revision --autogenerate -m "…"`, commit, redeploy.
-- **Secrets**: env vars are fine for staging. For production, move `DB_PASS` / `ANTHROPIC_API_KEY` into Secret Manager and reference with `--set-secrets`.
-- The nginx `/api` proxy sends the **backend's hostname** as the `Host` header + SNI (`BACKEND_HOST`) — required for Cloud Run routing; sending the frontend's host 404s.
+## A. Local (single box) — docker-compose + the gym + live-browser
+
+The annotator's compose brings up frontend + backend + Postgres + adminer. The
+gym and live-browser run alongside (they live in the other repo).
+
+```bash
+# 1) gym (from the gym repo) — seed.db is baked into the image, SEEDDB_MODE=1
+cd "../E Commerce Broswer Gym"
+docker build -t browser-gym:local .
+docker run -d -p 8000:8000 -e HARNESS_TOKEN=dev-token browser-gym:local
+
+# 2) live-browser (from the gym repo)
+docker build -t live-browser:local -f live_browser/Dockerfile .
+docker run -d -p 8877:8877 -e LIVE_STREAM_SECRET=dev-token -e LIVE_ALLOWED_ORIGINS='*' live-browser:local
+
+# 3) annotator (this repo)
+cd ../browser-gym-annotator
+GYM_HARNESS_TOKEN=dev-token LIVE_STREAM_SECRET=dev-token \
+  docker compose -f infra/docker-compose.yml up -d --build
+# app at http://localhost:8080  (compose defaults already point GYM_URL /
+# LIVE_BROWSER_URL at host.docker.internal:8000 / :8877)
+```
+
+Workspace isolation (a gym container per attempt) needs the Docker socket, which
+compose already mounts — a single-host, dev-only privilege. It does **not** work
+on Cloud Run (see below).
+
+## B. Cloud (GCP) — Cloud Run × 4 + Cloud SQL
+
+Order matters: stand up the gym + live-browser first, then deploy the annotator
+pointing at them.
+
+```bash
+# --- 1) gym + live-browser (from the gym repo) ---
+cd "../E Commerce Broswer Gym"
+gcloud builds submit --tag REGION-docker.pkg.dev/PROJ/REPO/gym:latest .
+gcloud run deploy gym --image .../gym:latest --region REGION --allow-unauthenticated \
+  --memory 2Gi --cpu 2 --set-env-vars HARNESS_TOKEN=$TOKEN
+# (the gym writes screenshots/trajectories to disk — Cloud Run's FS is read-only
+#  apart from /tmp; it still serves reset/state/world, which is what SQL-seed uses.)
+
+gcloud builds submit --tag .../live-browser:latest -f live_browser/Dockerfile .
+gcloud run deploy live-browser --image .../live-browser:latest --region REGION \
+  --allow-unauthenticated --memory 2Gi --cpu 2 \
+  --set-env-vars "LIVE_STREAM_SECRET=$LIVE_SECRET,LIVE_ALLOWED_ORIGINS=$FRONTEND_URL"
+# capture GYM_URL and LIVE_BROWSER_URL from `gcloud run services describe`.
+
+# --- 2) annotator (this repo) ---
+cd ../browser-gym-annotator
+AUTH_SECRET="$(openssl rand -hex 32)" \
+DB_PASS="$(openssl rand -hex 24)" \
+GYM_URL="$GYM_URL" LIVE_BROWSER_URL="$LIVE_BROWSER_URL" \
+  ./infra/deploy-gcp.sh
+```
+
+`deploy-gcp.sh` deploys **backend + frontend + Cloud SQL** and fails fast if
+`AUTH_SECRET` is missing. It sets `CORS_ORIGINS=[]` (the browser only calls `/api`
+same-origin through nginx, so CORS is never exercised — no wildcard exposure).
+
+**To enable the live pane in the hosted deploy**, the frontend must be BUILT with
+the live-browser's public URL so the browser knows where to connect:
+
+```bash
+docker build -t .../frontend:latest --build-arg VITE_LIVE_BASE="$LIVE_BROWSER_URL" frontend/
+# then redeploy annotator-frontend with that image
+```
+
+and the live-browser's `LIVE_ALLOWED_ORIGINS` must include the frontend origin.
+Without this, the core platform (review, versioning, verifiers, gym tasks) works
+fine — only the live pane is disabled.
+
+## Known limitations / gotchas
+
+- **Workspace isolation is single-host only.** It spins one gym container per
+  attempt via the Docker socket — impossible on Cloud Run. In a cloud deploy set
+  `WORKSPACE_ISOLATION=0`; the annotator then shares the one `GYM_URL`. (Isolation
+  is for concurrent live annotators; a Kubernetes provider is the future fix.)
+- **Split-origin auth.** The session cookie is `SameSite=Lax`, host-only, and the
+  design assumes the frontend proxies `/api` same-origin (it does). Do **not** put
+  the frontend and backend on different browser-facing domains without switching
+  the cookie to `SameSite=None; Secure` and adding `allow_credentials`.
+- **The live pane needs two things that match the backend:** `LIVE_STREAM_SECRET`
+  (ticket signing) and the frontend build's `VITE_LIVE_BASE` (where to connect).
+- **Branches.** The seed-db work is on the gym's `feat/sql-seed-db`; the annotator
+  is on `fix/dataset-integrity`. Deploy from these until they merge to `main`.

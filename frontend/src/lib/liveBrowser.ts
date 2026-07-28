@@ -16,13 +16,16 @@
  * * A dead socket must be loud. An annotator clicking into a socket that is gone
  *   and seeing nothing happen is the worst failure this component has.
  *
- * The live service is a SEPARATE origin (default :8877) and ships no CORS
- * middleware, so the REST half only works same-origin or through a proxy; `base`
- * exists so a backend proxy can be dropped in without touching any caller. The
- * websocket is unaffected — it checks Origin against LIVE_ALLOWED_ORIGINS.
+ * The live service is a SEPARATE origin (default :8877). It now ships CORS (see
+ * live_browser/service.py), so the REST half works cross-origin when the service
+ * allow-lists this app's origin; the websocket Origin-checks against
+ * LIVE_ALLOWED_ORIGINS. In a hosted deploy, point this at the live-browser
+ * service's public URL by BUILDING the frontend with VITE_LIVE_BASE set; local
+ * dev keeps the :8877 default.
  */
 
-export const DEFAULT_LIVE_BASE = "http://localhost:8877";
+export const DEFAULT_LIVE_BASE =
+  (import.meta.env.VITE_LIVE_BASE as string | undefined)?.trim() || "http://localhost:8877";
 
 export interface Viewport {
   width: number;
