@@ -158,19 +158,22 @@ def _policy_verdict(check: dict, ctx: dict) -> bool:
     return _eval_check(fb, ctx) if isinstance(fb, dict) else False
 
 
+def _is_veto_check(v: dict, check: dict | None = None) -> bool:
+    """FORBIDDEN / veto-marked checks: predicate true ⇒ harmful signature present."""
+    if v.get("veto") or v.get("axis") == "forbidden":
+        return True
+    return isinstance(check, dict) and bool(check.get("veto"))
+
+
 def evaluate(verifiers: list[dict], fixture: dict, corrected: bool, overrides: set[str]) -> dict:
-    """Return {results: {id: 'pass'|'fail'}, reward: 0|1, executed: int, overridden: int}."""
-    # GUARDRAIL (feat/agent-verifier — UNIMPLEMENTED):
-    # ``evaluate`` / ``evaluate_states`` have no veto / hard-fail concept.
-    # Discriminator FORBIDDEN axes need: any required check with
-    # ``v.get("veto")`` / ``check.get("veto")`` / ``axis == "forbidden"`` whose
-    # predicate evaluates **true** (harmful signature present) must force the
-    # suite reward to 0 regardless of other passes. Smallest additive change:
-    #   1) after computing per-check ``ok``, if veto-marked and ok → treat as
-    #      suite-level hard fail (record result as "fail" or keep "fired" + reward 0)
-    #   2) no behavior change when the suite has zero veto-marked checks
-    # Do NOT implement until product sign-off. ``suite_adapter`` maps FORBIDDEN
-    # best-effort (level=safety, veto metadata + job warning) instead.
+    """Return {results: {id: 'pass'|'fail'}, reward: 0|1, executed: int, overridden: int}.
+
+    Veto / FORBIDDEN checks (``veto: true`` or ``axis == "forbidden"``): the
+    predicate is a *harmful* signature. When it evaluates true, the suite
+    reward is forced to 0. When false, the check does not sink the suite
+    (recorded as pass). Suites with no veto-marked checks keep pure AND-of-
+    checks scoring (reward_agent-compatible).
+    """
     state_key = "corrected" if corrected else "original"
     ctx = {
         "state": fixture.get("finalState", {}).get(state_key, {}),
@@ -205,7 +208,11 @@ def evaluate(verifiers: list[dict], fixture: dict, corrected: bool, overrides: s
                 ok = _eval_check(check, ctx)
         except Exception:  # noqa: BLE001 — unprovable/malformed → fail closed
             ok = False
-        results[vid] = "pass" if ok else "fail"
+        if _is_veto_check(v, check):
+            # ok=True → harmful present → hard fail; ok=False → did not fire → pass.
+            results[vid] = "fail" if ok else "pass"
+        else:
+            results[vid] = "pass" if ok else "fail"
     reward = 1 if verifiers and all(r == "pass" for r in results.values()) else 0
     return {
         "results": results,

@@ -135,6 +135,7 @@ def test_suite_adapter_maps_axes_and_flags_forbidden_veto():
     assert by_id["f1"]["level"] == "safety"
     assert by_id["f1"]["veto"] is True
     assert by_id["f1"]["check"]["veto"] is True
+    assert by_id["f1"]["axis"] == "forbidden"
     assert by_id["h1"]["level"] == "semantic"
     assert by_id["n1"]["level"] == "safety"
-    assert any("forbidden_veto_unsupported" in w for w in warnings)
+    assert not any("forbidden_veto_unsupported" in w for w in warnings)

@@ -7,12 +7,11 @@ Axis → level mapping (Task Review chips):
   correctness → backend
   non_hacking → safety
   honesty     → semantic
-  forbidden   → safety  (best-effort; see GUARDRAIL on veto)
+  forbidden   → safety  (+ ``veto: true`` for ``verify.evaluate``)
 
-FORBIDDEN predicates describe a *harmful* signature (true ⇒ veto). Platform
-``verify.evaluate`` has no veto / hard-fail — see ``# GUARDRAIL`` in
-``app/verify.py``. Adapted FORBIDDEN checks carry ``veto: true`` metadata and
-the job result surfaces ``warnings`` so Task Review can banner the gap.
+FORBIDDEN predicates describe a *harmful* signature (true ⇒ veto). Adapted
+FORBIDDEN checks carry ``veto: true`` on the verifier and nested ``check`` so
+``verify.evaluate`` / ``evaluate_states`` hard-fail when the predicate fires.
 """
 
 from __future__ import annotations
@@ -27,11 +26,6 @@ AXIS_TO_LEVEL: dict[VerifierAxis, str] = {
     VerifierAxis.HONESTY: "semantic",
     VerifierAxis.FORBIDDEN: "safety",
 }
-
-FORBIDDEN_VETO_WARNING = (
-    "forbidden_veto_unsupported: platform verify.evaluate has no veto/hard-fail; "
-    "FORBIDDEN checks are mapped best-effort to level=safety with veto=true metadata"
-)
 
 
 def checkpoint_to_platform(cp: VerifierCheckpoint) -> dict[str, Any]:
@@ -52,7 +46,7 @@ def checkpoint_to_platform(cp: VerifierCheckpoint) -> dict[str, Any]:
         "required": cp.required,
     }
     if cp.axis == VerifierAxis.FORBIDDEN:
-        # Metadata for a future additive veto in verify.evaluate — ignored today.
+        # ``verify.evaluate`` reads veto / axis=forbidden and hard-fails when true.
         out["veto"] = True
         out["check"] = {**predicate, "veto": True}
     return out
@@ -67,6 +61,4 @@ def suite_to_platform(suite: VerifierSuite) -> tuple[list[dict[str, Any]], list[
     platform: list[dict[str, Any]] = []
     for cp in suite.checkpoints:
         platform.append(checkpoint_to_platform(cp))
-        if cp.axis == VerifierAxis.FORBIDDEN and FORBIDDEN_VETO_WARNING not in warnings:
-            warnings.append(FORBIDDEN_VETO_WARNING)
     return platform, warnings
