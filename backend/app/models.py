@@ -380,7 +380,14 @@ class TrajectoryVersion(Base):
     # v1 binds the EXACT canonical base run (never a "newest/oldest" heuristic).
     base_trajectory_id: Mapped[UUID | None] = _fk("trajectory.id", nullable=True, ondelete="SET NULL")
     # Fork BEFORE the rejected step — the rejected step must not appear in the child.
-    fork_before_step_id: Mapped[UUID | None] = _fk("trajectory_step.id", nullable=True, ondelete="SET NULL")
+    # use_alter breaks the trajectory_version <-> trajectory_step cycle (a step
+    # belongs to a version; a version forks before a step), so create/drop can be
+    # ordered at all.
+    fork_before_step_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trajectory_step.id", ondelete="SET NULL", use_alter=True, name="fk_version_fork_before_step"),
+        nullable=True,
+        index=True,
+    )
     fork_checkpoint_id: Mapped[UUID | None] = _fk("environment_checkpoint.id", nullable=True, ondelete="SET NULL")
     environment_image_digest: Mapped[str] = mapped_column(String(96), default="")
     producer: Mapped[str] = mapped_column(String(64), default="")       # agent name / "human"
@@ -450,6 +457,31 @@ class WorkspaceLease(Base):
     external_ref: Mapped[str] = mapped_column(Text, default="")  # pid / pod name
     status: Mapped[str] = mapped_column(String(16), default="provisioning", index=True)  # provisioning|ready|expired|terminated
     environment_image_digest: Mapped[str] = mapped_column(String(96), default="")
+    # What this workspace's gym was last SEEDED with, written only after a reset
+    # actually succeeded. A workspace outlives the live browser attached to it, so
+    # reopening a pane must not re-seed a world the annotator has been building by
+    # hand — but "skip the reset" is only safe against a durable record of what is
+    # in there. Process memory cannot answer it: a backend restart is precisely one
+    # of the events that drops the attachment while the container keeps running.
+    #
+    # Nullable, and `seeded_seed` is a nullable Integer rather than defaulting to 0,
+    # so "seeded with seed 0" stays distinguishable from "never seeded".
+    seeded_task_key: Mapped[str | None] = mapped_column(Text, nullable=True)   # the registry key we POSTed
+    seeded_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)    # the id the GYM echoed back
+    seeded_seed: Mapped[int | None] = mapped_column(nullable=True)
+    # Which VERSION's world this workspace holds. A fork's world is the fork point
+    # of one specific version, and two versions of the same attempt share a
+    # (task, seed) — so without this, switching versions and reopening would reuse
+    # the previous version's world under a marker that only checks (task, seed).
+    # NULL = a plain seed with no branch prefix (an unforked attempt).
+    seeded_version_id: Mapped[UUID | None] = _fk("trajectory_version.id", nullable=True, ondelete="SET NULL")
+    # How far the branch prefix was replayed into this workspace's world on the
+    # last seed. NULL total = no rebuild was attempted (an unforked attempt).
+    # Kept here, not in process memory, because the claim is about what is in THAT
+    # gym — it must survive a backend restart and die with the workspace.
+    restore_done: Mapped[int | None] = mapped_column(nullable=True)
+    restore_total: Mapped[int | None] = mapped_column(nullable=True)
+    restore_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())

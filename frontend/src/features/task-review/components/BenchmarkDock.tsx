@@ -11,6 +11,7 @@ export function BenchmarkDock({
   submitError,
   onRun,
   onSubmit,
+  submitNote,
 }: {
   reward: number | null;
   benchmarkRun: boolean;
@@ -21,7 +22,14 @@ export function BenchmarkDock({
   submittedKind?: string | null;
   submitError?: string | null;
   onRun: () => void;
-  onSubmit: () => void;
+  /** The LEGACY submit. Undefined on an attempt that has a version graph: that
+   *  path builds its golden from the recorded run plus a branch and cannot
+   *  express a rejected step, so the button is absent rather than disabled —
+   *  a disabled control an annotator cannot explain is still a question. */
+  onSubmit?: () => void;
+  /** What stands in for the button when there is no legacy submit. Says where
+   *  shipping happens instead, so the empty corner is never a dead end. */
+  submitNote?: string;
 }) {
   const numeralColor = reward == null ? t.n4 : reward === 1 ? t.greenDark : t.redDark;
   const numeral = reward == null ? "—" : String(reward);
@@ -70,9 +78,13 @@ export function BenchmarkDock({
             <Button variant={benchmarkRun ? "secondary" : "primary"} onClick={onRun} style={{ minHeight: 44 }}>
               {benchmarkRun ? "Re-run benchmark" : "Run benchmark"}
             </Button>
-            <Button variant="primary" disabled={!canSubmit} onClick={onSubmit} style={{ minHeight: 44 }}>
-              Approve &amp; submit to dataset
-            </Button>
+            {onSubmit ? (
+              <Button variant="primary" disabled={!canSubmit} onClick={onSubmit} style={{ minHeight: 44 }}>
+                Approve &amp; submit to dataset
+              </Button>
+            ) : submitNote ? (
+              <span style={{ maxWidth: 320, fontSize: "0.78rem", lineHeight: 1.45, fontWeight: weight.semibold, color: t.n2 }}>{submitNote}</span>
+            ) : null}
           </>
         )}
       </div>

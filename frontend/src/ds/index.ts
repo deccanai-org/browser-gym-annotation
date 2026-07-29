@@ -4,6 +4,7 @@ export { Icon } from "./Icon";
 export type { IconName } from "./Icon";
 export { FocusBadge } from "./FocusBadge";
 export { Button } from "./Button";
+export { Pressable } from "./Pressable";
 export { Tag } from "./Tag";
 export { Meter } from "./Meter";
 export type { MeterState } from "./Meter";

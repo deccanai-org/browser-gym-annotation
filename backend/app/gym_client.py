@@ -191,6 +191,17 @@ class GymEndpoint:
     def verify(self, step: int = 0) -> dict | None:
         return _req("POST", "/_harness/verify", {"step": step}, base_url=self.base_url)
 
+    def tick(self, step: int = 0) -> dict | None:
+        """Advance the deterministic clock and flush any now-due scheduled event.
+
+        This is the ONLY thing that calls scheduler.advance_and_flush, so without
+        it a task with a schedule never receives its async email or price change
+        — and every world from that step on is missing something the recording
+        has. The backfill ticks when it reconstructs those tasks; a replay that
+        cannot tick could never reproduce what the backfill wrote.
+        """
+        return _req("POST", "/_harness/tick", {"step": step}, base_url=self.base_url)
+
     def load_state(self, task_id: str, seed: int, state: dict, step: int | None = None) -> dict | None:
         body: dict = {"task_id": task_id, "seed": seed, "state": state}
         if step is not None:
@@ -214,3 +225,54 @@ class GymEndpoint:
 
     def screenshot(self, path: str) -> bytes | None:
         return _screenshot_bytes(path, base_url=self.base_url)
+
+
+class LiveBrowserClient:
+    """A live browser session — the executor a manual/replay flow drives.
+
+    Separate from GymEndpoint on purpose: the gym owns world state, the live
+    browser service owns a browser, and neither imports the other. This pairs
+    them, because validating a committed sequence needs both — the actions go to
+    the browser, the state comparison reads the gym.
+    """
+
+    __slots__ = ("base_url", "session_id", "ticket", "gym")
+
+    def __init__(self, base_url: str, session_id: str, ticket: str, gym: "GymEndpoint | None" = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.session_id = session_id
+        self.ticket = ticket
+        self.gym = gym
+
+    def _post(self, path: str, body: dict, timeout: int = 30) -> dict | None:
+        url = f"{self.base_url}/live/sessions/{self.session_id}{path}"
+        req = urllib.request.Request(
+            url, data=json.dumps({**body, "ticket": self.ticket}).encode(),
+            method="POST", headers={"content-type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+            return None
+
+    # --- replay.Executor ----------------------------------------------------
+    def act(self, kind: str, locator: dict | None, args: dict | None) -> dict:
+        out = self._post("/act", {"kind": kind, "locator": locator or {}, "args": args or {}})
+        # An unreachable live browser is NOT a failed action — say so, so the
+        # annotator isn't told their trajectory is wrong when the service is down.
+        return out or {"ok": False, "error": "live browser unreachable"}
+
+    def describe(self, x: float, y: float) -> dict:
+        return self._post("/describe", {"x": x, "y": y}) or {}
+
+    def world(self) -> dict | None:
+        return self.gym.world() if self.gym is not None else None
+
+    def info(self) -> dict | None:
+        url = f"{self.base_url}/live/sessions/{self.session_id}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as r:
+                return json.loads(r.read())
+        except Exception:  # noqa: BLE001
+            return None

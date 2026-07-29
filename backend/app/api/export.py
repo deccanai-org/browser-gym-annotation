@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import models
+from app import canonical, models
 from app.auth import require_reviewer
 from app.db import get_db
 
@@ -43,20 +43,73 @@ def _base_trajectory(db: Session, s: models.ReviewSession) -> models.Trajectory 
     for the same task. Looking the trajectory up by the human session id alone
     therefore found nothing and shipped every gym sample with an empty
     recorded_trajectory (and a golden that was empty, or worse, only the correction
-    tail starting at a non-zero index). Resolve the canonical run exactly as
-    persisted-review does: the OLDEST gym trajectory carrying a replay payload for
-    this task.
+    tail starting at a non-zero index). Resolve the canonical run through the ONE
+    resolver, so a shipped sample names the same run the annotator reviewed — this
+    copy of the rule had already drifted (it carried no LIMIT where the other three
+    did, so on the same data it could answer differently).
     """
     own = _latest(db, models.Trajectory, s.id, models.Trajectory.created_at.desc())
     if own is not None:
         return own
-    rows = db.scalars(
-        select(models.Trajectory)
-        .join(models.ReviewSession, models.Trajectory.session_id == models.ReviewSession.id)
-        .where(models.ReviewSession.task_id == s.task_id, models.Trajectory.source == "gym")
-        .order_by(models.Trajectory.created_at.asc())
-    ).all()
-    return next((t for t in rows if t.raw), None)
+    return canonical.for_attempt(db, s)
+
+
+def _versioned_sample(
+    db: Session, s: models.ReviewSession, task, annotator, sub, frozen: dict,
+    recorded: list[dict], seed_state: dict,
+) -> dict:
+    """The deliverable for a version-bound submission — assembled entirely from
+    the frozen snapshot, so nothing it says can drift after it shipped."""
+    tv = frozen["trajectory_version"]
+    golden = frozen.get("golden_trajectory", [])
+    # The correction is no longer a scalar fork index plus a text blob: it is the
+    # lineage, and each step says who authored it and under whose instruction.
+    corrections = [
+        {"version_no": st_v["versionNo"], "kind": st_v["kind"], "producer": st_v["producer"]}
+        for st_v in tv.get("lineage", []) if st_v["versionNo"] > 1
+    ]
+    return {
+        "sample_id": str(s.id),
+        "schema": "golden-sample/2",
+        "task": {
+            "id": task.external_id if task else None,
+            "revision": frozen.get("task_revision", 1),
+            "prompt": task.prompt if task else "",
+            "category": task.category if task else "",
+            "difficulty": task.difficulty if task else "",
+            "constraints": (task.meta or {}).get("constraints", []) if task else [],
+            "allowed_sites": (task.meta or {}).get("allowedSites", []) if task else [],
+            "seed": task.seed if task else 0,
+        },
+        "initial_state": seed_state.get("world") or {k: v for k, v in seed_state.items() if k != "world"},
+        "recorded_trajectory": recorded,
+        "trajectory_version": {
+            "id": tv["id"], "version_no": tv["versionNo"], "kind": tv["kind"],
+            "environment_image_digest": tv.get("environment_image_digest", ""),
+            "lineage": tv.get("lineage", []),
+        },
+        "corrections": corrections,
+        "golden_trajectory": golden,              # per-step actor, locator, intent, world hash
+        "verifiers": [
+            {"id": v.get("id"), "level": v.get("level"), "assertion": v.get("assertion"),
+             "check": v.get("check"), "gym_result": v.get("gym_result"),
+             "added_by_human": v.get("added_by_human")}
+            for v in frozen.get("verifiers", [])
+        ],
+        "verifier_suite_version": frozen.get("suite_version"),
+        "reward": frozen.get("reward"),
+        "final_world_hash": frozen.get("final_world_hash", ""),
+        "submission": {
+            "reward": sub.reward, "kind": sub.kind, "accepted": sub.accepted,
+            "override": sub.submitted_with_override,
+            "overridden_verifiers": frozen.get("overridden", []),
+            "benchmark_run_id": str(sub.benchmark_run_id) if sub.benchmark_run_id else None,
+            "at": sub.created_at.isoformat(),
+        },
+        "annotator": annotator.email if annotator else None,
+        "metadata": {"source": s.source, "agent": s.agent or None, "status": s.status,
+                     "created_at": s.created_at.isoformat()},
+    }
 
 
 def build_sample(db: Session, s: models.ReviewSession) -> dict:
@@ -93,6 +146,12 @@ def build_sample(db: Session, s: models.ReviewSession) -> dict:
     # post-submit mutation of the live suite/benchmark. Fall back to the live
     # rebuild only for legacy submissions predating the snapshot column.
     frozen = sub.snapshot if (sub is not None and sub.snapshot) else None
+    # A version-bound submission carries the whole lineage in its snapshot, so the
+    # sample ships WHAT WAS APPROVED — including which steps were the agent's and
+    # which the human's. The legacy branch below reconstructs an approximation
+    # from a scalar fork index, which cannot express a hybrid trajectory at all.
+    if frozen and frozen.get("trajectory_version"):
+        return _versioned_sample(db, s, task, annotator, sub, frozen, recorded, seed_state)
     if frozen:
         verifiers = [
             {"level": v.get("level"), "assertion": v.get("assertion"),

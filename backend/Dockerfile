@@ -1,6 +1,15 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+# The docker CLI, for workspace isolation: each attempt's gym runs as its own
+# container (app/workspace/provider.py DockerRuntimeProvider). The backend image
+# holds neither the gym source nor Playwright, so the process provider cannot
+# work from in here. Needs /var/run/docker.sock mounted to be usable.
+# docker-cli, NOT docker.io: with --no-install-recommends the latter installs the
+# daemon and leaves only docker-init, no client binary at all (measured).
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # deps first for layer caching

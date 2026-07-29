@@ -16,13 +16,20 @@ DB_NAME="${DB_NAME:-browser_gym_annotator}"
 DB_USER="${DB_USER:-annotator}"
 DB_TIER="${DB_TIER:-db-f1-micro}"             # smallest/cheapest; bump for load
 DB_PASS="${DB_PASS:-}"                         # required on first run (or set via Secret Manager)
+AUTH_SECRET="${AUTH_SECRET:-}"                 # REQUIRED — signs session cookies; the prod backend refuses to boot without it
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"    # optional (M6b live agent)
-GYM_URL="${GYM_URL:-}"                         # optional (M6c/M8) — a reachable gym URL
+GYM_URL="${GYM_URL:-}"                         # a reachable gym service URL (deploy the gym separately — see docs/DEPLOY.md)
+LIVE_BROWSER_URL="${LIVE_BROWSER_URL:-}"       # a reachable live-browser service URL (for the live pane; see docs/DEPLOY.md)
 
 AR="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 CONN="${PROJECT}:${REGION}:${SQL_INSTANCE}"
 
 say() { printf "\n\033[1;34m▸ %s\033[0m\n" "$*"; }
+
+# Fail fast on the two secrets the platform cannot run without, with a clear
+# message — the prod backend's boot guard rejects a missing/default AUTH_SECRET,
+# so catching it here beats a container that crash-loops on deploy.
+[ -n "$AUTH_SECRET" ] || { echo "Set AUTH_SECRET (a strong random string; signs session cookies). e.g. AUTH_SECRET=\$(openssl rand -hex 32)"; exit 1; }
 
 gcloud config set project "$PROJECT" >/dev/null
 
@@ -55,9 +62,16 @@ gcloud builds submit frontend --tag "$AR/frontend:latest"
 say "Deploy backend (Cloud Run) — runs migrations on boot"
 # '|' as the env-var delimiter (^|^) — none of our values contain it — so a
 # DATABASE_URL / CORS list with commas or colons can't corrupt var parsing.
-BACKEND_ENV="^|^ENV=prod|AUTO_CREATE_ALL=false|RUN_MIGRATIONS=1|DATABASE_URL=${DB_URL}|CORS_ORIGINS=[\"*\"]"
+#
+# CORS_ORIGINS=[] (not ["*"]): the browser only ever calls /api on the FRONTEND
+# origin, which nginx proxies to the backend server-side — so CORS is never
+# exercised in the normal flow, and a wildcard on an --allow-unauthenticated
+# service is an unnecessary exposure. Add the frontend origin here only if you
+# intend direct cross-origin API calls.
+BACKEND_ENV="^|^ENV=prod|AUTO_CREATE_ALL=false|RUN_MIGRATIONS=1|DATABASE_URL=${DB_URL}|AUTH_SECRET=${AUTH_SECRET}|CORS_ORIGINS=[]"
 [ -n "$ANTHROPIC_API_KEY" ] && BACKEND_ENV="${BACKEND_ENV}|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}"
 [ -n "$GYM_URL" ]           && BACKEND_ENV="${BACKEND_ENV}|GYM_URL=${GYM_URL}"
+[ -n "$LIVE_BROWSER_URL" ]  && BACKEND_ENV="${BACKEND_ENV}|LIVE_BROWSER_URL=${LIVE_BROWSER_URL}"
 gcloud run deploy annotator-backend \
   --image "$AR/backend:latest" --region "$REGION" --platform managed --allow-unauthenticated \
   --add-cloudsql-instances "$CONN" --set-env-vars "$BACKEND_ENV" \

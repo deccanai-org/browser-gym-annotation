@@ -32,10 +32,37 @@ class Settings(BaseSettings):
     # gym process and `gym_url` becomes a fallback only. Off until gym_repo_path
     # is configured and verified, so the default stays the known-good behaviour.
     workspace_isolation: bool = False
-    workspace_runtime: str = "local_process"   # local_process | kubernetes
+    workspace_runtime: str = "local_process"   # local_process | docker | kubernetes
+    # The image a `docker` workspace runs. Build it from the gym repo:
+    #   docker build -t browser-gym:local .
+    gym_image: str = "browser-gym:local"
+    # How the BACKEND reaches a port published on the host. Inside a container
+    # localhost is the container itself, so a published workspace port is only
+    # reachable through the gateway.
+    docker_host_gateway: str = "host.docker.internal"
     workspace_idle_ttl_minutes: int = 75       # INACTIVITY-based; extended by human control or a running job
     workspace_max_per_annotator: int = 2       # a human workspace + one agent branch worker
     gym_image_digest: str = ""                 # environment version stamped onto checkpoints/versions
+    # The live browser service (CDP screencast + structured actions). A separate
+    # process from the gym on purpose: the gym owns world state, this owns a
+    # browser, and neither imports the other.
+    live_browser_url: str = "http://localhost:8877"
+    # How the BROWSER reaches the gym, when that differs from how this process
+    # does. The backend is containerised and uses host.docker.internal; the live
+    # browser runs on the host, where that name does not resolve. Empty means the
+    # two share a namespace, which is right on a single-host dev box.
+    gym_host_for_browser: str = ""
+    # How many prefix actions a live open will replay to rebuild a fork's world.
+    # Capped because it runs inside the open call: an annotator waiting on a pane
+    # is waiting on this, and a pathological trajectory should degrade to "rebuilt
+    # 60 of 140" rather than to a minute of nothing. 0 disables the rebuild
+    # entirely, which is the operator kill switch.
+    live_restore_max_steps: int = 60
+
+    # Rerun cap. 0 = OFF, which is the only safe default until manual capture has
+    # passed E2E — capping reruns before an annotator can finish a task by hand
+    # would strand them with no way forward.
+    agent_run_cap: int = 0
 
     env: str = "dev"
 

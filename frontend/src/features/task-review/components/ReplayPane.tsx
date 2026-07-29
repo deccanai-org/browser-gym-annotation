@@ -84,7 +84,7 @@ function Pill({ children, onClick, bg, border, color, leading }: { children: Rea
   );
 }
 
-function StepCard({ step, stepNumber, resolved, verified, onVerify, onCorrect }: { step: Step; stepNumber: number; resolved: boolean; verified: boolean; onVerify: () => void; onCorrect: () => void }) {
+function StepCard({ step, stepNumber, resolved, verified, onVerify, onCorrect }: { step: Step; stepNumber: number; resolved: boolean; verified: boolean; onVerify: () => void; onCorrect?: () => void }) {
   const isError = step.type === "error";
   const color = ACTION_COLOR[step.type];
   const pink = ACTION_COLOR.tab;
@@ -107,7 +107,12 @@ function StepCard({ step, stepNumber, resolved, verified, onVerify, onCorrect }:
         ) : (
           <Pill onClick={onVerify} bg={t.n9} border={t.n6} color={t.n1} leading={<Icon name="check" size={14} stroke={2} />}>Verify</Pill>
         )}
-        <Pill onClick={onCorrect} bg={`color-mix(in srgb, ${t.primary6} 10%, transparent)`} border={`color-mix(in srgb, ${t.primary6} 25%, transparent)`} color={t.primary6} leading={<Icon name="pencil" size={13} />}>Correct</Pill>
+        {/* Absent — not disabled — on an attempt with a version graph: this
+            correction lands as a branch the version graph cannot see, so the
+            golden it produces would contradict the annotator's own verdicts. */}
+        {onCorrect && (
+          <Pill onClick={onCorrect} bg={`color-mix(in srgb, ${t.primary6} 10%, transparent)`} border={`color-mix(in srgb, ${t.primary6} 25%, transparent)`} color={t.primary6} leading={<Icon name="pencil" size={13} />}>Correct</Pill>
+        )}
       </div>
     </div>
   );
@@ -170,7 +175,8 @@ export function ReplayPane({
   correcting: boolean;
   correctionSeed: string;
   onVerify: () => void;
-  onStartCorrect: () => void;
+  /** The LEGACY per-step correction. Undefined retires it for this attempt. */
+  onStartCorrect?: () => void;
   onCancelCorrect: () => void;
   onSaveCorrect: (text: string) => void;
   onPlayToggle: () => void;

@@ -124,6 +124,7 @@ export function VerifierSuite({
   onOverride,
   onRun,
   onSubmit,
+  submitNote,
 }: {
   state: ReviewState;
   onGenerate: () => void;
@@ -132,7 +133,10 @@ export function VerifierSuite({
   onEditVerifier: (id: string, assertion: string, code: string) => void;
   onOverride: (id: string) => void;
   onRun: () => void;
-  onSubmit: () => void;
+  /** Absent on an attempt with a version graph — that attempt ships through
+   *  finalize instead, and `submitNote` says so where the button used to be. */
+  onSubmit?: () => void;
+  submitNote?: string;
 }) {
   const [adding, setAdding] = useState(false);
 
@@ -200,6 +204,7 @@ export function VerifierSuite({
         submitError={state.submitError}
         onRun={onRun}
         onSubmit={onSubmit}
+        submitNote={submitNote}
       />
     </div>
   );

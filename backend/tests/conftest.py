@@ -45,6 +45,21 @@ def _ensure_annotator(factory, email: str, role: str = "annotator") -> None:
             db.commit()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_db_at_boot(monkeypatch, _session_factory):
+    """The lifespan's restart reconciler resolves its OWN session from
+    app.db.SessionLocal, which the get_db override does not touch — so every
+    TestClient(app) boot ran three DESTRUCTIVE reconcilers against whatever
+    database happened to be configured, and one of them SIGTERMs pids read from
+    lease rows. Point that seam at the test database too; `pytest` must never be
+    able to reach production state, let alone signal a process."""
+    import app.db as db_mod
+    import app.main as main_mod
+
+    monkeypatch.setattr(db_mod, "SessionLocal", _session_factory)
+    monkeypatch.setattr(main_mod, "SessionLocal", _session_factory, raising=False)
+
+
 @pytest.fixture()
 def client(_engine, _session_factory):
     def override_get_db():

@@ -11,8 +11,9 @@ from uuid import UUID as _UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import agent, gym_client, gym_review, jobs, models, verify, workspace
+from app import agent, canonical, checkpoints, gym_client, gym_review, jobs, models, recorder, verify, workspace
 from app.config import settings
+from app.auth import current_annotator
 from app.db import SessionLocal, get_db
 
 router = APIRouter(prefix="/api/gym", tags=["gym"])
@@ -104,19 +105,63 @@ def _persist_gym_review(db: Session, task_id: str, agent: str, run: dict, review
     # verbatim instead of re-driving a fresh, stochastic agent. `review` already
     # carries backendState + gymResume (set by the caller) but NOT yet sessionId
     # (added after this returns) — a shallow copy keeps that out of the snapshot.
-    traj = models.Trajectory(session_id=s.id, agent=agent, seed=seed, score=float(vr.get("score", 0.0) or 0.0), success=bool(vr.get("success")), source="gym", raw=(dict(review) if persist_raw else None))
+    # Stamp a prompt-edit re-run so it can never be mistaken for the task's own
+    # recorded failure. Without a marker it is indistinguishable from an original
+    # in the candidate set, and canonical selection has no way to keep it out — an
+    # annotator trying a reworded prompt would silently replace the curated
+    # breaker for every other annotator.
+    payload = dict(review) if persist_raw else None
+    if payload is not None and brief:
+        payload["promptOverride"] = True
+    traj = models.Trajectory(session_id=s.id, agent=agent, seed=seed, score=float(vr.get("score", 0.0) or 0.0), success=bool(vr.get("success")), source="gym", raw=payload)
     db.add(traj)
     db.flush()
     raw_steps = t.get("steps") or []  # 1:1 with review["steps"] (to_review enumerates them)
+    # Step 0's "before" is the seed world — capture-seed persisted it, so a fork
+    # before the FIRST action still has a state to restore from.
+    prev_cp = None
+    seed_world = (task.seed_state or {}).get("world")
+    if seed_world:
+        prev_cp = checkpoints.capture(
+            db, attempt_id=s.id, world=seed_world, step_clock=0,
+            browser={"url": t.get("initial_url") or ""},
+        )
     for i, st in enumerate(review["steps"]):
         raw = raw_steps[i] if i < len(raw_steps) else {}
+        # The full multi-app world AFTER this action — this is what makes
+        # "fork before step N" restorable instead of merely describable.
+        after_cp = None
+        if raw.get("world_after"):
+            after_cp = checkpoints.capture(
+                db, attempt_id=s.id, world=raw["world_after"],
+                backend_state=raw.get("snapshot_after") or {}, step_clock=i + 1,
+                browser={
+                    "url": raw.get("url_after") or st.get("url") or "",
+                    "activeTab": raw.get("active_tab"),
+                    "tabs": [x.get("url", "") for x in (raw.get("tab_strip") or []) if isinstance(x, dict)],
+                    "devicePixelRatio": raw.get("device_pixel_ratio") or 1.0,
+                },
+            )
         db.add(models.TrajectoryStep(
             trajectory_id=traj.id, idx=st["idx"], action_type=st["type"],
             description=st["description"], tab_id=st.get("tabId", ""),
             screenshot_url=st.get("image") or "",
             url_after=st.get("url") or "",           # the step's landing URL — schema has the column
             reasoning=(raw.get("reasoning") or "").strip(),
+            actor="agent",
+            arguments=raw.get("action_args") or {},
+            # Derive the replayable locator from the recorded selector. Missing it
+            # makes the step unreplayable, and finalize refuses the whole
+            # trajectory rather than replaying a shortened one — so without this
+            # NO canonical gym run could ever ship, which is every breaker in the
+            # set. The same omission was fixed in agent_runs.complete(); this is
+            # the other half of the same write path.
+            semantic_locator=recorder.locator_from_selector((raw.get("action_args") or {}).get("selector", "")),
+            world_after=raw.get("world_after") or None,
+            before_checkpoint_id=prev_cp.id if prev_cp is not None else None,
+            after_checkpoint_id=after_cp.id if after_cp is not None else None,
         ))
+        prev_cp = after_cp or prev_cp
 
     suite = models.VerifierSuite(session_id=s.id, version=1)
     db.add(suite)
@@ -281,23 +326,12 @@ def gym_persisted_review(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.scalar(select(models.Task).where(models.Task.external_id == task_id))
     if task is None:
         raise HTTPException(status_code=404, detail="no persisted gym review for this task")
-    # The CANONICAL run: the OLDEST trajectory carrying a real replay payload — i.e.
-    # the first full run-review of this breaker. Opening a breaker must ALWAYS show
-    # its canonical breaking run, never something layered on top:
-    #   - drive-forward continuations persist with raw=None → skipped here (a step
-    #     correction forks on top, on the human session, and never replaces this);
-    #   - a prompt-edit re-run is a NEWER full run shown transiently in-session, but
-    #     must not become the breaker's canonical view on reopen.
-    # Filtering `t.raw` in Python skips SQL NULL, legacy JSON-`null`, and empty
-    # payloads across both Postgres and SQLite.
-    trajs = db.scalars(
-        select(models.Trajectory)
-        .join(models.ReviewSession, models.Trajectory.session_id == models.ReviewSession.id)
-        .where(models.ReviewSession.task_id == task.id, models.Trajectory.source == "gym")
-        .order_by(models.Trajectory.created_at.asc())
-        .limit(50)
-    ).all()
-    traj = next((t for t in trajs if t.raw), None)  # oldest real payload = the canonical breaking run
+    # Opening a breaker must ALWAYS show its canonical breaking run, never something
+    # layered on top: a drive-forward continuation persists with raw=None, and a
+    # prompt-edit re-run is a newer full run shown transiently in-session. Which run
+    # that is, is BOUND — see app/canonical.py; it is not re-derived here, which is
+    # how this copy of the rule drifted from the other three.
+    traj = canonical.for_task(db, task.id)
     if traj is None:
         raise HTTPException(status_code=404, detail="no persisted gym review for this task")
     review = dict(traj.raw)
@@ -307,10 +341,23 @@ def gym_persisted_review(task_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/jobs/{job_id}")
-def gym_job(job_id: str) -> dict:
+def gym_job(job_id: str, current: models.Annotator = Depends(current_annotator),
+            db: Session = Depends(get_db)) -> dict:
+    """Poll a background job. A job that belongs to an ATTEMPT is readable only by
+    that attempt's owner — durable agent runs are addressable by a bare UUID, so
+    without this any authenticated annotator could watch anyone else's run. 404,
+    not 403, so the id's existence is not disclosed either (the same rule
+    _owned_session states)."""
     job = jobs.store.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="unknown or expired job")
+    attempt_id = (job.extra or {}).get("attemptId")
+    if attempt_id:
+        owner = db.scalar(
+            select(models.ReviewSession.annotator_id).where(models.ReviewSession.id == _UUID(attempt_id))
+        )
+        if owner != current.id:
+            raise HTTPException(status_code=404, detail="unknown or expired job")
     return job.public()
 
 

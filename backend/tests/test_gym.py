@@ -210,7 +210,14 @@ def _synthetic_gym_review(task_id: str, *, success: bool):
     ]
     run = {"seed": 0, "trajectory": {
         "verifier_result": {"score": float(reward), "success": success},
-        "steps": [{"reasoning": f"r{i}"} for i in range(3)],
+        # Faithful to the real harness: a click records the selector it used
+        # (trajectories/openai/*.jsonl — action_args {"selector": "[data-test-id=…]"}).
+        # A fixture with empty action_args cannot catch a missing locator, which is
+        # exactly how the unreplayable-canonical-run bug survived the suite.
+        "steps": [{"reasoning": f"r{i}",
+                   "action_kind": "click",
+                   "action_args": {"selector": f"[data-test-id='btn-{i}']"}}
+                  for i in range(3)],
         "task_category": "M", "task_difficulty": "medium", "initial_url": "/shop"}}
     review = {
         "task": {"title": "T", "prompt": "do it", "priority": "High",

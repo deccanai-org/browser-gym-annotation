@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import canonical
 from app.agent import deterministic_branch, generate_branch
 from app.api.tasks import _FIXTURE, task_fixture
 from app.auth import current_annotator
@@ -31,6 +32,7 @@ from app.models import (
     Trajectory,
     TrajectoryBranch,
     TrajectoryStep,
+    TrajectoryVersion,
     Verifier,
     VerifierSuite,
 )
@@ -235,18 +237,16 @@ def _latest_benchmark_for_session(db: Session, session_id: UUID) -> BenchmarkRun
 
 
 def _canonical_gym_verdict(db: Session, task_id: UUID) -> BenchmarkRun | None:
-    """The CANONICAL breaker verdict for a task — the benchmark of the OLDEST gym
-    system run carrying a real replay payload (mirrors gym persisted-review's
-    'oldest raw' selection), so every annotator's baseline scores from the exact
-    breaker they see, never a stranger's re-run."""
-    trajs = db.scalars(
-        select(Trajectory)
-        .join(ReviewSession, ReviewSession.id == Trajectory.session_id)
-        .where(ReviewSession.task_id == task_id, Trajectory.source == "gym")
-        .order_by(Trajectory.created_at.asc())
-        .limit(50)
-    ).all()
-    canon = next((t for t in trajs if t.raw), None)
+    """The CANONICAL breaker verdict for a task, so every annotator's baseline
+    scores from the exact breaker they SEE.
+
+    Resolved through the one resolver rather than a fourth private copy of the
+    rule. A copy here is worse than elsewhere: it decides the reward while
+    persisted-review decides the trajectory, so any drift between them scores an
+    annotator against a run that is not the one on their screen — silently, and
+    with a plausible-looking number.
+    """
+    canon = canonical.for_task(db, task_id)
     return _latest_benchmark_for_session(db, canon.session_id) if canon is not None else None
 
 
@@ -486,6 +486,37 @@ def _get_session(db: Session, session_id: UUID, *, lock: bool = False) -> Review
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     return s
+
+
+def _assert_no_unshipped_version_work(db: Session, s: ReviewSession) -> None:
+    """Refuse a LEGACY submit when the attempt has corrected work in the version
+    graph that this path cannot express.
+
+    The two correction systems are both reachable from the same screen. The legacy
+    path builds its golden from the recorded run plus a TrajectoryBranch, and
+    knows nothing about versions — so an annotator who rejected a step in the
+    version graph and then pressed the old Submit shipped a golden that still
+    CONTAINED the rejected step, with no binding and no sign anything was wrong.
+    Measured: fork before step 2, submit, and the exported sample carried all
+    three steps. Silently shipping a golden that contradicts the annotator's own
+    decision is worse than any error, so this fails closed and names the path that
+    does honour the work.
+    """
+    head_id = s.active_version_id
+    if head_id is None:
+        return
+    head = db.get(TrajectoryVersion, head_id)
+    if head is None or head.parent_version_id is None:
+        # v1 alone is the recorded run itself — the legacy golden agrees with it.
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"this attempt has corrected work on v{head.version_no} that the legacy submit "
+            "cannot ship — finalize the version instead (POST /api/sessions/{id}/finalize), "
+            "which binds the approved version, its suite and its end state"
+        ),
+    )
 
 
 def _assert_not_submitted(s: ReviewSession) -> None:
@@ -790,6 +821,7 @@ def submit(session_id: UUID, body: SubmitBody, current: Annotator = Depends(curr
         # Immutable once submitted — start a fresh session to re-annotate
         # (POST /tasks/{id}/sessions with fresh=true) rather than superseding.
         raise HTTPException(status_code=409, detail="session already submitted — start a new session to re-annotate")
+    _assert_no_unshipped_version_work(db, s)
     suite = _latest_suite(db, s.id)
     if suite is None:
         raise HTTPException(status_code=409, detail="no verifier suite to submit")
