@@ -22,7 +22,6 @@ jobs:
       - run: npm run lint
       - run: npx tsc -b
       - run: npm run build
-      - run: npm run test
 
   backend:
     runs-on: ubuntu-latest

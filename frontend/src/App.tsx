@@ -1,4 +1,6 @@
+import { GoogleOAuthProvider } from "@react-oauth/google";
 import { AuthProvider, useAuth } from "./features/auth/AuthContext";
+import { GOOGLE_CLIENT_ID } from "./features/auth/config";
 import { LoginScreen } from "./features/auth/LoginScreen";
 import { TaskReview } from "./features/task-review/TaskReview";
 
@@ -17,8 +19,10 @@ function Gate() {
 
 export function App() {
   return (
-    <AuthProvider>
-      <Gate />
-    </AuthProvider>
+    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+      <AuthProvider>
+        <Gate />
+      </AuthProvider>
+    </GoogleOAuthProvider>
   );
 }

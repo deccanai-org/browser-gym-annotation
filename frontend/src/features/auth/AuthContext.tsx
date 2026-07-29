@@ -1,13 +1,19 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { type Annotator, fetchMe, login as apiLogin, logout as apiLogout, type LoginResult } from "./authApi";
+import {
+  type Annotator,
+  type LoginResult,
+  logout as apiLogout,
+  restoreSession,
+  signInWithGoogle,
+} from "./authApi";
 
 interface AuthState {
   annotator: Annotator | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<LoginResult>;
+  signIn: (credential: string, staySignedIn?: boolean) => Promise<LoginResult>;
   signOut: () => Promise<void>;
-  refresh: () => Promise<void>;
+  refresh: () => void;
 }
 
 const AuthCtx = createContext<AuthState | null>(null);
@@ -17,30 +23,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let alive = true;
-    fetchMe().then((a) => {
-      if (!alive) return;
-      setAnnotator(a);
-      setLoading(false);
-    });
-    return () => {
-      alive = false;
-    };
+    setAnnotator(restoreSession());
+    setLoading(false);
   }, []);
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const r = await apiLogin(email, password);
+  const signIn = useCallback(async (credential: string, staySignedIn = false) => {
+    const r = await signInWithGoogle(credential, staySignedIn);
     if (r.ok) setAnnotator(r.annotator);
     return r;
   }, []);
 
   const signOut = useCallback(async () => {
-    await apiLogout();
+    apiLogout();
     setAnnotator(null);
   }, []);
 
-  const refresh = useCallback(async () => {
-    setAnnotator(await fetchMe());
+  const refresh = useCallback(() => {
+    setAnnotator(restoreSession());
   }, []);
 
   return <AuthCtx.Provider value={{ annotator, loading, signIn, signOut, refresh }}>{children}</AuthCtx.Provider>;

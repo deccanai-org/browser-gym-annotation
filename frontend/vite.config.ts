@@ -4,6 +4,6 @@ import { defineConfig } from "vite";
 // Task Review is a fixed 1440px design; no SSR needed — a plain SPA.
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5180, host: true},
-  preview: { port: 5180 },
+  server: { port: 3000, host: true},
+  preview: { port: 3000 },
 });

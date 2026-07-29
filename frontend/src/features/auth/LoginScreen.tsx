@@ -1,37 +1,28 @@
 import { useState } from "react";
 import { useAuth } from "./AuthContext";
-
-// The seeded dummy accounts (dev/testing only). Click one to fill the email; the
-// shared dev password is shown below. These are throwaway test fixtures.
-const TEST_ACCOUNTS = [
-  { email: "ana@deccan.ai", name: "Ana Rivera", role: "reviewer" },
-  { email: "ben@deccan.ai", name: "Ben Okafor", role: "annotator" },
-  { email: "chloe@deccan.ai", name: "Chloe Tan", role: "annotator" },
-  { email: "diego@deccan.ai", name: "Diego Santos", role: "annotator" },
-  { email: "ela@deccan.ai", name: "Ela Novak", role: "annotator" },
-];
-const DEV_PASSWORD = "annotate1";
+import { GoogleAuthButton } from "./GoogleAuthButton";
 
 const C = {
   bg: "#f4f6fa", card: "#ffffff", ink: "#1a2233", muted: "#5c6676", faint: "#8b94a3",
-  border: "#e2e7ee", primary: "#4f46e5", primaryInk: "#ffffff", danger: "#c02b1d", chip: "#f2f4f8",
+  border: "#e2e7ee", primary: "#4f46e5", danger: "#c02b1d", chip: "#f2f4f8",
 };
 
 export function LoginScreen() {
   const { signIn } = useAuth();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [staySignedIn, setStaySignedIn] = useState(true);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCredential = async (credential: string) => {
     if (busy) return;
     setBusy(true);
     setError(null);
-    const r = await signIn(email.trim(), password);
-    setBusy(false);
-    if (!r.ok) setError(r.error);
+    const r = await signIn(credential, staySignedIn);
+    // On success the app re-renders to the platform; only reset on failure.
+    if (!r.ok) {
+      setError(r.error);
+      setBusy(false);
+    }
   };
 
   return (
@@ -41,48 +32,35 @@ export function LoginScreen() {
           <span style={{ width: 34, height: 34, borderRadius: 9, background: C.primary, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 18 }}>◆</span>
           <span style={{ fontWeight: 700, fontSize: 17, color: C.ink }}>Browser-Use Gym · Annotator</span>
         </div>
-        <form onSubmit={submit} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "26px 24px", boxShadow: "0 1px 3px rgba(20,30,50,.05)" }}>
+
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "28px 24px", boxShadow: "0 1px 3px rgba(20,30,50,.05)" }}>
           <h1 style={{ fontSize: 19, margin: "0 0 4px", color: C.ink }}>Sign in</h1>
-          <p style={{ margin: "0 0 18px", color: C.muted, fontSize: 13.5 }}>Log in to your annotator account.</p>
+          <p style={{ margin: "0 0 20px", color: C.muted, fontSize: 13.5 }}>Continue with your Google account to access the platform.</p>
 
-          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Email</label>
-          <input
-            type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus autoComplete="username"
-            placeholder="you@deccan.ai"
-            style={{ width: "100%", padding: "10px 12px", borderRadius: 9, border: `1px solid ${C.border}`, fontSize: 14, color: C.ink, outline: "none", marginBottom: 14, boxSizing: "border-box" }}
-          />
-          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Password</label>
-          <input
-            type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password"
-            placeholder="••••••••"
-            style={{ width: "100%", padding: "10px 12px", borderRadius: 9, border: `1px solid ${C.border}`, fontSize: 14, color: C.ink, outline: "none", marginBottom: 16, boxSizing: "border-box" }}
-          />
-          {error && <div role="alert" style={{ background: "#fdece9", color: C.danger, borderRadius: 8, padding: "8px 11px", fontSize: 13, marginBottom: 14 }}>{error}</div>}
-          <button
-            type="submit" disabled={busy || !email || !password}
-            style={{ width: "100%", padding: "11px", borderRadius: 9, border: "none", background: busy || !email || !password ? "#a9a6ec" : C.primary, color: C.primaryInk, fontWeight: 700, fontSize: 14.5, cursor: busy || !email || !password ? "default" : "pointer" }}
-          >
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+          {error && (
+            <div role="alert" style={{ background: "#fdece9", color: C.danger, borderRadius: 8, padding: "8px 11px", fontSize: 13, marginBottom: 16 }}>
+              {error}
+            </div>
+          )}
 
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginTop: 14 }}>
-          <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: C.faint, marginBottom: 10 }}>Test accounts · click to fill email</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-            {TEST_ACCOUNTS.map((a) => (
-              <button
-                key={a.email} type="button" onClick={() => { setEmail(a.email); setError(null); }}
-                title={`${a.name} · ${a.role}`}
-                style={{ border: `1px solid ${C.border}`, background: email === a.email ? "#eceafc" : C.chip, color: C.ink, borderRadius: 20, padding: "5px 11px", fontSize: 12.5, cursor: "pointer", fontWeight: 500 }}
-              >
-                {a.name}{a.role === "reviewer" ? " ★" : ""}
-              </button>
-            ))}
+          <div style={{ display: "flex", justifyContent: "center", minHeight: 44, opacity: busy ? 0.6 : 1, pointerEvents: busy ? "none" : "auto" }}>
+            <GoogleAuthButton
+              onCredential={handleCredential}
+              onError={() => setError("Google sign-in failed. Please try again.")}
+            />
           </div>
-          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 12 }}>
-            Password for all test accounts: <code style={{ background: C.chip, padding: "2px 7px", borderRadius: 6, fontSize: 12.5 }}>{DEV_PASSWORD}</code>
-          </div>
+
+          {busy && <div style={{ textAlign: "center", color: C.faint, fontSize: 12.5, marginTop: 12 }}>Signing in…</div>}
+
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 18, color: C.muted, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={staySignedIn} onChange={(e) => setStaySignedIn(e.target.checked)} />
+            Keep me signed in
+          </label>
         </div>
+
+        <p style={{ textAlign: "center", color: C.faint, fontSize: 12, marginTop: 16 }}>
+          Sign-in is restricted to authorized annotator accounts.
+        </p>
       </div>
     </div>
   );
