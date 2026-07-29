@@ -5,7 +5,7 @@ GOOGLE_CLIENT_ID = 908367891804-cohtn6o8akmjdubh1gp4fgbq49ra3ldl.apps.googleuser
 
 DEV_ARGS = VITE_ENV=development \
            VITE_DOMAIN=deccanexperts.ai \
-           VITE_ROOT=https://usersvc.delta.deccanexperts.ai \
+           VITE_ROOT=https://usersvc.delta.soulhq.ai \
            VITE_GOOGLE_CLIENT_ID=$(GOOGLE_CLIENT_ID) \
            VITE_LIVE_BASE=https://live-browser.delta.deccanexperts.ai
 
