@@ -19,5 +19,9 @@ export const AUTH_ROOT = (import.meta.env.VITE_ROOT as string | undefined)?.trim
 // The exchange endpoint on the auth backend (reference: /auth/v2/signin).
 export const SIGNIN_PATH = "/auth/v2/signin";
 
+// Authenticated user-details endpoint. Used to VALIDATE a session token (a 200
+// with a Bearer token means the token is live) and to enrich the profile.
+export const DETAILS_PATH = "/v1/user/details";
+
 // Issuer identifier sent in the sign-in request body (reference: "platform").
 export const AUTH_ISSUER = (import.meta.env.VITE_ISSUER as string | undefined)?.trim() || "platform";

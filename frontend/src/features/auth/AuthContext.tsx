@@ -4,7 +4,7 @@ import {
   type Annotator,
   type LoginResult,
   logout as apiLogout,
-  restoreSession,
+  resolveSession,
   signInWithGoogle,
 } from "./authApi";
 
@@ -13,7 +13,7 @@ interface AuthState {
   loading: boolean;
   signIn: (credential: string, staySignedIn?: boolean) => Promise<LoginResult>;
   signOut: () => Promise<void>;
-  refresh: () => void;
+  refresh: () => Promise<void>;
 }
 
 const AuthCtx = createContext<AuthState | null>(null);
@@ -23,8 +23,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setAnnotator(restoreSession());
-    setLoading(false);
+    let alive = true;
+    // Resolves a URL token hand-off (?token=…&refreshToken=…) or a stored
+    // cookie session, validating against the backend before trusting it.
+    resolveSession().then((a) => {
+      if (!alive) return;
+      setAnnotator(a);
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const signIn = useCallback(async (credential: string, staySignedIn = false) => {
@@ -38,8 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAnnotator(null);
   }, []);
 
-  const refresh = useCallback(() => {
-    setAnnotator(restoreSession());
+  const refresh = useCallback(async () => {
+    setAnnotator(await resolveSession());
   }, []);
 
   return <AuthCtx.Provider value={{ annotator, loading, signIn, signOut, refresh }}>{children}</AuthCtx.Provider>;
