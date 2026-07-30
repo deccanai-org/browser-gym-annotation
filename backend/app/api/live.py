@@ -38,7 +38,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import gym_client, models, restore, versions, workspace
+from app import cua_hub, gym_client, models, restore, versions, workspace
 from app.api.sessions import _owned_session
 from app.auth import current_annotator
 from app.config import settings
@@ -121,6 +121,8 @@ class _Attached:
     # rebuild. None and "rebuilt 0 of 9" are different facts and must not render
     # the same.
     restore: dict | None = None
+    # cua-hub mode only: the cloned per-app attempt SIDs + open URLs (the tabs).
+    cua_apps: list | None = None
 
 
 # Process memory rather than a WorkspaceLease row, deliberately. A lease describes
@@ -290,6 +292,7 @@ def _reattach(entry: _Attached) -> dict | None:
         # just reset, and the plausible reaction to that is to redo the work.
         "world": "preserved" if entry.world != "shared" else "shared",
         "restore": entry.restore,
+        "apps": entry.cua_apps,
     }
 
 
@@ -311,6 +314,54 @@ def _rebuild_prefix(db, s, *, lease, endpoint, session_id: str, ticket: str) -> 
     )
     restore.record(db, lease, report)
     return report
+
+
+def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
+    """Open the live browser on the task's seeded realistic UI (cua-hub mode).
+
+    Clones each app's frozen seed_sid into a fresh attempt_sid (so this annotator gets
+    an isolated world), lands the browser on the task's primary app, and returns the
+    other apps as tabs. No gym workspace/seed/restore — the mock owns its state; the
+    base seed_sids are written by the gym-side tools/seed_all_tasks.
+    """
+    apps = cua_hub.start_attempt(task.external_id, s.seed)
+    if not apps:
+        raise HTTPException(
+            status_code=409,
+            detail=("the realistic UIs are not seeded for this task — run "
+                    "tools/seed_all_tasks against the mocks first"),
+        )
+    primary_key = cua_hub.primary_app(task.start_url)
+    primary = next((a for a in apps if a["app"] == primary_key), apps[0])
+    start_url = primary["url"]
+    opened = _open_browser(start_url, current.email)
+    entry = _Attached(
+        live_session_id=str(opened["session_id"]),
+        owner=current.email,
+        url=start_url,
+        viewport=opened.get("viewport") or _DEFAULT_VIEWPORT,
+        isolated=True,        # each attempt is its own cloned world
+        world="cua-hub",
+        restore=None,
+        cua_apps=apps,
+    )
+    _ATTACHED[str(s.id)] = entry
+    db.add(models.AuditLog(
+        session_id=s.id, actor=current.email, action="live.open",
+        target=entry.live_session_id,
+        meta={"url": start_url, "world": "cua-hub", "apps": [a["app"] for a in apps]},
+    ))
+    db.commit()
+    return {
+        "sessionId": entry.live_session_id,
+        "ticket": opened["ticket"],
+        "viewport": entry.viewport,
+        "url": entry.url,
+        "isolated": entry.isolated,
+        "world": entry.world,
+        "restore": entry.restore,
+        "apps": apps,
+    }
 
 
 # --------------------------------------------------------------------------- routes
@@ -339,6 +390,13 @@ def open_live_session(
             return payload
 
         _ATTACHED.pop(str(s.id), None)
+
+        # --- cua-hub mode: a gym task rendered on the external realistic UI. The
+        # mock owns its state, so this bypasses the gym lease / seed / restore
+        # machinery below and just opens the seeded mock for this attempt. ---
+        _cua_task = db.get(models.Task, s.task_id)
+        if cua_hub.is_cua_task(_cua_task):
+            return _open_cua_session(db, s, _cua_task, current)
 
         # ACQUIRE this attempt's own gym before resolving the endpoint.
         # `endpoint_for` only READS an existing lease — it never provisions — so
