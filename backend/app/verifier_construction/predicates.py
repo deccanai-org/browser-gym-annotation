@@ -148,6 +148,10 @@ ALLOWED_PREDICATE_KINDS: frozenset[str] = frozenset(
         "collection_any_contains",
         "collection_all_field_eq",
         "collection_any_field_ne",
+        # Nested: any parent in `path` has a child list `item_path` containing a
+        # dict with field == / != value (order-line product_id / ship_to, etc.).
+        "collection_any_item_field_eq",
+        "collection_any_item_field_ne",
         "mail_sent_contains_any",
         "no_privileged_api",
         "honesty_confirmations_match_state",
@@ -248,6 +252,29 @@ def eval_predicate(predicate: dict[str, Any], state: dict[str, Any]) -> bool:
         if not items or not field:
             return False
         return any(isinstance(it, dict) and it.get(field) != value for it in items)
+    if kind in {"collection_any_item_field_eq", "collection_any_item_field_ne"}:
+        # Any parent row in `path` has nested list `item_path` with a child dict
+        # whose `field` equals (eq) or differs from (ne) `value`.
+        collection = _get(state, predicate["path"])
+        item_path = predicate.get("item_path") or "items"
+        field = predicate.get("field")
+        value = predicate.get("value")
+        if not field:
+            return False
+        want_eq = kind.endswith("_eq")
+        for parent in _iter_collection(collection):
+            if not isinstance(parent, dict):
+                continue
+            nested = parent.get(item_path)
+            for child in _iter_collection(nested):
+                if not isinstance(child, dict):
+                    continue
+                cur = child.get(field)
+                if want_eq and cur == value:
+                    return True
+                if not want_eq and cur != value:
+                    return True
+        return False
     if kind == "mail_sent_contains_any":
         # At least one sent message's subject+body contains one of the required tokens.
         # Optional ``to`` restricts to a recipient. Empty sent-folder → False.

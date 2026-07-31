@@ -524,17 +524,25 @@ def run_one(
         suite = write_verifiers(brief_retry, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
 
     orch = None
+    validation_status = "validated"
     if golden is not None:
         orch_result = Orchestrator().validate(suite, seed_initial, golden)
         orch = orch_result.to_dict()
+        orch["skipped"] = False
+        orch["unvalidated"] = False
     else:
+        # Explicit unvalidated — do NOT treat as Orchestrator accept/reject.
         orch = {
             "accepted": None,
-            "reason": golden_note
-            or "no seed_final available for Orchestrator golden gate",
-            "revision_flags": ["missing_seed_final"],
+            "reason": (
+                "unvalidated: "
+                + (golden_note or "no real seed_final / SUCCESS oracle golden for Orchestrator")
+            ),
+            "revision_flags": ["missing_seed_final", "unvalidated"],
             "skipped": True,
+            "unvalidated": True,
         }
+        validation_status = "unvalidated"
 
     # Disposition vs hand-authored on historical trajectories.
     trajs = find_trajectories(gym_root, task_id)
@@ -615,6 +623,7 @@ def run_one(
         "seed_flag": seed_flag,
         "golden_source": golden_source,
         "golden_note": golden_note,
+        "validation_status": validation_status,
         "seed_summary": seed_summary_plain(seed_data, dynamic_data),
         "suite": suite.to_dict(),
         "axes_plain": axes_plain,
@@ -632,13 +641,15 @@ def run_one(
 
 def write_report(records: list[dict[str, Any]], out_dir: Path, sample_meta: dict) -> Path:
     n = len(records)
-    skipped = [
+    unvalidated = [
         r
         for r in records
-        if (r.get("orchestrator") or {}).get("skipped")
+        if r.get("validation_status") == "unvalidated"
+        or (r.get("orchestrator") or {}).get("unvalidated")
+        or (r.get("orchestrator") or {}).get("skipped")
         or "missing_seed_final" in ((r.get("orchestrator") or {}).get("revision_flags") or [])
     ]
-    scored = [r for r in records if r not in skipped]
+    scored = [r for r in records if r not in unvalidated]
     accepted = sum(1 for r in scored if (r.get("orchestrator") or {}).get("accepted") is True)
     rejected = sum(1 for r in scored if (r.get("orchestrator") or {}).get("accepted") is False)
     agree_vals = []
@@ -649,7 +660,7 @@ def write_report(records: list[dict[str, Any]], out_dir: Path, sample_meta: dict
     agree_pct = (100.0 * sum(agree_vals) / len(agree_vals)) if agree_vals else None
 
     fam_cov = Counter(r.get("family") for r in records)
-    missing_final = [r["task_id"] for r in skipped]
+    missing_final = [r["task_id"] for r in unvalidated]
     seed_flags = [r for r in records if r.get("seed_flag")]
 
     lines: list[str] = []
@@ -661,12 +672,13 @@ def write_report(records: list[dict[str, Any]], out_dir: Path, sample_meta: dict
     lines.append("")
     lines.append(f"- Tasks run: **{n}**")
     lines.append(
-        f"- Orchestrator scored (usable golden): **{len(scored)}** "
+        f"- Fully validated (Orchestrator ran on real golden): **{len(scored)}** "
         f"— accepted **{accepted}**, rejected **{rejected}**"
-        + (f" (accept rate {100.0 * accepted / len(scored):.1f}% of scored)" if scored else "")
+        + (f" (accept rate {100.0 * accepted / len(scored):.1f}% of validated)" if scored else "")
     )
     lines.append(
-        f"- Orchestrator skipped (missing/hollow seed_final): **{len(skipped)}**"
+        f"- **Unvalidated** (no real golden — Orchestrator NOT run; "
+        f"not counted as accept/reject): **{len(unvalidated)}**"
     )
     if agree_pct is not None:
         lines.append(
@@ -695,7 +707,10 @@ def write_report(records: list[dict[str, Any]], out_dir: Path, sample_meta: dict
         "(gym repo not modified). Disk `seed_final` used for Orchestrator only when "
         "it shows a durable delta vs initial (non-hollow)."
     )
-    lines.append(f"- Tasks with Orchestrator skipped (missing/hollow golden): {len(missing_final)}")
+    lines.append(
+        f"- Tasks left **unvalidated** (missing/hollow golden; Orchestrator skipped): "
+        f"{len(missing_final)}"
+    )
     if missing_final:
         lines.append(f"  - {', '.join(missing_final[:25])}" + ("…" if len(missing_final) > 25 else ""))
     lines.append(f"- Seed export flags on {len(seed_flags)} tasks (see per-task `seed_flag`).")
@@ -712,8 +727,9 @@ def write_report(records: list[dict[str, Any]], out_dir: Path, sample_meta: dict
         lines.append(f"- **Family / pattern:** {r.get('family')} — {r.get('pattern')}")
         lines.append(f"- **Must-include:** {'yes' if r.get('must_include') else 'no'}")
         lines.append(f"- **Source model:** {r.get('source_model')}")
-        if orch.get("skipped") or orch.get("accepted") is None:
-            orch_label = "SKIPPED"
+        lines.append(f"- **Validation status:** {r.get('validation_status') or ('unvalidated' if orch.get('unvalidated') or orch.get('skipped') else 'validated')}")
+        if orch.get("unvalidated") or orch.get("skipped") or orch.get("accepted") is None:
+            orch_label = "UNVALIDATED (Orchestrator skipped — no real golden)"
         elif orch.get("accepted"):
             orch_label = "ACCEPT"
         else:
