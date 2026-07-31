@@ -1,0 +1,1053 @@
+{
+  "schema_version": 1,
+  "snapshot_kind": "seed_initial",
+  "task_id": "M75/stale_gift_message",
+  "seed": 0,
+  "state": {
+    "task_id": "M75/stale_gift_message",
+    "seed": 0,
+    "step": 0,
+    "finished": false,
+    "shop": {
+      "task_id": "M75/stale_gift_message",
+      "seed": 0,
+      "step": 0,
+      "finished": false,
+      "task_brief": "My candle set is all set to go to my friend Maya for her housewarming can you just place the order?",
+      "task_difficulty": "hard",
+      "task_category": "M",
+      "current_user_id": "u_alice",
+      "current_user": {
+        "id": "u_alice",
+        "email": "alice@example.com",
+        "password": "password123",
+        "full_name": "Alice Anderson",
+        "addresses": {
+          "addr_home": {
+            "id": "addr_home",
+            "label": "Home",
+            "full_name": "Alice Anderson",
+            "line1": "100 Park Avenue",
+            "line2": "Apt 4B",
+            "city": "Brooklyn",
+            "state": "NY",
+            "zip": "11201",
+            "is_default": true
+          },
+          "addr_work": {
+            "id": "addr_work",
+            "label": "Work",
+            "full_name": "Alice Anderson",
+            "line1": "500 Madison Avenue",
+            "line2": "22nd Floor",
+            "city": "New York",
+            "state": "NY",
+            "zip": "10022",
+            "is_default": false
+          },
+          "addr_maya": {
+            "id": "addr_maya",
+            "label": "Maya",
+            "full_name": "Maya Lin",
+            "line1": "14 Birch Lane",
+            "line2": "",
+            "city": "Portland",
+            "state": "OR",
+            "zip": "97205",
+            "is_default": false
+          }
+        },
+        "payment_methods": {
+          "pay_visa": {
+            "id": "pay_visa",
+            "label": "Visa ****4242",
+            "kind": "credit_card",
+            "is_default": true,
+            "expires": "08/27",
+            "nickname": ""
+          },
+          "pay_paypal": {
+            "id": "pay_paypal",
+            "label": "PayPal (alice@example.com)",
+            "kind": "paypal",
+            "is_default": false,
+            "expires": "",
+            "nickname": ""
+          }
+        },
+        "two_fa_enabled": false,
+        "loyalty_tier": "gold"
+      },
+      "cart": {
+        "items": [
+          {
+            "id": "ci_candle",
+            "product_id": "p_candle_gift",
+            "variant_id": null,
+            "quantity": 1,
+            "gift_wrap": false,
+            "gift_message": "Happy Retirement, Dad! So proud of you. Love, Alice",
+            "ship_to_address_id": "addr_maya",
+            "scheduled_delivery": null
+          }
+        ],
+        "applied_promo": null
+      },
+      "orders": {},
+      "returns": {},
+      "subscriptions": {},
+      "products_count": 43,
+      "action_log": [],
+      "flash_messages": [],
+      "products": {
+        "p_laptop_studio": {
+          "id": "p_laptop_studio",
+          "name": "Studio Laptop 14",
+          "category": "electronics",
+          "base_price": 899.99,
+          "rating": 4.6,
+          "stock": 12,
+          "tags": [
+            "laptop",
+            "creator",
+            "14-inch"
+          ],
+          "short_description": "Mid-range 14-inch creator's laptop."
+        },
+        "p_laptop_pro": {
+          "id": "p_laptop_pro",
+          "name": "Pro Laptop X1",
+          "category": "electronics",
+          "base_price": 1499.99,
+          "rating": 4.8,
+          "stock": 5,
+          "tags": [
+            "laptop",
+            "pro",
+            "16-inch"
+          ],
+          "short_description": "High-end pro laptop."
+        },
+        "p_laptop_budget": {
+          "id": "p_laptop_budget",
+          "name": "Budget Laptop Lite",
+          "category": "electronics",
+          "base_price": 549.99,
+          "rating": 3.6,
+          "stock": 20,
+          "tags": [
+            "laptop",
+            "budget"
+          ],
+          "short_description": "Entry-level laptop."
+        },
+        "p_mouse_wireless": {
+          "id": "p_mouse_wireless",
+          "name": "Wireless Mouse",
+          "category": "electronics",
+          "base_price": 29.99,
+          "rating": 4.4,
+          "stock": 58,
+          "tags": [
+            "mouse",
+            "wireless"
+          ],
+          "short_description": "Standard wireless mouse."
+        },
+        "p_mouse_gaming": {
+          "id": "p_mouse_gaming",
+          "name": "Wireless Gaming Mouse",
+          "category": "electronics",
+          "base_price": 79.99,
+          "rating": 4.6,
+          "stock": 22,
+          "tags": [
+            "mouse",
+            "gaming"
+          ],
+          "short_description": "High-DPI gaming mouse with RGB."
+        },
+        "p_kb_mech": {
+          "id": "p_kb_mech",
+          "name": "Mechanical Keyboard",
+          "category": "electronics",
+          "base_price": 119.99,
+          "rating": 4.5,
+          "stock": 18,
+          "tags": [
+            "keyboard",
+            "mechanical"
+          ],
+          "short_description": "Hot-swappable mechanical keyboard."
+        },
+        "p_kb_wireless": {
+          "id": "p_kb_wireless",
+          "name": "Wireless Keyboard",
+          "category": "electronics",
+          "base_price": 59.99,
+          "rating": 4.3,
+          "stock": 33,
+          "tags": [
+            "keyboard",
+            "wireless"
+          ],
+          "short_description": "Slim wireless keyboard."
+        },
+        "p_monitor_24": {
+          "id": "p_monitor_24",
+          "name": "24-inch Monitor",
+          "category": "electronics",
+          "base_price": 199.99,
+          "rating": 4.4,
+          "stock": 15,
+          "tags": [
+            "monitor",
+            "24-inch"
+          ],
+          "short_description": "1080p 24-inch IPS monitor."
+        },
+        "p_monitor_27": {
+          "id": "p_monitor_27",
+          "name": "27-inch Monitor",
+          "category": "electronics",
+          "base_price": 329.99,
+          "rating": 4.7,
+          "stock": 8,
+          "tags": [
+            "monitor",
+            "27-inch",
+            "1440p"
+          ],
+          "short_description": "1440p 27-inch monitor."
+        },
+        "p_hp_premium": {
+          "id": "p_hp_premium",
+          "name": "Bluetooth Headphone Premium",
+          "category": "audio",
+          "base_price": 249.99,
+          "rating": 4.8,
+          "stock": 8,
+          "tags": [
+            "headphones",
+            "bluetooth",
+            "anc"
+          ],
+          "short_description": "ANC over-ear, 30h battery."
+        },
+        "p_hp_studio": {
+          "id": "p_hp_studio",
+          "name": "Bluetooth Headphone Studio",
+          "category": "audio",
+          "base_price": 129.99,
+          "rating": 4.5,
+          "stock": 12,
+          "tags": [
+            "headphones",
+            "studio"
+          ],
+          "short_description": "Studio-grade comfort."
+        },
+        "p_hp_lite": {
+          "id": "p_hp_lite",
+          "name": "Bluetooth Headphone Lite",
+          "category": "audio",
+          "base_price": 49.99,
+          "rating": 4.1,
+          "stock": 42,
+          "tags": [
+            "headphones",
+            "budget"
+          ],
+          "short_description": "Lightweight everyday headphones."
+        },
+        "p_speaker": {
+          "id": "p_speaker",
+          "name": "Bluetooth Speaker",
+          "category": "audio",
+          "base_price": 79.99,
+          "rating": 4.4,
+          "stock": 20,
+          "tags": [
+            "speaker",
+            "bluetooth"
+          ],
+          "short_description": "Portable wireless speaker."
+        },
+        "p_book_cook": {
+          "id": "p_book_cook",
+          "name": "The Joy of Cooking",
+          "category": "books",
+          "base_price": 24.99,
+          "rating": 4.6,
+          "stock": 8,
+          "tags": [
+            "cookbook"
+          ],
+          "short_description": "Classic American cookbook."
+        },
+        "p_book_sci_fi": {
+          "id": "p_book_sci_fi",
+          "name": "Project Hail Mary",
+          "category": "books",
+          "base_price": 16.5,
+          "rating": 4.8,
+          "stock": 14,
+          "tags": [
+            "fiction",
+            "sci-fi"
+          ],
+          "short_description": "Andy Weir sci-fi novel."
+        },
+        "p_book_history": {
+          "id": "p_book_history",
+          "name": "Sapiens",
+          "category": "books",
+          "base_price": 19.99,
+          "rating": 4.7,
+          "stock": 20,
+          "tags": [
+            "nonfiction",
+            "history"
+          ],
+          "short_description": "A brief history of humankind."
+        },
+        "p_book_oos": {
+          "id": "p_book_oos",
+          "name": "The Power Broker",
+          "category": "books",
+          "base_price": 32.0,
+          "rating": 4.9,
+          "stock": 0,
+          "tags": [
+            "nonfiction",
+            "biography"
+          ],
+          "short_description": "Robert Caro classic. OUT OF STOCK."
+        },
+        "p_clothing_tshirt": {
+          "id": "p_clothing_tshirt",
+          "name": "Cotton T-Shirt",
+          "category": "clothing",
+          "base_price": 24.99,
+          "rating": 4.2,
+          "stock": 120,
+          "tags": [
+            "tshirt"
+          ],
+          "short_description": "Classic cotton t-shirt."
+        },
+        "p_clothing_hoodie": {
+          "id": "p_clothing_hoodie",
+          "name": "Pullover Hoodie",
+          "category": "clothing",
+          "base_price": 49.99,
+          "rating": 4.5,
+          "stock": 80,
+          "tags": [
+            "hoodie"
+          ],
+          "short_description": "Heavyweight pullover hoodie."
+        },
+        "p_home_lamp": {
+          "id": "p_home_lamp",
+          "name": "Modern Desk Lamp",
+          "category": "home",
+          "base_price": 39.99,
+          "rating": 4.1,
+          "stock": 25,
+          "tags": [
+            "lamp"
+          ],
+          "short_description": "Adjustable LED desk lamp."
+        },
+        "p_home_mug": {
+          "id": "p_home_mug",
+          "name": "Ceramic Coffee Mug Set (4)",
+          "category": "home",
+          "base_price": 44.99,
+          "rating": 4.6,
+          "stock": 18,
+          "tags": [
+            "mug"
+          ],
+          "short_description": "Set of 4 ceramic mugs."
+        },
+        "p_pet_food": {
+          "id": "p_pet_food",
+          "name": "Premium Dog Food (5 lb)",
+          "category": "pet",
+          "base_price": 34.99,
+          "rating": 4.7,
+          "stock": 120,
+          "tags": [
+            "pet",
+            "dog",
+            "subscription"
+          ],
+          "short_description": "Grain-free premium dog food."
+        },
+        "p_office_display": {
+          "id": "p_office_display",
+          "name": "Office Display Pro",
+          "category": "office",
+          "base_price": 159.99,
+          "rating": 4.3,
+          "stock": 15,
+          "tags": [
+            "display"
+          ],
+          "short_description": "Office-grade display."
+        },
+        "p_office_chair": {
+          "id": "p_office_chair",
+          "name": "Ergonomic Office Chair",
+          "category": "office",
+          "base_price": 249.99,
+          "rating": 4.5,
+          "stock": 10,
+          "tags": [
+            "chair",
+            "ergonomic"
+          ],
+          "short_description": "High-back ergonomic chair."
+        },
+        "p_mouse_ergonomic": {
+          "id": "p_mouse_ergonomic",
+          "name": "Wireless Ergonomic Mouse",
+          "category": "electronics",
+          "base_price": 49.99,
+          "rating": 4.5,
+          "stock": 33,
+          "tags": [
+            "mouse",
+            "wireless",
+            "ergonomic"
+          ],
+          "short_description": "Wireless ergonomic vertical mouse."
+        },
+        "p_mouse_mini": {
+          "id": "p_mouse_mini",
+          "name": "Wireless Mini Mouse",
+          "category": "electronics",
+          "base_price": 19.99,
+          "rating": 4.1,
+          "stock": 64,
+          "tags": [
+            "mouse",
+            "wireless",
+            "mini"
+          ],
+          "short_description": "Compact wireless mouse for travel."
+        },
+        "p_mouse_trackpad": {
+          "id": "p_mouse_trackpad",
+          "name": "Bluetooth Magic Trackpad",
+          "category": "electronics",
+          "base_price": 129.99,
+          "rating": 4.6,
+          "stock": 11,
+          "tags": [
+            "trackpad",
+            "bluetooth"
+          ],
+          "short_description": "Multi-touch trackpad (not a mouse)."
+        },
+        "p_clothing_polo": {
+          "id": "p_clothing_polo",
+          "name": "Cotton Polo Shirt",
+          "category": "clothing",
+          "base_price": 34.99,
+          "rating": 4.3,
+          "stock": 85,
+          "tags": [
+            "polo",
+            "cotton"
+          ],
+          "short_description": "Classic cotton polo shirt."
+        },
+        "p_clothing_long_sleeve": {
+          "id": "p_clothing_long_sleeve",
+          "name": "Cotton Long-Sleeve T-Shirt",
+          "category": "clothing",
+          "base_price": 29.99,
+          "rating": 4.4,
+          "stock": 60,
+          "tags": [
+            "tshirt",
+            "long-sleeve",
+            "cotton"
+          ],
+          "short_description": "Long-sleeve cotton tee."
+        },
+        "p_clothing_graphic": {
+          "id": "p_clothing_graphic",
+          "name": "Graphic Print Cotton T-Shirt",
+          "category": "clothing",
+          "base_price": 22.99,
+          "rating": 4.0,
+          "stock": 45,
+          "tags": [
+            "tshirt",
+            "graphic"
+          ],
+          "short_description": "Graphic-print cotton tee."
+        },
+        "p_clothing_tank": {
+          "id": "p_clothing_tank",
+          "name": "Cotton Tank Top",
+          "category": "clothing",
+          "base_price": 18.99,
+          "rating": 4.2,
+          "stock": 70,
+          "tags": [
+            "tank",
+            "cotton"
+          ],
+          "short_description": "Sleeveless cotton tank."
+        },
+        "p_laptop_studio_pro": {
+          "id": "p_laptop_studio_pro",
+          "name": "Studio Laptop Pro 14",
+          "category": "electronics",
+          "base_price": 1299.99,
+          "rating": 4.7,
+          "stock": 6,
+          "tags": [
+            "laptop",
+            "creator",
+            "pro"
+          ],
+          "short_description": "High-end 14-inch creator's laptop (PRO model)."
+        },
+        "p_laptop_creator": {
+          "id": "p_laptop_creator",
+          "name": "Creator Studio Laptop",
+          "category": "electronics",
+          "base_price": 949.99,
+          "rating": 4.4,
+          "stock": 14,
+          "tags": [
+            "laptop",
+            "creator"
+          ],
+          "short_description": "Mid-range creator laptop from a different brand."
+        },
+        "p_hp_studio_pro": {
+          "id": "p_hp_studio_pro",
+          "name": "Bluetooth Headphone Studio Pro",
+          "category": "audio",
+          "base_price": 199.99,
+          "rating": 4.7,
+          "stock": 9,
+          "tags": [
+            "headphones",
+            "studio",
+            "pro"
+          ],
+          "short_description": "Premium variant of the Studio headphone."
+        },
+        "p_hp_kids": {
+          "id": "p_hp_kids",
+          "name": "Bluetooth Kids Headphone",
+          "category": "audio",
+          "base_price": 29.99,
+          "rating": 4.0,
+          "stock": 42,
+          "tags": [
+            "headphones",
+            "kids"
+          ],
+          "short_description": "Volume-limited headphones for kids."
+        },
+        "p_kb_mini": {
+          "id": "p_kb_mini",
+          "name": "Mini Mechanical Keyboard",
+          "category": "electronics",
+          "base_price": 79.99,
+          "rating": 4.4,
+          "stock": 24,
+          "tags": [
+            "keyboard",
+            "mechanical",
+            "mini"
+          ],
+          "short_description": "60% layout mechanical mini keyboard."
+        },
+        "p_kb_membrane": {
+          "id": "p_kb_membrane",
+          "name": "Membrane Keyboard",
+          "category": "electronics",
+          "base_price": 24.99,
+          "rating": 3.9,
+          "stock": 88,
+          "tags": [
+            "keyboard",
+            "membrane"
+          ],
+          "short_description": "Standard membrane keyboard (NOT mechanical)."
+        },
+        "p_book_sci_fi_signed": {
+          "id": "p_book_sci_fi_signed",
+          "name": "Project Hail Mary (Signed Edition)",
+          "category": "books",
+          "base_price": 39.99,
+          "rating": 4.9,
+          "stock": 3,
+          "tags": [
+            "fiction",
+            "sci-fi",
+            "signed"
+          ],
+          "short_description": "Signed-edition Andy Weir novel."
+        },
+        "p_pet_treats": {
+          "id": "p_pet_treats",
+          "name": "Premium Dog Treats",
+          "category": "pet",
+          "base_price": 14.99,
+          "rating": 4.6,
+          "stock": 80,
+          "tags": [
+            "pet",
+            "dog",
+            "treats"
+          ],
+          "short_description": "Premium training treats \u2014 not the full meal food."
+        },
+        "p_smartwatch": {
+          "id": "p_smartwatch",
+          "name": "Smart Watch Pro",
+          "category": "electronics",
+          "base_price": 249.99,
+          "rating": 4.5,
+          "stock": 18,
+          "tags": [
+            "watch",
+            "fitness"
+          ],
+          "short_description": "Fitness-tracking smart watch."
+        },
+        "p_charger": {
+          "id": "p_charger",
+          "name": "USB-C Fast Charger 65W",
+          "category": "electronics",
+          "base_price": 29.99,
+          "rating": 4.7,
+          "stock": 120,
+          "tags": [
+            "charger",
+            "usb-c"
+          ],
+          "short_description": "65W GaN USB-C charger."
+        },
+        "p_home_candle": {
+          "id": "p_home_candle",
+          "name": "Scented Candle Set (3)",
+          "category": "home",
+          "base_price": 34.99,
+          "rating": 4.5,
+          "stock": 30,
+          "tags": [
+            "candle",
+            "home"
+          ],
+          "short_description": "Set of 3 scented soy candles."
+        },
+        "p_candle_gift": {
+          "id": "p_candle_gift",
+          "name": "Luxury Scented Candle Set (3-pack)",
+          "category": "home",
+          "base_price": 42.0,
+          "rating": 4.7,
+          "stock": 88,
+          "tags": [],
+          "short_description": "Hand-poured soy candle set \u2014 lavender, sandalwood, vanilla."
+        }
+      },
+      "users": {
+        "u_alice": {
+          "id": "u_alice",
+          "email": "alice@example.com",
+          "full_name": "Alice Anderson",
+          "addresses": {
+            "addr_home": "Address(id='addr_home', label='Home', full_name='Alice Anderson', line1='100 Park Avenue', line2='Apt 4B', city='Brooklyn', state='NY', zip='11201', is_default=True)",
+            "addr_work": "Address(id='addr_work', label='Work', full_name='Alice Anderson', line1='500 Madison Avenue', line2='22nd Floor', city='New York', state='NY', zip='10022', is_default=False)",
+            "addr_maya": "Address(id='addr_maya', label='Maya', full_name='Maya Lin', line1='14 Birch Lane', line2='', city='Portland', state='OR', zip='97205', is_default=False)"
+          },
+          "payment_methods": {
+            "pay_visa": "PaymentMethod(id='pay_visa', label='Visa ****4242', kind='credit_card', is_default=True, expires='08/27', nickname='')",
+            "pay_paypal": "PaymentMethod(id='pay_paypal', label='PayPal (alice@example.com)', kind='paypal', is_default=False, expires='', nickname='')"
+          },
+          "two_fa_enabled": false,
+          "loyalty_tier": "gold"
+        }
+      }
+    },
+    "mail": {
+      "account_email": "alice@example.com",
+      "inbox": {
+        "em_1": {
+          "id": "em_1",
+          "sender": "welcome@shopgym.com",
+          "to": "alice@example.com",
+          "subject": "Welcome to ShopGym",
+          "body": "Thanks for joining ShopGym!\n\nBrowse today's deals and enjoy free shipping on orders over $50.",
+          "received_at": "2026-05-21T08:00:00",
+          "received_label": "8:00 AM",
+          "read": true,
+          "labels": [
+            "updates"
+          ],
+          "folder": "inbox",
+          "order_id": null,
+          "tracking_url": null,
+          "amount_total": null,
+          "eta": null,
+          "product_id": null
+        },
+        "em_2": {
+          "id": "em_2",
+          "sender": "deals@shopgym.com",
+          "to": "alice@example.com",
+          "subject": "Your weekend deals are here",
+          "body": "Up to 40% off electronics this weekend only. Don't miss out!",
+          "received_at": "2026-05-21T09:30:00",
+          "received_label": "9:30 AM",
+          "read": false,
+          "labels": [
+            "promotions"
+          ],
+          "folder": "inbox",
+          "order_id": null,
+          "tracking_url": null,
+          "amount_total": null,
+          "eta": null,
+          "product_id": null
+        },
+        "em_3": {
+          "id": "em_3",
+          "sender": "alex@example.com",
+          "to": "alice@example.com",
+          "subject": "Dinner this week?",
+          "body": "Hey! Are you free for dinner one evening this week? Let me know what works.\n\n- Alex",
+          "received_at": "2026-05-21T10:15:00",
+          "received_label": "10:15 AM",
+          "read": false,
+          "labels": [],
+          "folder": "inbox",
+          "order_id": null,
+          "tracking_url": null,
+          "amount_total": null,
+          "eta": null,
+          "product_id": null
+        }
+      },
+      "sent": {},
+      "drafts": {},
+      "unread_count": 2
+    },
+    "food": {
+      "restaurants": {
+        "r_sushi": {
+          "id": "r_sushi",
+          "name": "Sakura Sushi",
+          "cuisine": "Japanese",
+          "rating": 4.7,
+          "eta_label": "7:20 PM",
+          "delivery_fee": 3.99,
+          "emoji": "\ud83c\udf63",
+          "dishes": [
+            {
+              "id": "d_salmon_roll",
+              "name": "Salmon Avocado Roll",
+              "description": "Fresh salmon, avocado, sushi rice.",
+              "price": 12.5,
+              "tags": [
+                "sushi",
+                "fish"
+              ],
+              "emoji": "\ud83c\udf63",
+              "popular": true
+            },
+            {
+              "id": "d_tuna_bowl",
+              "name": "Spicy Tuna Bowl",
+              "description": "Marinated tuna over rice with greens.",
+              "price": 14.0,
+              "tags": [
+                "bowl",
+                "fish"
+              ],
+              "emoji": "\ud83e\udd62",
+              "popular": false
+            },
+            {
+              "id": "d_miso",
+              "name": "Miso Soup",
+              "description": "Classic soybean broth with tofu.",
+              "price": 3.5,
+              "tags": [
+                "soup",
+                "vegetarian"
+              ],
+              "emoji": "\ud83c\udf72",
+              "popular": false
+            }
+          ]
+        },
+        "r_burger": {
+          "id": "r_burger",
+          "name": "Burger Barn",
+          "cuisine": "American",
+          "rating": 4.4,
+          "eta_label": "6:55 PM",
+          "delivery_fee": 2.49,
+          "emoji": "\ud83c\udf54",
+          "dishes": [
+            {
+              "id": "d_classic",
+              "name": "Classic Cheeseburger",
+              "description": "Beef patty, cheddar, lettuce, tomato.",
+              "price": 10.0,
+              "tags": [
+                "burger"
+              ],
+              "emoji": "\ud83c\udf54",
+              "popular": true
+            },
+            {
+              "id": "d_veggie",
+              "name": "Veggie Burger",
+              "description": "House black-bean patty, all the fixings.",
+              "price": 9.5,
+              "tags": [
+                "burger",
+                "vegetarian"
+              ],
+              "emoji": "\ud83e\udd6c",
+              "popular": false
+            },
+            {
+              "id": "d_fries",
+              "name": "Crispy Fries",
+              "description": "Hand-cut, sea salt.",
+              "price": 4.0,
+              "tags": [
+                "side"
+              ],
+              "emoji": "\ud83c\udf5f",
+              "popular": false
+            }
+          ]
+        },
+        "r_bean": {
+          "id": "r_bean",
+          "name": "Bean There Cafe",
+          "cuisine": "Coffee",
+          "rating": 4.6,
+          "eta_label": "6:40 PM",
+          "delivery_fee": 1.99,
+          "emoji": "\u2615",
+          "dishes": [
+            {
+              "id": "d_pods",
+              "name": "Coffee Pods (24-pack)",
+              "description": "Medium roast espresso capsules, 24 count.",
+              "price": 11.99,
+              "tags": [
+                "coffee",
+                "pods"
+              ],
+              "emoji": "\u2615",
+              "popular": true
+            },
+            {
+              "id": "d_latte",
+              "name": "Oat Milk Latte",
+              "description": "Double shot, steamed oat milk.",
+              "price": 5.25,
+              "tags": [
+                "coffee",
+                "drink"
+              ],
+              "emoji": "\ud83e\udd5b",
+              "popular": false
+            },
+            {
+              "id": "d_croissant",
+              "name": "Butter Croissant",
+              "description": "Flaky, baked this morning.",
+              "price": 3.75,
+              "tags": [
+                "bakery"
+              ],
+              "emoji": "\ud83e\udd50",
+              "popular": false
+            }
+          ]
+        }
+      },
+      "cart": {
+        "items": [],
+        "restaurant_id": null,
+        "delivery_note": ""
+      },
+      "cart_count": 0,
+      "orders": {}
+    },
+    "calendar": {
+      "events": {
+        "ev_1": {
+          "id": "ev_1",
+          "title": "Gym session",
+          "day": "2026-05-21",
+          "day_label": "Today (Thu May 21)",
+          "start": "18:00",
+          "end": "19:00",
+          "source": "seed"
+        },
+        "ev_2": {
+          "id": "ev_2",
+          "title": "Team sync",
+          "day": "2026-05-22",
+          "day_label": "Tomorrow (Fri May 22)",
+          "start": "14:00",
+          "end": "15:00",
+          "source": "seed"
+        },
+        "ev_3": {
+          "id": "ev_3",
+          "title": "Dentist",
+          "day": "2026-05-22",
+          "day_label": "Tomorrow (Fri May 22)",
+          "start": "10:00",
+          "end": "10:45",
+          "source": "seed"
+        }
+      },
+      "today": "2026-05-21",
+      "tomorrow": "2026-05-22"
+    },
+    "market": {
+      "store_name": "ValueMart",
+      "products": {
+        "vm_mouse_wireless": {
+          "id": "vm_mouse_wireless",
+          "name": "Wireless Mouse",
+          "category": "electronics",
+          "price": 24.99,
+          "emoji": "\ud83d\uddb1\ufe0f",
+          "description": "Everyday 2.4GHz wireless mouse with USB receiver.",
+          "in_stock": true,
+          "shop_sku": "p_mouse_wireless"
+        },
+        "vm_kb_mech": {
+          "id": "vm_kb_mech",
+          "name": "Mechanical Keyboard",
+          "category": "electronics",
+          "price": 109.99,
+          "emoji": "\u2328\ufe0f",
+          "description": "Hot-swappable mechanical keyboard, 75% layout.",
+          "in_stock": true,
+          "shop_sku": "p_kb_mech"
+        },
+        "vm_kb_wireless": {
+          "id": "vm_kb_wireless",
+          "name": "Wireless Keyboard",
+          "category": "electronics",
+          "price": 54.99,
+          "emoji": "\u2328\ufe0f",
+          "description": "Slim low-profile wireless keyboard.",
+          "in_stock": true,
+          "shop_sku": "p_kb_wireless"
+        },
+        "vm_monitor_24": {
+          "id": "vm_monitor_24",
+          "name": "24-inch Monitor",
+          "category": "electronics",
+          "price": 209.99,
+          "emoji": "\ud83d\udda5\ufe0f",
+          "description": "1080p 24-inch IPS monitor.",
+          "in_stock": true,
+          "shop_sku": "p_monitor_24"
+        },
+        "vm_laptop_studio": {
+          "id": "vm_laptop_studio",
+          "name": "Studio Laptop 14",
+          "category": "electronics",
+          "price": 879.99,
+          "emoji": "\ud83d\udcbb",
+          "description": "14-inch creator laptop, 16GB / 512GB.",
+          "in_stock": true,
+          "shop_sku": "p_laptop_studio"
+        },
+        "vm_hp_premium": {
+          "id": "vm_hp_premium",
+          "name": "Bluetooth Headphone Premium",
+          "category": "audio",
+          "price": 259.99,
+          "emoji": "\ud83c\udfa7",
+          "description": "Over-ear ANC headphones, 30h battery.",
+          "in_stock": true,
+          "shop_sku": "p_hp_premium"
+        },
+        "vm_coffee_pods": {
+          "id": "vm_coffee_pods",
+          "name": "Coffee Pods (24-pack)",
+          "category": "grocery",
+          "price": 9.49,
+          "emoji": "\u2615",
+          "description": "Medium-roast espresso capsules, 24 count.",
+          "in_stock": true,
+          "shop_sku": null
+        },
+        "vm_usb_cable": {
+          "id": "vm_usb_cable",
+          "name": "USB-C Cable 2m",
+          "category": "electronics",
+          "price": 6.99,
+          "emoji": "\ud83d\udd0c",
+          "description": "Braided USB-C to USB-C cable, 2 meters.",
+          "in_stock": true,
+          "shop_sku": null
+        },
+        "vm_chair": {
+          "id": "vm_chair",
+          "name": "Office Chair",
+          "category": "home",
+          "price": 94.99,
+          "emoji": "\ud83e\ude91",
+          "description": "Mesh-back ergonomic office chair.",
+          "in_stock": true,
+          "shop_sku": null
+        }
+      },
+      "cart": {
+        "items": [],
+        "applied_coupon": null
+      },
+      "cart_count": 0,
+      "cart_subtotal": 0,
+      "orders": {},
+      "coupons": {
+        "VALUE10": {
+          "code": "VALUE10",
+          "percent_off": 0.1,
+          "min_subtotal": 0.0,
+          "description": "10% off your ValueMart order",
+          "expired": false
+        }
+      },
+      "delivery_fee": 5.99,
+      "free_delivery_over": 35.0
+    },
+    "events": [],
+    "schedule": {
+      "now": 0,
+      "queue": [],
+      "pending": 0
+    }
+  },
+  "provenance": "make_task export for Discriminator QA batch (annotation artifacts)",
+  "generated_at": "2026-07-30T17:44:13"
+}
