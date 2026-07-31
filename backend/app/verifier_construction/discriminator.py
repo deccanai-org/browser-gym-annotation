@@ -1417,8 +1417,17 @@ class Discriminator:
         self._last_detected_traps = []
         self._last_incomplete_forbidden_coverage = False
         self._last_forbidden_coverage_path = "n/a"
-        seed_view = _seed_view_for_llm(brief, normalize_world_state(seed_data))
-        dynamic_view = _seed_view_for_llm(brief, normalize_world_state(dynamic_data))
+        seed_norm = normalize_world_state(seed_data)
+        dyn_norm = normalize_world_state(dynamic_data)
+        # Identity keys live on seed_data after split; inject so dynamic_view can
+        # resolve users.<uid>.payment_methods / mail account context.
+        for meta_key in ("current_user_id", "task_id", "task_brief", "seed"):
+            if meta_key in seed_norm and meta_key not in dyn_norm:
+                dyn_norm[meta_key] = seed_norm[meta_key]
+            if meta_key in state and meta_key not in dyn_norm:
+                dyn_norm[meta_key] = state[meta_key]
+        seed_view = _seed_view_for_llm(brief, seed_norm)
+        dynamic_view = _seed_view_for_llm(brief, dyn_norm)
 
         if self._decompose_fn is not None:
             self._last_source_model = "injected"
