@@ -485,8 +485,10 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
     against initial + golden. Initial prefers live gym, then DB seed_state, then
     disk snapshots; golden prefers a live oracle world, then disk seed_final."""
     from app.verifier_construction import (
+        BRIDGED_ENVIRONMENT,
         load_seed_golden,
         load_seed_initial,
+        split_seed_initial,
         suite_to_platform,
         validate_suite,
         write_verifiers,
@@ -553,7 +555,8 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
         )
 
     try:
-        vc_suite = write_verifiers(brief, initial)
+        seed_data, dynamic_data = split_seed_initial(initial)
+        vc_suite = write_verifiers(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
     except Exception as e:  # noqa: BLE001 — surface model / structural failures cleanly
         raise jobs.JobFailure(f"discriminator write failed: {e}") from e
 

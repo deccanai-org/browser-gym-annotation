@@ -17,7 +17,7 @@ from app.verifier_construction.discriminator import (
     CheckpointRejected,
     VerifierCheckpoint,
     VerifierSuite,
-    write_verifiers,
+    write_verifiers_from_seed_initial,
 )
 from app.verifier_construction.orchestrator import validate_suite
 from app.verifier_construction.predicates import (
@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             forbidden_coverage_path=str(raw.get("forbidden_coverage_path") or "n/a"),
         )
     else:
-        suite = write_verifiers(brief, seed_initial)
+        suite = write_verifiers_from_seed_initial(brief, seed_initial)
 
     seed_final = load_seed_snapshot(args.seed_final) if args.seed_final else None
     decision, suite = review_suite_interactive(

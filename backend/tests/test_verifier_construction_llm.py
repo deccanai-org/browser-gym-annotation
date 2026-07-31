@@ -16,8 +16,19 @@ from pathlib import Path
 
 import pytest
 
-from app.verifier_construction import Discriminator, VerifierAxis, find_seed_snapshot_path
+from app.verifier_construction import (
+    BRIDGED_ENVIRONMENT,
+    Discriminator,
+    VerifierAxis,
+    find_seed_snapshot_path,
+    split_seed_initial,
+)
 from app.verifier_construction.predicates import extract_task_brief, load_seed_snapshot
+
+
+def _llm_write(brief: str, seed: dict):
+    seed_data, dynamic_data = split_seed_initial(seed)
+    return Discriminator().write(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
 
 
 def _settings_has_key() -> bool:
@@ -63,7 +74,7 @@ def test_llm_m220_decline_not_address_mutation():
     """M220 golden = decline redirect + truthful email; ship_to change is FORBIDDEN."""
     seed = load_seed_snapshot(_require_seed("M220__address_change_no_propagate"))
     brief = extract_task_brief(seed)
-    suite = Discriminator().write(brief, seed)
+    suite = _llm_write(brief, seed)
     corr = _correctness(suite)
     forb = _forbidden(suite)
     blob = _blob(corr + forb)
@@ -110,7 +121,7 @@ def test_llm_m214_false_premise_no_buy():
     """M214: $15-sale premise is false; order-created is FORBIDDEN; disclose conflict."""
     seed = load_seed_snapshot(_require_seed("M214__phantom_qualifier"))
     brief = extract_task_brief(seed)
-    suite = Discriminator().write(brief, seed)
+    suite = _llm_write(brief, seed)
     corr = _correctness(suite)
     forb = _forbidden(suite)
     blob = _blob(corr + forb)
@@ -133,7 +144,7 @@ def test_llm_m224_false_premise_no_refund():
     """M224: no duplicate charge; disclose; refund-created is FORBIDDEN."""
     seed = load_seed_snapshot(_require_seed("M224__phantom_overcharge_refund"))
     brief = extract_task_brief(seed)
-    suite = Discriminator().write(brief, seed)
+    suite = _llm_write(brief, seed)
     corr = _correctness(suite)
     forb = _forbidden(suite)
     blob = _blob(corr + forb)
@@ -158,7 +169,7 @@ def test_llm_m216_constraint_aware():
     """M216: only-one-fits / OOS — must not invent unconstrained fulfill."""
     seed = load_seed_snapshot(_require_seed("M216__only_one_fits_but_oos"))
     brief = extract_task_brief(seed)
-    suite = Discriminator().write(brief, seed)
+    suite = _llm_write(brief, seed)
     assert suite.by_axis(VerifierAxis.CORRECTNESS)
     assert suite.source_model
     # Structural: no action-sequence language, no vacuous mail.sent.
@@ -177,7 +188,7 @@ def test_llm_m271_deadline_conflict_forbidden_coverage():
     """M271: conflicting delivery window → FORBIDDEN order-created (or repair path)."""
     seed = load_seed_snapshot(_require_seed("M271__deadline_conflict_delivery"))
     brief = extract_task_brief(seed)
-    suite = Discriminator().write(brief, seed)
+    suite = _llm_write(brief, seed)
     forb = _forbidden(suite)
     corr = _correctness(suite)
 

@@ -1,13 +1,15 @@
 """Agentic verifier construction: Discriminator + Orchestrator.
 
-Verifiers are derived from the task brief + seed-initial world only — never from
-a golden trajectory — then adversarially validated against initial/golden states
-and optional alt-path / shortcut rollouts before human compatibility review.
+Verifiers are derived from task_prompt + fixed environment + seed_data /
+dynamic_data — never from a golden trajectory — then adversarially validated
+against initial/golden states and optional alt-path / shortcut rollouts before
+human compatibility review.
 """
 
 from app.verifier_construction.discriminator import (
     ACTION_SEQUENCE_PATTERN,
     ALLOWED_PREDICATE_KINDS,
+    BRIDGED_ENVIRONMENT,
     CONFIDENCE_ESCALATION_THRESHOLD,
     CheckpointRejected,
     DEFAULT_DECOMPOSE_MODEL,
@@ -16,7 +18,10 @@ from app.verifier_construction.discriminator import (
     VerifierAxis,
     VerifierCheckpoint,
     VerifierSuite,
+    merge_seed_layers,
+    split_seed_initial,
     write_verifiers,
+    write_verifiers_from_seed_initial,
 )
 from app.verifier_construction.orchestrator import (
     AdversarialOutcome,
@@ -39,6 +44,7 @@ from app.verifier_construction.suite_adapter import suite_to_platform
 __all__ = [
     "ACTION_SEQUENCE_PATTERN",
     "ALLOWED_PREDICATE_KINDS",
+    "BRIDGED_ENVIRONMENT",
     "CONFIDENCE_ESCALATION_THRESHOLD",
     "AdversarialOutcome",
     "CheckpointRejected",
@@ -56,9 +62,12 @@ __all__ = [
     "load_seed_from_disk",
     "load_seed_golden",
     "load_seed_initial",
+    "merge_seed_layers",
     "resolve_gym_repo_path",
     "resolve_seed_snapshots_root",
+    "split_seed_initial",
     "suite_to_platform",
     "validate_suite",
     "write_verifiers",
+    "write_verifiers_from_seed_initial",
 ]

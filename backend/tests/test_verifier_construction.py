@@ -9,11 +9,14 @@ import pytest
 
 from app.verifier_construction import (
     ACTION_SEQUENCE_PATTERN,
+    BRIDGED_ENVIRONMENT,
     CheckpointRejected,
     Discriminator,
     Orchestrator,
     VerifierAxis,
     VerifierCheckpoint,
+    merge_seed_layers,
+    split_seed_initial,
     write_verifiers,
 )
 from app.verifier_construction.discriminator import _validate_checkpoint
@@ -32,9 +35,15 @@ from tests.fixtures.verifier_construction_seeds import (
 )
 
 
+def _write(disc: Discriminator, brief: str, seed: dict) -> object:
+    """Four-param write via split helper (legacy seed_initial fixtures)."""
+    seed_data, dynamic_data = split_seed_initial(seed)
+    return disc.write(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
+
+
 def _suite_from_offline(decompose_fn=return_task_decompose):
     brief = SEED_INITIAL_RETURN["state"]["task_brief"]
-    return Discriminator(decompose_fn=decompose_fn).write(brief, SEED_INITIAL_RETURN)
+    return _write(Discriminator(decompose_fn=decompose_fn), brief, SEED_INITIAL_RETURN)
 
 
 # ---------------------------------------------------------------------------
@@ -45,19 +54,67 @@ def _suite_from_offline(decompose_fn=return_task_decompose):
 def test_write_verifiers_signature_has_no_trajectory_parameter():
     sig = inspect.signature(write_verifiers)
     params = list(sig.parameters)
-    assert params == ["task_brief", "seed_initial"]
+    assert params == ["task_prompt", "environment", "seed_data", "dynamic_data"]
     assert "trajectory" not in params
     assert "golden_trajectory" not in params
     assert "actions" not in params
     assert "trace" not in params
+    assert "seed_initial" not in params
 
 
 def test_discriminator_write_signature_has_no_trajectory_parameter():
     sig = inspect.signature(Discriminator.write)
     params = [p for p in sig.parameters if p != "self"]
-    assert params == ["task_brief", "seed_initial"]
+    assert params == ["task_prompt", "environment", "seed_data", "dynamic_data"]
     for forbidden in ("trajectory", "golden_trajectory", "actions", "trace", "oracle"):
         assert forbidden not in params
+
+
+def test_split_seed_initial_separates_dynamic_orders_from_catalog():
+    seed = {
+        "state": {
+            "task_id": "M220/x",
+            "task_brief": "update order",
+            "products": {"p1": {"id": "p1", "name": "Lamp", "base_price": 10}},
+            "users": {
+                "u_alice": {
+                    "id": "u_alice",
+                    "addresses": {"addr_home": {"id": "addr_home"}},
+                    "payment_methods": {
+                        "pay_visa": {"id": "pay_visa", "expires": "01/20", "is_default": True}
+                    },
+                }
+            },
+            "current_user_id": "u_alice",
+            "orders": {"ORD-1": {"id": "ORD-1", "status": "confirmed", "items": []}},
+            "cart": {"items": [{"product_id": "p1", "gift_message": "wrong occasion"}]},
+            "returns": {},
+            "mail": {"inbox": {"em1": {"subject": "trap"}}, "sent": {}},
+        }
+    }
+    seed_data, dynamic_data = split_seed_initial(seed)
+    assert "products" in seed_data
+    assert "orders" not in seed_data or not seed_data.get("orders")
+    assert "ORD-1" in (dynamic_data.get("orders") or {})
+    assert "cart" in dynamic_data
+    assert "mail" in dynamic_data
+    assert "payment_methods" in (dynamic_data.get("users") or {}).get("u_alice", {})
+    assert "addresses" in (seed_data.get("users") or {}).get("u_alice", {})
+    merged = merge_seed_layers(seed_data, dynamic_data)
+    assert "ORD-1" in merged["orders"]
+    assert merged["users"]["u_alice"]["payment_methods"]["pay_visa"]["expires"] == "01/20"
+
+
+def test_write_verifiers_from_seed_initial_compat_wrapper():
+    """Compat wrapper splits seed_initial into seed_data/dynamic_data for four-param API."""
+    brief = SEED_INITIAL_RETURN["state"]["task_brief"]
+    seed_data, dynamic_data = split_seed_initial(SEED_INITIAL_RETURN)
+    suite = Discriminator(decompose_fn=return_task_decompose).write(
+        brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data
+    )
+    assert suite.by_axis(VerifierAxis.CORRECTNESS)
+    # Module wrapper uses live Discriminator (LLM) — only smoke the split path here.
+    assert "orders" in dynamic_data or "returns" in dynamic_data or seed_data.get("task_id")
 
 
 def test_action_sequence_pattern_flags_forbidden_terms():
@@ -177,7 +234,7 @@ def test_coerce_drops_vacuous_mail_sent_nonempty():
             "action_log": [],
         }
     }
-    suite = disc.write("update order and email me", seed)
+    suite = _write(disc, "update order and email me", seed)
     ids = [c.id for c in suite.by_axis(VerifierAxis.CORRECTNESS)]
     assert "notification_sent" not in ids
     assert "email_discloses" in ids
@@ -429,7 +486,7 @@ def test_m220_guard_injects_forbidden_ship_to_changed():
             }
         ]
     )
-    suite = disc.write(_M220_BRIEF, _m220_seed())
+    suite = _write(disc, _M220_BRIEF, _m220_seed())
     forbidden = suite.by_axis(VerifierAxis.FORBIDDEN)
     correctness = suite.by_axis(VerifierAxis.CORRECTNESS)
     assert any(
@@ -461,7 +518,7 @@ def test_m224_guard_injects_forbidden_refund_created():
             "action_log": [],
         }
     }
-    suite = Discriminator(decompose_fn=lambda _b, _s: []).write(brief, seed)
+    suite = _write(Discriminator(decompose_fn=lambda _b, _s: []), brief, seed)
     # Empty decompose still gets guards + we need at least one correctness from email inject.
     forbidden = suite.by_axis(VerifierAxis.FORBIDDEN)
     assert any(
@@ -500,7 +557,7 @@ def test_wrong_polarity_forbidden_safe_invariants_dropped():
             "action_log": [],
         }
     }
-    suite = Discriminator(
+    disc = Discriminator(
         decompose_fn=lambda _b, _s: [
             {
                 "id": "email_ok",
@@ -528,7 +585,8 @@ def test_wrong_polarity_forbidden_safe_invariants_dropped():
                 "predicate": {"kind": "state_len_eq", "path": "orders", "value": 0},
             },
         ]
-    ).write(brief, seed)
+    )
+    suite = _write(disc, brief, seed)
     forb = suite.by_axis(VerifierAxis.FORBIDDEN)
     assert not any(c.id.startswith("bad_polarity") for c in forb)
     assert any(
@@ -585,8 +643,10 @@ def test_escalation_on_low_confidence(monkeypatch):
         )
 
     monkeypatch.setattr(disc_mod, "_call_claude", fake_claude)
-    suite = Discriminator().write(
-        SEED_INITIAL_RETURN["state"]["task_brief"], SEED_INITIAL_RETURN
+    suite = _write(
+        Discriminator(),
+        SEED_INITIAL_RETURN["state"]["task_brief"],
+        SEED_INITIAL_RETURN,
     )
     assert calls[0] == disc_mod.DEFAULT_DECOMPOSE_MODEL
     assert disc_mod.ESCALATION_MODEL in calls
@@ -622,7 +682,7 @@ def test_escalation_on_unaddressed_conditionals(monkeypatch):
 
     monkeypatch.setattr(disc_mod, "_call_claude", fake_claude)
     brief = "Return the mouse unless it was opened, and refund me."
-    suite = Discriminator().write(brief, SEED_INITIAL_RETURN)
+    suite = _write(Discriminator(), brief, SEED_INITIAL_RETURN)
     assert disc_mod.ESCALATION_MODEL in calls
     assert suite.source_model == disc_mod.ESCALATION_MODEL
     assert any(c.id == "escalated_ok" for c in suite.checkpoints)
@@ -654,7 +714,7 @@ def test_no_escalation_when_confident_and_conditionals_addressed(monkeypatch):
 
     monkeypatch.setattr(disc_mod, "_call_claude", fake_claude)
     brief = "Return the mouse unless it was opened."
-    suite = Discriminator().write(brief, SEED_INITIAL_RETURN)
+    suite = _write(Discriminator(), brief, SEED_INITIAL_RETURN)
     assert calls == [disc_mod.DEFAULT_DECOMPOSE_MODEL]
     assert suite.source_model == disc_mod.DEFAULT_DECOMPOSE_MODEL
 
@@ -682,7 +742,7 @@ def test_forbidden_veto_golden_passes_harmful_fails():
         ]
     )
     initial = _m220_seed()
-    suite = disc.write(_M220_BRIEF, initial)
+    suite = _write(disc, _M220_BRIEF, initial)
     assert suite.by_axis(VerifierAxis.FORBIDDEN)
 
     golden = {
@@ -818,8 +878,10 @@ def test_traps_without_forbidden_marks_incomplete_and_orchestrator_rejects(monke
 
     monkeypatch.setattr(disc_mod, "_call_claude", lambda *a, **k: None)
 
-    suite = Discriminator(decompose_fn=_correctness_only_trap_decompose).write(
-        _M271_STYLE_BRIEF, _M271_STYLE_SEED
+    suite = _write(
+        Discriminator(decompose_fn=_correctness_only_trap_decompose),
+        _M271_STYLE_BRIEF,
+        _M271_STYLE_SEED,
     )
     assert suite.detected_traps
     assert not suite.by_axis(VerifierAxis.FORBIDDEN)
@@ -870,8 +932,10 @@ def test_forbidden_repair_a_then_orchestrator_accepts(monkeypatch):
         )
 
     monkeypatch.setattr(disc_mod, "_call_claude", fake_claude)
-    suite = Discriminator(decompose_fn=_correctness_only_trap_decompose).write(
-        _M271_STYLE_BRIEF, _M271_STYLE_SEED
+    suite = _write(
+        Discriminator(decompose_fn=_correctness_only_trap_decompose),
+        _M271_STYLE_BRIEF,
+        _M271_STYLE_SEED,
     )
     assert suite.by_axis(VerifierAxis.FORBIDDEN)
     assert suite.incomplete_forbidden_coverage is False
@@ -923,8 +987,10 @@ def test_forbidden_repair_b_escalates_to_sonnet(monkeypatch):
         return json.dumps({"subgoals": []})
 
     monkeypatch.setattr(disc_mod, "_call_claude", fake_claude)
-    suite = Discriminator(decompose_fn=_correctness_only_trap_decompose).write(
-        _M271_STYLE_BRIEF, _M271_STYLE_SEED
+    suite = _write(
+        Discriminator(decompose_fn=_correctness_only_trap_decompose),
+        _M271_STYLE_BRIEF,
+        _M271_STYLE_SEED,
     )
     assert disc_mod.DEFAULT_DECOMPOSE_MODEL in calls
     assert disc_mod.ESCALATION_MODEL in calls
@@ -971,7 +1037,7 @@ def test_traps_with_initial_forbidden_skips_repair(monkeypatch):
             ],
         }
 
-    suite = Discriminator(decompose_fn=decompose).write(_M271_STYLE_BRIEF, _M271_STYLE_SEED)
+    suite = _write(Discriminator(decompose_fn=decompose), _M271_STYLE_BRIEF, _M271_STYLE_SEED)
     assert calls == []
     assert suite.forbidden_coverage_path == "initial"
     assert suite.incomplete_forbidden_coverage is False
