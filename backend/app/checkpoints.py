@@ -105,6 +105,7 @@ def capture(
     *,
     attempt_id: UUID | None,
     world: dict | None,
+    world_full: dict | None = None,
     backend_state: dict | None = None,
     browser: dict | None = None,
     step_clock: int = 0,
@@ -131,6 +132,7 @@ def capture(
     cp = models.EnvironmentCheckpoint(
         attempt_id=attempt_id,
         world=world or {},
+        world_full=world_full or None,
         backend_state=backend_state or {},
         step_clock=_clock_of(world, step_clock),
         url=b.get("url", "") or "",
@@ -184,8 +186,15 @@ def restore(cp: models.EnvironmentCheckpoint, gym, *, task_id: str, seed: int, v
     world and comparing hashes — the load is an optimization, the comparison is
     what makes it trustworthy. Raises DivergenceError when the restored world is
     not the one the checkpoint recorded.
+
+    Prefers `world_full` when one was captured: `world` is the compact verifier
+    view, which drops per-product stock — so restoring from it alone silently
+    restocks everything the annotator bought. Falls back to `world` for
+    checkpoints taken before `world_full` was recorded.
     """
-    loaded = gym.load_state(task_id, seed, cp.world or {}, cp.step_clock or None)
+    full = getattr(cp, "world_full", None)
+    payload = full if isinstance(full, dict) and full else cp.world
+    loaded = gym.load_state(task_id, seed, payload or {}, cp.step_clock or None)
     if loaded is None:
         return False
     if verify:

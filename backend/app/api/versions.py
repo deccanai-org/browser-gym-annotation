@@ -19,8 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import (
-    agent_runs, canonical, checkpoints, finalize, gym_client, jobs, live_world, materialize, models,
-    recorder, replay, versions, workspace,
+    agent_runs, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs, live_world,
+    materialize, models, recorder, replay, versions, workspace,
 )
 from app.api import live as live_api
 from app.api.sessions import _assert_not_submitted, _owned_session
@@ -29,6 +29,24 @@ from app.config import settings
 from app.db import SessionLocal, get_db
 
 router = APIRouter(prefix="/api", tags=["versions"])
+
+
+def _live_world(db: Session, attempt: models.ReviewSession):
+    """The attempt's world, for an operation that will MUTATE it.
+
+    A bridged attempt whose pane is closed has handed its gym back to the pool,
+    so it has no world at all — and the gym it used now belongs to whoever leased
+    it next. Refusing here is what stops finalize / certify / commit from
+    replaying into a stranger's world. Read-only callers use `world_for`
+    directly and simply see None.
+    """
+    world = live_world.world_for(db, attempt)
+    if getattr(world, "kind", "") == "unleased":
+        raise HTTPException(
+            status_code=409,
+            detail="this attempt's gym is not open — reopen the task, then try again",
+        )
+    return world
 
 
 def _version(db: Session, attempt: models.ReviewSession, version_id: UUID) -> models.TrajectoryVersion:
@@ -299,10 +317,10 @@ def finalize_attempt(
         raise HTTPException(status_code=409, detail="this attempt has no verifier suite to score against")
 
     task = db.get(models.Task, s.task_id)
-    # world_for, not endpoint_for: a bridged attempt holds no workspace lease, so
+    # _live_world, not endpoint_for: a bridged attempt holds no workspace lease, so
     # endpoint_for would hand back the SHARED gym and finalize would score a
-    # stranger's world.
-    endpoint = live_world.world_for(db, s)
+    # stranger's world. It also refuses outright when the gym was released.
+    endpoint = _live_world(db, s)
     # Finalization REPLAYS the trajectory, so it needs a real browser. This used to
     # fabricate a session id with an empty ticket, which the service has never
     # heard of — so every finalize failed "live browser unreachable" and nothing
@@ -547,6 +565,47 @@ class CertifyBody(BaseModel):
     versionId: UUID | None = None
 
 
+@contextlib.contextmanager
+def _scratch_world(db: Session, s: models.ReviewSession, task):
+    """A throwaway world for certify — never the annotator's own.
+
+    Certify REPLAYS, and replaying restores a checkpoint into whatever world it
+    is handed. Handing it the attempt's own world rewinds the annotator's live
+    session to the fork point mid-task, and their five tabs keep rendering the
+    pre-rewind projection over an engine that no longer matches: they see a world
+    that does not exist.
+
+    So a bridged attempt certifies in its own leased gym under a DIFFERENT bridge
+    session, with FRESH throwaway SIDs — fresh because the replay pushes its
+    projection to the hub, and reusing the attempt's SIDs would overwrite the
+    annotator's saved app state with the replay's.
+
+    Non-bridged attempts keep the previous behaviour: they own their gym outright,
+    and the workspace path is not what the 85 gym tasks use.
+    """
+    if not live_world.owns_bridged_world(s):
+        yield _live_world(db, s)
+        return
+
+    scratch_id = f"{s.id}:certify"
+    sids = cua_hub.attempt_sids()          # throwaway; discarded with the session
+    try:
+        out = bridge_client.open_session(scratch_id, task.external_id if task else "", s.seed, sids)
+    except bridge_client.BridgePoolExhausted as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(f"no free gym to check this in — {exc}. Checking needs its own gym so it "
+                    f"cannot disturb yours; try again shortly."),
+        ) from exc
+    except bridge_client.BridgeError as exc:
+        raise HTTPException(status_code=409, detail=f"could not start a gym to check in: {exc}") from exc
+    try:
+        yield live_world.BridgedWorld(str(out.get("gym_url") or ""), scratch_id)
+    finally:
+        with contextlib.suppress(Exception):
+            bridge_client.close_session(scratch_id)
+
+
 @router.post("/sessions/{session_id}/certify")
 def certify(
     session_id: UUID, body: CertifyBody,
@@ -579,7 +638,6 @@ def certify(
     blocked = [st for st in steps if st.replay_state == "needs_value"]
 
     task = db.get(models.Task, s.task_id)
-    world = live_world.world_for(db, s)
     actions = [{
         "kind": st.action_type,
         "locator": st.semantic_locator or {},
@@ -588,34 +646,39 @@ def certify(
 
     start = db.get(models.EnvironmentCheckpoint, v.fork_checkpoint_id) if v.fork_checkpoint_id else None
     live_id = ticket = ""
-    try:
-        live_id, ticket = live_api.open_scratch_browser(
-            live_api._browser_visible(getattr(world, "base_url", "") or settings.gym_url), current.email,
-        )
-        executor = gym_client.LiveBrowserClient(
-            base_url=settings.live_browser_url, session_id=live_id, ticket=ticket, gym=world,
-        )
-        result = replay.restore_and_replay(
-            start, actions, executor, world,
-            task_id=task.external_id if task else "", seed=s.seed,
-            # The per-action world hashes recorded at materialise time. Passing
-            # them is what makes the comparison in replay() live rather than dead
-            # code — without it the only check is "did the action land".
-            expected_hashes=[checkpoints.hash_world(st.world_after) if st.world_after else ""
-                             for st in steps],
-            strict=False,   # report EVERY problem, not just the first
-        )
-    except replay.ReplayRejected as exc:
-        result = None
-        rejected_at, reason = exc.at, str(exc)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=409, detail=f"could not certify: {exc}") from exc
-    else:
-        rejected_at, reason = result.rejected_at, result.reason
-    finally:
-        if live_id:
-            with contextlib.suppress(Exception):
-                live_api.close_scratch_browser(live_id)
+    # A scratch WORLD as well as a scratch browser — replaying restores a
+    # checkpoint, and doing that in the annotator's own gym rewinds them mid-task.
+    with _scratch_world(db, s, task) as world:
+        try:
+            live_id, ticket = live_api.open_scratch_browser(
+                live_api._browser_visible(getattr(world, "base_url", "") or settings.gym_url), current.email,
+            )
+            executor = gym_client.LiveBrowserClient(
+                base_url=settings.live_browser_url, session_id=live_id, ticket=ticket, gym=world,
+            )
+            result = replay.restore_and_replay(
+                start, actions, executor, world,
+                task_id=task.external_id if task else "", seed=s.seed,
+                # The per-action world hashes recorded at materialise time. Passing
+                # them is what makes the comparison in replay() live rather than dead
+                # code — without it the only check is "did the action land".
+                expected_hashes=[checkpoints.hash_world(st.world_after) if st.world_after else ""
+                                 for st in steps],
+                strict=False,   # report EVERY problem, not just the first
+            )
+        except replay.ReplayRejected as exc:
+            result = None
+            rejected_at, reason = exc.at, str(exc)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=409, detail=f"could not certify: {exc}") from exc
+        else:
+            rejected_at, reason = result.rejected_at, result.reason
+        finally:
+            if live_id:
+                with contextlib.suppress(Exception):
+                    live_api.close_scratch_browser(live_id)
 
     outcomes = (result.steps if result else []) or []
     for i, st in enumerate(steps):
@@ -749,9 +812,9 @@ def commit_actions(
     if not body.actions:
         raise HTTPException(status_code=422, detail="nothing to commit")
 
-    # world_for, not endpoint_for — see finalize_attempt. A bridged attempt that
+    # _live_world, not endpoint_for — see finalize_attempt. A bridged attempt that
     # committed against the shared gym would read and checkpoint someone else's world.
-    endpoint = live_world.world_for(db, s)
+    endpoint = _live_world(db, s)
     live = gym_client.LiveBrowserClient(
         base_url=settings.live_browser_url, session_id=body.liveSessionId, ticket=body.ticket, gym=endpoint,
     )

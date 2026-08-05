@@ -187,6 +187,16 @@ class GymEndpoint:
     def world(self) -> dict | None:
         return _req("GET", "/_harness/world", base_url=self.base_url, token=self.token)
 
+    def world_full(self) -> dict | None:
+        """The COMPLETE world (dataclasses.asdict), including the catalog.
+
+        `world()` is the compact verifier view and is a published contract (seed
+        goldens, db-vs-factory byte-equality), so it stays as it is. This carries
+        the fields a faithful RESTORE needs that the compact view drops — most
+        importantly per-product stock, which orders decrement.
+        """
+        return _req("GET", "/_harness/world_full", base_url=self.base_url, token=self.token)
+
     def state(self) -> dict | None:
         return _req("GET", "/_harness/state", base_url=self.base_url, token=self.token)
 

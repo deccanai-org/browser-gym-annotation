@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import (
@@ -130,6 +131,11 @@ class _Attached:
     restore: dict | None = None
     # cua-hub mode only: the cloned per-app attempt SIDs + open URLs (the tabs).
     cua_apps: list | None = None
+    # Set when a SAVED world was put back on this open: {step, at, exact}. None
+    # means "freshly seeded". `exact` is reported rather than assumed — handing
+    # an annotator a world that is subtly not the one they left is the failure
+    # worth being loud about.
+    resumed: dict | None = None
 
 
 # Process memory rather than a WorkspaceLease row, deliberately. A lease describes
@@ -300,6 +306,7 @@ def _reattach(entry: _Attached) -> dict | None:
         "world": "preserved" if entry.world != "shared" else "shared",
         "restore": entry.restore,
         "apps": entry.cua_apps,
+        "resumed": entry.resumed,
     }
 
 
@@ -347,6 +354,54 @@ def _capture_initial_world(db: Session, s) -> None:
     versions.ensure_manual_root(db, s, fork_checkpoint_id=cp.id if cp is not None else None)
 
 
+def _resume_checkpoint(db: Session, s) -> models.EnvironmentCheckpoint | None:
+    """The newest checkpoint worth restoring — i.e. actual work, not the seed.
+
+    `initial_checkpoint_id` is the seeded world the attempt started from, so
+    restoring it would be an expensive no-op. Anything later is the annotator's.
+    """
+    cp = db.scalar(
+        select(models.EnvironmentCheckpoint)
+        .where(models.EnvironmentCheckpoint.attempt_id == s.id)
+        .order_by(models.EnvironmentCheckpoint.step_clock.desc(),
+                  models.EnvironmentCheckpoint.created_at.desc())
+    )
+    if cp is None or (s.initial_checkpoint_id and cp.id == s.initial_checkpoint_id):
+        return None
+    return cp
+
+
+def _resume_world(db: Session, s, task, gym_url: str, bridge_session: str) -> dict | None:
+    """Restore the annotator's world into the gym that was just leased.
+
+    Best-effort by design: a world we cannot restore must leave them with a
+    freshly seeded task they can still work, not a 500 on open. But the outcome
+    is REPORTED (`exact`) rather than swallowed — silently handing someone a
+    different world than the one they left is the failure worth being loud about.
+    """
+    cp = _resume_checkpoint(db, s)
+    if cp is None:
+        return None
+    world = live_world.BridgedWorld(gym_url, bridge_session)
+    try:
+        ok = checkpoints.restore(cp, world, task_id=task.external_id, seed=s.seed,
+                                 # A mismatch must degrade to a seeded world with a
+                                 # visible badge, not raise DivergenceError on open.
+                                 verify=False)
+        if not ok:
+            return None
+        live = checkpoints.hash_world(world.world())
+        # The engine holds their world again; the hub still holds the seed
+        # projection, so re-project or the tabs render the seed until first click.
+        bridge_client.repush(bridge_session, step=int(cp.step_clock or 0))
+        return {"step": int(cp.step_clock or 0),
+                "at": cp.created_at.isoformat() if cp.created_at else "",
+                "exact": bool(cp.world_hash) and live == cp.world_hash}
+    except Exception as exc:  # noqa: BLE001 — never block the open on a restore
+        log.warning("resume failed for attempt %s (%s) — seeded instead", s.id, exc)
+        return None
+
+
 def _cua_start_paths(task) -> dict[str, str]:
     """Per-app landing route, precomputed by the gym's own mapper at export time.
 
@@ -376,9 +431,17 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
         or cua_hub.primary_app(task.start_url)
     bridge_session = str(s.id)          # stable across re-attach; the bridge keys on it
     gym_url = ""
+    resumed: dict | None = None         # set when a saved world was put back
 
     if bridge_client.enabled():
-        sids = cua_hub.attempt_sids()
+        # The SAME SIDs every time this attempt opens. The annotator's world lives
+        # in `mock_states` under these keys, so minting fresh ones (the old
+        # behaviour) pointed the reopened tabs at empty rows — leaving a task and
+        # coming back threw the work away. Prefer what was persisted; fall back to
+        # the derived set when `cua_apps` is missing.
+        persisted = {a["app"]: a["attempt_sid"] for a in (s.cua_apps or [])
+                     if a.get("app") and a.get("attempt_sid")}
+        sids = persisted or cua_hub.attempt_sids_for(s.id)
         try:
             out = bridge_client.open_session(bridge_session, task.external_id, s.seed, sids)
         except bridge_client.BridgePoolExhausted as exc:
@@ -390,6 +453,12 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
         except bridge_client.BridgeError as exc:
             raise HTTPException(status_code=409, detail=f"could not start the gym for this task: {exc}") from exc
         gym_url = str(out.get("gym_url") or "")
+        # Put the annotator's world back. The bridge just reset this gym to the
+        # task seed, so without this a returning annotator finds their work gone.
+        # Skipped when the bridge REUSED a live session: the world is already
+        # theirs and restoring would rewind it.
+        if not out.get("reused"):
+            resumed = _resume_world(db, s, task, gym_url, bridge_session)
         # The bridge URL is baked into the mock's query string, so it is resolved
         # by the BROWSER, not by us. Ours points at host.docker.internal, which
         # does not resolve on the host — the tab would silently fall back to
@@ -429,6 +498,7 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
         world="cua-hub",
         restore=None,
         cua_apps=apps,
+        resumed=resumed,
     )
     _ATTACHED[str(s.id)] = entry
 
@@ -467,6 +537,7 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
         "world": entry.world,
         "restore": entry.restore,
         "apps": apps,
+        "resumed": entry.resumed,
     }
 
 
@@ -680,13 +751,32 @@ def close_live_session(
     with contextlib.suppress(HTTPException):
         _live_request("POST", f"/live/sessions/{entry.live_session_id}/close", {}, timeout=10)
 
-    # Release the pooled gym too. Closing only the Chromium leaked the bridge
-    # lease — every task an annotator opened held one of the (few) gym instances
-    # forever, so after a couple of tasks every /live 503'd and the board looked
-    # empty. The lease belongs to the working session, so give it back when the
-    # session ends. Reopening the task re-leases and reseeds from the same attempt
-    # SIDs; the recorded trajectory is already durable in the DB, so nothing the
-    # annotator did is lost — only the live world is rebuilt.
+    # Closing is a SUSPEND, so snapshot the world before letting go of it.
+    # `materialize` checkpoints after each batch of events, but the seconds
+    # between the last batch and the close would otherwise be lost — and this is
+    # the checkpoint the next open restores from, so it is what makes "my exact
+    # world as I left it" true rather than approximately true.
+    with contextlib.suppress(Exception):
+        port = live_world.world_for(db, s)
+        world = port.world()
+        if world:
+            # `world` (compact) keeps the hash basis every recorded step already
+            # uses; `backend_state` carries the COMPLETE world, which is what a
+            # faithful restore needs — the compact view drops per-product stock,
+            # so restoring from it alone would restock what the annotator bought.
+            full = None
+            with contextlib.suppress(Exception):
+                full = port.world_full()
+            cp = checkpoints.capture(db, attempt_id=s.id, world=world,
+                                     world_full=full,
+                                     step_clock=int(world.get("step") or 0))
+            s.final_checkpoint_id = cp.id
+
+    # Release the pooled gym. Closing only the Chromium leaked the bridge lease —
+    # every task an annotator opened held one of the (few) gym instances forever,
+    # so after a couple of tasks every /live 503'd and the board looked empty. The
+    # lease belongs to the working session, so give it back when the session ends;
+    # the checkpoint above is what the next open rebuilds their world from.
     if s.bridge_session_id:
         with contextlib.suppress(Exception):
             bridge_client.close_session(s.bridge_session_id)
@@ -733,6 +823,13 @@ def reset_live_world(
         # world_for, not endpoint_for: a bridged attempt has no lease, and
         # resetting the SHARED gym here would wipe an unrelated annotator's world.
         endpoint = live_world.world_for(db, s)
+        # A released gym belongs to whoever leased it next; resetting it would
+        # destroy their in-progress world. Refuse rather than reset a stranger's.
+        if getattr(endpoint, "kind", "") == "unleased":
+            raise HTTPException(
+                status_code=409,
+                detail="this attempt's gym is not open — reopen the task, then reset",
+            )
         head = versions.head(db, s)
         head_id = head.id if head is not None else None
 

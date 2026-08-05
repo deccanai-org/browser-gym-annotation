@@ -122,6 +122,50 @@ class BridgedWorld:
             return self.gym.verify(step)
 
 
+class UnleasedWorld:
+    """A bridged attempt whose gym is NOT currently leased — it has no world.
+
+    Closing the pane releases the pooled gym (so somebody else can work), which
+    clears `bridge_session_id`. Without this port, `world_for` then fell through
+    to `WorkspaceWorld(GymEndpoint(settings.gym_url))` — the SHARED gym — and
+    finalize / certify / reset-world proceeded to read and *mutate* it. With one
+    annotator that was invisible; with several it is the cross-contamination
+    vector, and it fires on the most ordinary action in the product: leaving a
+    task.
+
+    "No world" is the honest answer, so every read returns None rather than
+    somebody else's data. Callers that only observe (materialize) already degrade
+    correctly on None; callers that would MUTATE must refuse — see the `kind`
+    check in api/versions.py and api/live.py.
+    """
+
+    __slots__ = ()
+
+    kind = "unleased"
+    base_url = ""
+
+    def world(self) -> dict | None:
+        return None
+
+    def state(self) -> dict | None:
+        return None
+
+    def app_states(self) -> dict[str, dict]:
+        return {}
+
+    def load_state(self, task_id: str, seed: int, state: dict, step: int | None = None) -> dict | None:
+        return None
+
+    def verify(self, step: int = 0) -> dict | None:
+        return None
+
+    def tick(self, step: int = 0) -> dict | None:
+        return None
+
+    def reset(self, task_id: str, seed: int = 0) -> dict | None:
+        return None
+
+
 class WorkspaceWorld:
     """The attempt's own leased gym process — the pre-existing isolation path."""
 
@@ -151,14 +195,34 @@ def is_bridged(session) -> bool:
     return bool(getattr(session, "bridge_session_id", "") and bridged_gym_url(session))
 
 
+def owns_bridged_world(session) -> bool:
+    """Does this attempt's world live in the bridged gym pool at all?
+
+    Keyed on `cua_apps` — the five attempt SIDs, persisted when the attempt first
+    opened — because that is a DURABLE fact about where this attempt's world
+    lives, and it stays true while the gym is released. Deliberately NOT keyed on
+    `cua_hub.enabled()` / `bridge_client.enabled()`: those are environment flags,
+    so keying on them would make an attempt's world resolve differently in tests
+    than in production, which is exactly the class of bug this module exists to
+    stop.
+    """
+    return bool(getattr(session, "cua_apps", None))
+
+
 def world_for(db: Session, session) -> WorldPort:
     """The world THIS attempt owns — never the shared gym by accident.
 
-    Bridged attempts resolve to the gym the bridge leased them; everything else
-    keeps the existing workspace behaviour (its own lease, else the shared gym,
-    which is correct for a non-bridged attempt).
+    Three cases, in order:
+      * bridged and leased  → the gym the bridge leased for it
+      * bridged, not leased → no world at all (the pane is closed; the gym went
+                              back to the pool and now belongs to someone else)
+      * everything else     → the existing workspace behaviour (its own lease,
+                              else the shared gym, which is correct for a
+                              non-bridged attempt)
     """
     if is_bridged(session):
         return BridgedWorld(bridged_gym_url(session), str(session.bridge_session_id))
+    if owns_bridged_world(session):
+        return UnleasedWorld()
     attempt_id: UUID | None = getattr(session, "id", None)
     return WorkspaceWorld(workspace.endpoint_for(db, attempt_id))

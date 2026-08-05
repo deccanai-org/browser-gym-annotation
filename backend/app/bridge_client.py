@@ -105,16 +105,40 @@ def _check(out: dict, session_id: str) -> dict:
     return out
 
 
-def open_session(session_id: str, task_id: str, seed: int, sids: dict[str, str]) -> dict:
+def open_session(session_id: str, task_id: str, seed: int, sids: dict[str, str],
+                 *, force: bool = False) -> dict:
     """Lease a gym, reset it to (task_id, seed), and baseline all five mocks.
 
     ``sids`` maps app -> the per-attempt SID this session's world is journalled
     under, so the annotator mutates a clone and the frozen seed is never touched.
-    Returns {ok, task_id, task_brief, apps{app: state}, gym_url}.
+    Returns {ok, reused, task_id, task_brief, apps{app: state}, gym_url}.
+
+    Idempotent unless ``force``: re-opening a session already on this task and
+    seed ATTACHES to the world that is there rather than resetting it, so a
+    reconnect cannot throw away work in progress. Pass ``force=True`` only where
+    the reset IS the point (reset-world). An older bridge ignores the flag and
+    resets, which is the pre-existing behaviour.
     """
     out = _req("POST", f"/bridge/{urllib.parse.quote(session_id)}/open",
-               {"task_id": task_id, "seed": seed, "sids": sids})
+               {"task_id": task_id, "seed": seed, "sids": sids, "force": force})
     return _check(out, session_id)
+
+
+def repush(session_id: str, *, step: int | None = None) -> dict:
+    """Re-project the engine's current world into the five mocks.
+
+    Called after restoring a checkpoint: the engine holds the annotator's world
+    again, but the hub still holds the seed projection. `step` re-syncs the
+    engine clock so the scheduler does not re-fire already-delivered events.
+
+    Tolerates an older bridge that has no such route — the world is still
+    correct, the tabs just render the seed until the first action.
+    """
+    try:
+        return _req("POST", f"/bridge/{urllib.parse.quote(session_id)}/repush",
+                    {"step": step})
+    except BridgeError:
+        return {"ok": False}
 
 
 def state(session_id: str, app: str | None = None) -> dict[str, dict]:

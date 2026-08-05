@@ -281,8 +281,31 @@ def start_attempt(task_external_id: str, seed: int, apps: list[str] | None = Non
 
 
 def attempt_sids(apps: list[str] | None = None) -> dict[str, str]:
-    """Fresh per-attempt SIDs — one isolated world per annotator, per app."""
+    """Fresh per-attempt SIDs — one isolated world per annotator, per app.
+
+    Use this for a world that is genuinely throwaway (a certify scratch session).
+    For an annotator's own attempt use `attempt_sids_for`, or reopening the task
+    abandons the world they built.
+    """
     return {app: str(uuid.uuid4()) for app in (apps or APP_KEYS) if app in REGISTRY}
+
+
+def attempt_sids_for(attempt_id, apps: list[str] | None = None) -> dict[str, str]:
+    """Per-(attempt, app) SIDs that are the SAME every time this attempt opens.
+
+    The annotator's world lives in `mock_states`, keyed by these SIDs. Minting
+    fresh uuid4s on every open — which is what happened before — pointed the
+    reopened tabs at empty rows, so leaving a task and coming back silently threw
+    the work away and leaked five rows per reopen.
+
+    Derived (uuid5) rather than stored, so they survive `cua_apps` being lost and
+    are still globally unique: the attempt id is itself a uuid4. Includes the seed
+    rev so a rev bump gives every attempt a clean set, exactly like `seed_sid`.
+    """
+    return {
+        app: str(uuid.uuid5(NS_GYM, f"attempt|{attempt_id}|{app}|r{seed_rev()}"))
+        for app in (apps or APP_KEYS) if app in REGISTRY
+    }
 
 
 def _app_entry(app: str, sid: str, start_path: str | None = None,

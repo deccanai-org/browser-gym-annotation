@@ -370,7 +370,14 @@ class EnvironmentCheckpoint(Base):
     id: Mapped[UUID] = _pk()
     attempt_id: Mapped[UUID | None] = _fk("review_session.id", nullable=True, ondelete="CASCADE")
     # --- gym / world ---
-    world: Mapped[dict] = mapped_column(JSON, default=dict)            # full multi-app world
+    world: Mapped[dict] = mapped_column(JSON, default=dict)            # the compact verifier view (/_harness/world)
+    # The COMPLETE world (/_harness/world_full, i.e. dataclasses.asdict). `world`
+    # above is a published contract — verifier paths, seed goldens, db-vs-factory
+    # byte-equality — so it cannot be widened; but it drops per-product stock,
+    # which orders decrement. Restoring from it alone silently restocks whatever
+    # the annotator bought, so suspend/resume records this alongside it.
+    # Nullable: checkpoints taken before this existed fall back to `world`.
+    world_full: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     backend_state: Mapped[dict] = mapped_column(JSON, default=dict)    # /_harness/state summary
     step_clock: Mapped[int] = mapped_column(Integer, default=0)        # deterministic clock = step counter
     # --- browser context ---
