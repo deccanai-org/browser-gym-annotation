@@ -1,9 +1,18 @@
-"""Seed the task catalog (M9): the hand-authored fixture tasks + the 312 real
-gym tasks, each with its seed state, so every task exists as a row from the
-start. Gym seed_state is filled lazily on first review (a full run there).
+"""Seed the task catalog: the hand-authored fixture tasks + all 312 real gym
+tasks, so every task exists as a row (with its prompt) from the start.
+
+The gym catalog comes from a VENDORED file, `app/data/cua_tasks.json`, exported
+offline by the gym's `tools/export_cua_catalog.py`. It used to come from a live
+`GET /_harness/tasks`, which had two problems: a gym outage silently produced an
+empty queue, and that endpoint only returns ids — so every gym task's `prompt`
+stayed blank and an annotator had nothing to read. The gym is still queried, but
+only to REPORT drift between the catalog and a running gym, never as the source.
 """
 
 from __future__ import annotations
+
+import json
+import pathlib
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +20,8 @@ from sqlalchemy.orm import Session
 from app import auth, gym_client, models
 from app.api.tasks import _TASKS
 from app.config import settings
+
+_CATALOG = pathlib.Path(__file__).resolve().parent / "data" / "cua_tasks.json"
 
 # Five dummy annotator accounts to test the multi-annotator flow (login-only; open
 # self-registration is off). Shared dev password below — TEST ACCOUNTS ONLY. One
@@ -71,25 +82,68 @@ def _upsert_fixture(db: Session, external_id: str, fx: dict) -> None:
     }
 
 
+def load_catalog() -> dict:
+    """The vendored gym catalog. Missing file is not fatal — fixtures still seed."""
+    if not _CATALOG.exists():
+        return {}
+    try:
+        return json.loads(_CATALOG.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _upsert_gym_task(db: Session, entry: dict, existing: dict[str, models.Task]) -> bool:
+    """Upsert one catalog task. Returns True when the row was created."""
+    tid = entry["task_id"]
+    row = existing.get(tid)
+    created = row is None
+    if row is None:
+        row = models.Task(external_id=tid, source="gym")
+        db.add(row)
+    row.source = "gym"
+    row.title = row.title or tid.split("/")[-1].replace("_", " ").strip().capitalize()
+    # The prompt is annotator-EDITABLE, so the catalog is a default, never an
+    # override: clobbering it here would silently discard someone's correction.
+    if not row.prompt:
+        row.prompt = entry.get("prompt", "")
+    row.category = entry.get("category") or (tid.split("/")[0] if "/" in tid else "")
+    row.start_url = row.start_url or entry.get("start_path", "")
+    meta = dict(row.meta or {})
+    meta.update({
+        "primaryApp": entry.get("primary_app", "shop"),
+        "difficulty": entry.get("difficulty", ""),
+        "inEightyFive": bool(entry.get("in_85")),
+        # Per-app seed SIDs + landing routes. Bridged sessions don't need the SIDs
+        # (the bridge baselines its own worlds), but a plain-clone deployment does.
+        "apps": entry.get("apps", {}),
+    })
+    row.meta = meta
+    return created
+
+
 def seed_catalog(db: Session) -> dict:
-    """Upsert fixture + gym tasks. Best-effort on the gym (it may be down)."""
+    """Upsert fixture + gym tasks from the vendored catalog."""
     for ext, fx in _TASKS.items():
         _upsert_fixture(db, ext, fx)
 
-    gym_added = 0
-    ids = gym_client.tasks()
-    if ids:
-        existing = set(db.scalars(select(models.Task.external_id).where(models.Task.source == "gym")).all())
-        for tid in ids:
-            if tid in existing:
-                continue
-            db.add(models.Task(
-                external_id=tid, source="gym",
-                title=tid.split("/")[-1].replace("_", " ").strip().capitalize(),
-                prompt="",  # filled with the real brief on first review
-                category=tid.split("/")[0] if "/" in tid else "",
-            ))
-            gym_added += 1
+    catalog = load_catalog()
+    entries = catalog.get("tasks") or []
+    existing = {t.external_id: t for t in db.scalars(
+        select(models.Task).where(models.Task.source == "gym")).all()}
+    gym_added = sum(1 for e in entries if _upsert_gym_task(db, e, existing))
     db.commit()
+
+    # Reconciliation only: if a gym is up and its task list disagrees with the
+    # catalog, say so loudly rather than quietly annotating a stale set.
+    ids = gym_client.tasks()
+    drift: dict = {}
+    if ids is not None:
+        cat_ids = {e["task_id"] for e in entries}
+        live = set(ids)
+        drift = {"onlyInGym": sorted(live - cat_ids)[:10], "onlyInCatalog": sorted(cat_ids - live)[:10],
+                 "gymCount": len(live), "catalogCount": len(cat_ids)}
+
     annotators = seed_annotators(db)
-    return {"fixtures": len(_TASKS), "gym_added": gym_added, "gym_reachable": ids is not None, "annotators_created": annotators}
+    return {"fixtures": len(_TASKS), "gym_tasks": len(entries), "gym_added": gym_added,
+            "gym_reachable": ids is not None, "drift": drift,
+            "annotators_created": annotators}

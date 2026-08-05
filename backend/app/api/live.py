@@ -21,6 +21,7 @@ from __future__ import annotations
 import urllib.parse
 
 import base64
+from datetime import datetime, timezone
 import contextlib
 import dataclasses
 import logging
@@ -38,7 +39,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import cua_hub, gym_client, models, restore, versions, workspace
+from app import (
+    bridge_client, checkpoints, cua_hub, gym_client, live_world, models, restore, versions, workspace,
+)
 from app.api.sessions import _owned_session
 from app.auth import current_annotator
 from app.config import settings
@@ -66,8 +69,12 @@ def _browser_visible(base_url: str) -> str:
     # Preserve the PATH. Callers now pass a task's own start URL (M46 begins on
     # /cart), and normalising every URL to a trailing slash turned that into
     # "/cart/" — a different route.
+    #
+    # Preserve the FRAGMENT too: this also rewrites the realistic mock URLs now,
+    # and ShopMail is hash-routed (`/?sid=…#/inbox`). Dropping the fragment lands
+    # the annotator on the app root instead of the task's start route.
     path = parsed.path or "/"
-    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, parsed.query, ""))
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, parsed.query, parsed.fragment))
 
 
 log = logging.getLogger("annotator.live")
@@ -316,23 +323,101 @@ def _rebuild_prefix(db, s, *, lease, endpoint, session_id: str, ticket: str) -> 
     return report
 
 
-def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
-    """Open the live browser on the task's seeded realistic UI (cua-hub mode).
+def _capture_initial_world(db: Session, s) -> None:
+    """Snapshot the SEEDED world and make it v1's restore point.
 
-    Clones each app's frozen seed_sid into a fresh attempt_sid (so this annotator gets
-    an isolated world), lands the browser on the task's primary app, and returns the
-    other apps as tabs. No gym workspace/seed/restore — the mock owns its state; the
-    base seed_sids are written by the gym-side tools/seed_all_tasks.
+    Two jobs at once, and both are load-bearing:
+      * it is the `initial` world a verifier suite is gated against (a check that
+        already holds here discriminates nothing), and
+      * it is the root version's `fork_checkpoint_id`, without which the replay
+        gate has no state to restore to.
+
+    Best-effort: a world we could not read must not stop the annotator working —
+    it costs them the gate, not the task, so it is logged rather than raised.
     """
-    apps = cua_hub.start_attempt(task.external_id, s.seed)
-    if not apps:
-        raise HTTPException(
-            status_code=409,
-            detail=("the realistic UIs are not seeded for this task — run "
-                    "tools/seed_all_tasks against the mocks first"),
-        )
-    primary_key = cua_hub.primary_app(task.start_url)
+    try:
+        world = live_world.world_for(db, s).world()
+    except Exception as exc:  # noqa: BLE001 — never block the open on a world read
+        log.warning("initial world unavailable for %s (%s)", s.id, exc)
+        world = None
+    cp = None
+    if world is not None:
+        cp = checkpoints.capture(db, attempt_id=s.id, world=world, step_clock=0)
+        s.initial_checkpoint_id = cp.id
+    versions.ensure_manual_root(db, s, fork_checkpoint_id=cp.id if cp is not None else None)
+
+
+def _cua_start_paths(task) -> dict[str, str]:
+    """Per-app landing route, precomputed by the gym's own mapper at export time.
+
+    Only the primary app honours the task's deep link (M310 starts on
+    /subscriptions); the rest open at their own root.
+    """
+    apps_meta = ((task.meta or {}).get("apps") or {}) if isinstance(task.meta, dict) else {}
+    return {app: (cfg or {}).get("start_path") or "/" for app, cfg in apps_meta.items()}
+
+
+def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
+    """Open the live browser on the task's realistic UI, BRIDGED to the real gym.
+
+    Bridged is the whole point: every click is forwarded to a gym instance leased
+    from the pool, which applies the engine's rules and re-projects the world into
+    all five mocks. That is what makes cross-app effects real (an order in ShopGym
+    produces the confirmation email in ShopMail) and what lets the gym's own
+    milestone suite score the annotator's work.
+
+    The bridge seeds the attempt itself — `/bridge/{sid}/open` resets the leased
+    gym and baselines all five attempt SIDs from it — so nothing here depends on
+    the frozen seed SIDs having been pre-written by the gym-side batch. Falls back
+    to a plain per-app clone when no bridge is configured.
+    """
+    start_paths = _cua_start_paths(task)
+    primary_key = ((task.meta or {}).get("primaryApp") if isinstance(task.meta, dict) else None) \
+        or cua_hub.primary_app(task.start_url)
+    bridge_session = str(s.id)          # stable across re-attach; the bridge keys on it
+    gym_url = ""
+
+    if bridge_client.enabled():
+        sids = cua_hub.attempt_sids()
+        try:
+            out = bridge_client.open_session(bridge_session, task.external_id, s.seed, sids)
+        except bridge_client.BridgePoolExhausted as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(f"every gym in the bridge pool is busy — {exc}. One annotator "
+                        f"needs one gym; try again shortly."),
+            ) from exc
+        except bridge_client.BridgeError as exc:
+            raise HTTPException(status_code=409, detail=f"could not start the gym for this task: {exc}") from exc
+        gym_url = str(out.get("gym_url") or "")
+        # The bridge URL is baked into the mock's query string, so it is resolved
+        # by the BROWSER, not by us. Ours points at host.docker.internal, which
+        # does not resolve on the host — the tab would silently fall back to
+        # local-store mode (no engine, no cross-app effects) with nothing to see.
+        apps = cua_hub.apps_for(sids, start_paths=start_paths,
+                                bridge=_browser_visible(bridge_client.base_url()),
+                                session=bridge_session)
+    else:
+        # No bridge: clone each app's frozen seed. No engine, so no cross-app
+        # effects and no milestone verdict — the annotator must be told which of
+        # the two worlds they are in, hence `world` below.
+        apps, failures = cua_hub.start_attempt(task.external_id, s.seed)
+        if not apps:
+            why = "; ".join(f"{f['app']}: {f['error']}" for f in failures) or "no apps seeded"
+            raise HTTPException(
+                status_code=409,
+                detail=(f"the realistic UIs are not available for {task.external_id} — {why}"),
+            )
+        for a in apps:                    # honour the task's landing route
+            a["start_path"] = start_paths.get(a["app"], a.get("start_path") or "/")
+            a["url"] = cua_hub.mock_url(a["app"], sid=a["attempt_sid"], start_path=a["start_path"])
+        bridge_session = ""
+
     primary = next((a for a in apps if a["app"] == primary_key), apps[0])
+    # The browser resolves URLs in its OWN namespace, which is not this process's
+    # when the backend is containerised and the browser is not.
+    for a in apps:
+        a["url"] = _browser_visible(a["url"])
     start_url = primary["url"]
     opened = _open_browser(start_url, current.email)
     entry = _Attached(
@@ -346,10 +431,31 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
         cua_apps=apps,
     )
     _ATTACHED[str(s.id)] = entry
+
+    # PERSIST the world this attempt owns. _ATTACHED is process memory by design
+    # (it tracks a browser, not a gym), but the attempt SIDs and the leased gym
+    # are durable facts: without them a restart orphans the annotator's world, and
+    # `world_for` cannot tell a bridged attempt from a workspace one — which is
+    # how bridged attempts used to fall through to the SHARED gym.
+    s.bridge_session_id = bridge_session
+    s.bridge_gym_url = gym_url
+    s.cua_apps = apps
+    s.mode = "human_do"
+    if s.started_at is None:
+        s.started_at = datetime.now(timezone.utc)
+
+    # The SEEDED world, captured before the annotator touches anything. It is one
+    # of the two worlds Feature 2 scores against, and it is the root version's
+    # restore point — `versions.create_root` never sets one, which is why the
+    # replay gate was a no-op in production.
+    if bridge_session:
+        _capture_initial_world(db, s)
+
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="live.open",
         target=entry.live_session_id,
-        meta={"url": start_url, "world": "cua-hub", "apps": [a["app"] for a in apps]},
+        meta={"url": start_url, "world": "cua-hub", "apps": [a["app"] for a in apps],
+              "bridged": bool(bridge_session), "gymUrl": gym_url},
     ))
     db.commit()
     return {
@@ -573,6 +679,19 @@ def close_live_session(
     # reach, with no way to open a working one.
     with contextlib.suppress(HTTPException):
         _live_request("POST", f"/live/sessions/{entry.live_session_id}/close", {}, timeout=10)
+
+    # Release the pooled gym too. Closing only the Chromium leaked the bridge
+    # lease — every task an annotator opened held one of the (few) gym instances
+    # forever, so after a couple of tasks every /live 503'd and the board looked
+    # empty. The lease belongs to the working session, so give it back when the
+    # session ends. Reopening the task re-leases and reseeds from the same attempt
+    # SIDs; the recorded trajectory is already durable in the DB, so nothing the
+    # annotator did is lost — only the live world is rebuilt.
+    if s.bridge_session_id:
+        with contextlib.suppress(Exception):
+            bridge_client.close_session(s.bridge_session_id)
+        s.bridge_session_id = ""
+        s.bridge_gym_url = ""
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="live.close", target=entry.live_session_id, meta={},
     ))
@@ -611,7 +730,9 @@ def reset_live_world(
 
     with _attempt_lock(str(s.id)):
         lease = workspace.active_lease(db, s.id)
-        endpoint = workspace.endpoint_for(db, s.id)
+        # world_for, not endpoint_for: a bridged attempt has no lease, and
+        # resetting the SHARED gym here would wipe an unrelated annotator's world.
+        endpoint = live_world.world_for(db, s)
         head = versions.head(db, s)
         head_id = head.id if head is not None else None
 

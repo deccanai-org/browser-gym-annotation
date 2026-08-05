@@ -13,6 +13,9 @@ import {
   scaleDelta,
 } from "../../lib/liveBrowser";
 import type { LiveState, NormPoint, OpenedSession, Viewport } from "../../lib/liveBrowser";
+import { FrameRecorder } from "../../lib/liveBrowser";
+import { AppTabs } from "./AppTabs";
+import type { LiveApp } from "./liveSessionApi";
 
 /**
  * The live browser pane — the annotator watches and drives the SAME browser the
@@ -31,6 +34,18 @@ import type { LiveState, NormPoint, OpenedSession, Viewport } from "../../lib/li
  *    badge. An annotator clicking into a dead stream and seeing nothing happen
  *    is the failure this component exists to prevent.
  */
+
+/** Which app the streamed page belongs to, matched by origin. Lets the tab strip
+ *  highlight the app actually on screen before the annotator has switched tabs —
+ *  the landing app is the task's primary, which is not always apps[0]. */
+function appForUrl(apps: LiveApp[], url: string): string | undefined {
+  if (!url) return undefined;
+  const originOf = (u: string) => { try { return new URL(u).origin; } catch { return ""; } };
+  const here = originOf(url);
+  if (!here) return undefined;
+  return apps.find((a) => originOf(a.url) === here)?.app;
+}
+
 export function LiveBrowserPane({
   attemptId,
   session: sessionProp,
@@ -39,6 +54,7 @@ export function LiveBrowserPane({
   base,
   control = true,
   onSession,
+  apps,
 }: {
   /** Review-session id — where recorded interactions land. Null disables
    *  recording (offline/fixture mode) but still lets the annotator drive. */
@@ -53,6 +69,9 @@ export function LiveBrowserPane({
   /** Ask for control. The first socket that asks gets it; the rest are viewers. */
   control?: boolean;
   onSession?: (s: OpenedSession | null) => void;
+  /** The realistic gym's apps, when this attempt is a cua-hub one. Renders the
+   *  tab strip; a multi-app task is undoable without it. */
+  apps?: LiveApp[] | null;
 }) {
   const [ownSession, setOwnSession] = useState<OpenedSession | null>(null);
   const [opening, setOpening] = useState(false);
@@ -62,6 +81,17 @@ export function LiveBrowserPane({
   const [urlDraft, setUrlDraft] = useState("");
   const [focused, setFocused] = useState(false);
   const [fit, setFit] = useState({ w: 0, h: 0 });
+  const [activeApp, setActiveApp] = useState<string | undefined>(undefined);
+  const [, setActiveTabId] = useState<string>("");
+  // The open press, so its "up" can be paired into a click — or recognised as a drag.
+  const downRef = useRef<{ p: NormPoint; at: number; target: Record<string, unknown>; button: string } | null>(null);
+  const clickCountRef = useRef(1);
+  // Newest frame, kept so a step can carry the pixels the annotator actually saw.
+  const lastFrameRef = useRef<string>("");
+  const framesRef = useRef<FrameRecorder | null>(null);
+  // Screenshots ride their own channel; see FrameRecorder. Throttled because a
+  // frame per pointer-move would be pure waste.
+  const lastShotRef = useRef(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -101,6 +131,7 @@ export function LiveBrowserPane({
     if (!sid || !ticket) return;
     const rec = attemptId ? new EventRecorder({ attemptId }) : null;
     recRef.current = rec;
+    framesRef.current = attemptId ? new FrameRecorder({ attemptId }) : null;
     const sock = new LiveSocket({
       sessionId: sid,
       ticket,
@@ -111,6 +142,27 @@ export function LiveBrowserPane({
       onFrame: (f) => {
         const img = imgRef.current;
         if (img) img.src = `data:image/jpeg;base64,${f.data}`;
+        lastFrameRef.current = f.data;
+      },
+      // The ONLY path from an interaction to the trajectory. Recording here
+      // rather than at send-time means nothing is recorded that did not apply,
+      // and every event carries the state the service says it produced.
+      onRecord: (ev) => {
+        const id = recRef.current?.push(ev);
+        // The pixels at the moment of the action. Keyed to the event's own id, so
+        // the backend can hang the screenshot on the step that event became —
+        // whichever of the two arrives first.
+        if (id) captureFrame(id);
+      },
+      onNotice: (n) => {
+        // A popup or redirect the page did on its own — no ack carries it.
+        if (n.url) setPageUrl(String(n.url));
+        recRef.current?.push({
+          kind: String(n.event ?? "notice"),
+          payload: n as Record<string, unknown>,
+          url: String(n.url ?? ""),
+          tab: String(n.tabId ?? ""),
+        });
       },
     });
     sockRef.current = sock;
@@ -163,13 +215,14 @@ export function LiveBrowserPane({
       const r = box.getBoundingClientRect();
       const dy = scaleDelta(e.deltaY, r.height, vp.height);
       const dx = scaleDelta(e.deltaX, r.width, vp.width);
-      if (!sock.scroll(p, dy, dx)) return;
-      recRef.current?.push({
+      const tgt = targetRef.current;
+      sock.send({ type: "scroll", nx: p.nx, ny: p.ny, dy, dx }, (st) => ({
         kind: "scroll",
-        payload: { dy, dx, nx: p.nx, ny: p.ny, auto: false },
-        target: targetRef.current,
-        url: pageUrl,
-      });
+        payload: { dy, dx, nx: p.nx, ny: p.ny, auto: false, t: Date.now() },
+        target: tgt,
+        url: st?.url ?? pageUrl,
+        tab: st?.tabId ?? "",
+      }));
     };
     box.addEventListener("wheel", onWheel, { passive: false });
     return () => box.removeEventListener("wheel", onWheel);
@@ -182,16 +235,105 @@ export function LiveBrowserPane({
     const sock = sockRef.current;
     const p = pointAt(e.clientX, e.clientY);
     if (!sock || !p || !sid || !ticket) return;
+    // Capture the pointer so a drag that leaves the surface still delivers its
+    // "up" here — otherwise the press has no end and folds into a bogus click.
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* not fatal */ }
     // Describe BEFORE dispatching. Afterwards the element may be gone, and a
     // recorded pixel is not replayable — the committed step needs a locator.
     const target = await describeAt(sid, ticket, p, { base });
     targetRef.current = target;
     focusStaleRef.current = false;  // a click IS a focus change, and we just named it
-    const at = Date.now();
-    if (!sock.click(p)) return; // refused — never record an action that did not happen
-    const ev = { target, url: pageUrl };
-    recRef.current?.push({ kind: "mousePressed", payload: { t: at, nx: p.nx, ny: p.ny }, ...ev });
-    recRef.current?.push({ kind: "mouseReleased", payload: { t: at + 1, nx: p.nx, ny: p.ny }, ...ev });
+    const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+    downRef.current = { p, at: Date.now(), target, button };
+    sock.send({ type: "mouse", phase: "down", nx: p.nx, ny: p.ny, button }, (st) => ({
+      kind: "mouseDown",
+      payload: { t: Date.now(), nx: p.nx, ny: p.ny, button },
+      target,
+      url: st?.url ?? pageUrl,
+      tab: st?.tabId ?? "",
+    }));
+  };
+
+  /** The other half of a press. Sending a REAL up (rather than synthesising one
+   *  1ms after the down, which is what this used to do) is the only way a drag
+   *  can ever be told apart from a click: the backend folds a down/up pair into a
+   *  click only when they share a target and land close together. */
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const sock = sockRef.current;
+    const p = pointAt(e.clientX, e.clientY);
+    const down = downRef.current;
+    downRef.current = null;
+    if (!sock || !p) return;
+    const button = down?.button ?? "left";
+    const clicks = clickCountRef.current;
+    clickCountRef.current = 1;
+    sock.send({ type: "mouse", phase: "up", nx: p.nx, ny: p.ny, button, clicks }, (st) => {
+      // The URL after a click is how a navigation caused BY that click becomes
+      // visible; nothing else reports it.
+      if (st?.url && st.url !== pageUrl) setPageUrl(st.url);
+      if (st?.tabId) setActiveTabId(st.tabId);
+      return {
+        kind: "mouseUp",
+        payload: { t: Date.now(), nx: p.nx, ny: p.ny, button, clicks,
+                   fromNx: down?.p.nx, fromNy: down?.p.ny },
+        target: down?.target ?? targetRef.current,
+        url: st?.url ?? pageUrl,
+        tab: st?.tabId ?? "",
+      };
+    });
+  };
+
+  /** Grab the frame the annotator is looking at, as a JPEG, for one event.
+   *
+   *  Uses the <img> the stream already paints rather than asking the service for
+   *  a fresh capture: this is exactly what they saw when they acted, and it costs
+   *  no round trip. Throttled — a picture per pointer-move is pure waste. */
+  const captureFrame = (clientEventId: string) => {
+    const frames = framesRef.current;
+    const img = imgRef.current;
+    if (!frames || !img || !img.naturalWidth) return;
+    const now = Date.now();
+    if (now - lastShotRef.current < 250) return;
+    lastShotRef.current = now;
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0);
+      const data = canvas.toDataURL("image/jpeg", 0.6).split(",")[1] ?? "";
+      if (data) frames.push({ clientEventId, jpegBase64: data, width: canvas.width, height: canvas.height });
+    } catch {
+      /* a lost screenshot never disturbs the interaction stream */
+    }
+  };
+
+  const onDoubleClick = () => { clickCountRef.current = 2; };
+
+  const onContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Suppress the annotator's OWN context menu; the right-click belongs to the
+    // remote page (pointerdown/up already carry button="right").
+    e.preventDefault();
+  };
+
+  /** Paste as one atomic change. Typing it character by character would produce a
+   *  different event stream — and a different recorded trajectory — from what the
+   *  annotator actually did. */
+  const onPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const sock = sockRef.current;
+    if (!sock) return;
+    e.preventDefault();
+    const text = e.clipboardData.getData("text");
+    if (!text) return;
+    const tgt = targetRef.current;
+    sock.send({ type: "paste", text }, (st) => ({
+      kind: "paste",
+      payload: { text, value: (st?.focus as Record<string, unknown> | undefined)?.value, t: Date.now() },
+      target: (st?.focus as Record<string, unknown> | undefined) ?? tgt,
+      url: st?.url ?? pageUrl,
+      tab: st?.tabId ?? "",
+    }));
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -233,10 +375,20 @@ export function LiveBrowserPane({
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const sock = sockRef.current;
     if (!sock) return;
-    if (e.metaKey || e.ctrlKey) return; // leave the annotator's own shortcuts alone
     if (["Shift", "Alt", "Meta", "Control", "CapsLock"].includes(e.key)) return;
+    // Reserve only what the ANNOTATOR needs for their own browser. Everything
+    // else — including Cmd/Ctrl+A, +C, +V — belongs to the remote page: this
+    // used to return early on any modifier, so a task that needed a shortcut
+    // simply could not be done, and the keystroke was never even sent.
+    const mods: string[] = [];
+    if (e.shiftKey) mods.push("Shift");
+    if (e.altKey) mods.push("Alt");
+    if (e.ctrlKey) mods.push("Control");
+    if (e.metaKey) mods.push("Meta");
+    const accel = e.metaKey || e.ctrlKey;
+    if (accel && ["r", "t", "w", "n", "q"].includes(e.key.toLowerCase())) return;
     e.preventDefault();
-    const printable = e.key.length === 1;
+    const printable = e.key.length === 1 && !accel;
     // A keystroke we cannot attribute must not be attributed to the WRONG field.
     // Clear first, then re-read asynchronously: this handler cannot await without
     // dropping the keystroke's ordering, and an empty target is redacted by the
@@ -245,16 +397,37 @@ export function LiveBrowserPane({
       targetRef.current = {};
       void syncFocus();
     }
-    const ev = { target: targetRef.current, url: pageUrl };
+    const tgt = targetRef.current;
     if (printable) {
-      if (!sock.typeText(e.key)) return;
-      // `key` events fold into ONE fill on the backend. Enter must not be one of
-      // them, or the committed step types the Enter key into the field.
-      recRef.current?.push({ kind: "key", payload: { text: e.key }, ...ev });
+      // `keyChar` events fold into ONE fill on the backend. Enter must not be one
+      // of them, or the committed step types the Enter key into the field.
+      sock.send({ type: "type", text: e.key }, (st) => {
+        const focus = (st?.focus as Record<string, unknown> | undefined) ?? undefined;
+        return {
+          kind: "keyChar",
+          // `value` is the field's REAL contents after this keystroke, straight
+          // from the page. It is what makes a fill correct: the client only knows
+          // the characters it sent, so Backspace, autocomplete or a rejected key
+          // made its own idea of the value wrong — "mug⌫s" used to commit as "s".
+          payload: { text: e.key, value: focus?.value, t: Date.now() },
+          target: focus ?? tgt,
+          url: st?.url ?? pageUrl,
+          tab: st?.tabId ?? "",
+        };
+      });
       return;
     }
-    if (!sock.key(e.key)) return;
-    recRef.current?.push({ kind: "press", payload: { key: e.key }, ...ev });
+    sock.send({ type: "key", key: e.key, modifiers: mods }, (st) => {
+      const focus = (st?.focus as Record<string, unknown> | undefined) ?? undefined;
+      if (st?.url && st.url !== pageUrl) setPageUrl(st.url);
+      return {
+        kind: "keyPress",
+        payload: { key: e.key, modifiers: mods, value: focus?.value, t: Date.now() },
+        target: focus ?? tgt,
+        url: st?.url ?? pageUrl,
+        tab: st?.tabId ?? "",
+      };
+    });
     // Tab, Enter and the arrows are exactly the keys that move focus.
     focusStaleRef.current = true;
     void syncFocus();
@@ -332,7 +505,12 @@ export function LiveBrowserPane({
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             onPointerDown={(e) => void onPointerDown(e)}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
             onPointerMove={onPointerMove}
+            onDoubleClick={onDoubleClick}
+            onContextMenu={onContextMenu}
+            onPaste={onPaste}
             onKeyDown={onKeyDown}
             style={{
               position: "relative",
@@ -360,6 +538,29 @@ export function LiveBrowserPane({
           <Empty startUrl={startUrl} opening={opening} error={openError} onOpen={() => void open()} />
         )}
       </div>
+
+      {apps && apps.length > 0 && (
+        <AppTabs
+          apps={apps}
+          // Before the annotator switches tabs, the highlighted app must be the
+          // one actually on screen — the task's PRIMARY app, which is not always
+          // apps[0]. Derive it from the streamed page's origin so a mail task
+          // does not sit on the ShopGym tab while showing the mailbox.
+          activeApp={activeApp ?? appForUrl(apps, pageUrl) ?? apps[0]?.app}
+          disabled={live.status !== "live" || !live.controller}
+          onSwitch={(a) => {
+            // Switch over the socket so the service rebinds the screencast AND
+            // the mouse to that tab. Optimistic: the ack carries the tab it
+            // actually landed on, and reconciles this if they disagree.
+            const ok = sockRef.current?.send({ type: "switch_tab", app: a.app, url: a.url }) ?? false;
+            if (ok) {
+              setActiveApp(a.app);
+              setPageUrl(a.url);
+            }
+            return ok;
+          }}
+        />
+      )}
 
       <InputBar live={live} recording={!!attemptId} onRetry={() => sockRef.current?.retry()} onStop={() => sockRef.current?.disconnect()} />
     </div>

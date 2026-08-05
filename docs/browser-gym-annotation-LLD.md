@@ -1,350 +1,480 @@
-# Browser Gym Annotation Platform — Low-Level Design (LLD)
+# Browser Gym — Low-Level Design
 
-**Owner:** Dhiren · **Reviewers:** Kashyap (HLD), Aarunik, Shravan
-**Status:** Draft v0.1 (for Kashyap review) · **Date:** 2026-07-29
-**Scope:** Phase 1 — JSON state + static seed data, target ≥500 samples, Tencent 20-task cut by Monday.
-
-> This LLD covers **only the browser-gym annotation platform's own DB + APIs** — the tables and
-> contracts we add so a task, its seed, its allowed sites and its verifier can be rendered and
-> scored inside the studio-platform iframe. It **reuses** the existing `cua-gym` mock layer
-> (`mock_state_events`, `mock_states`, `mock_files`, `users`) as-is; we do **not** rebuild auth,
-> the form-builder UI, or the mock state engine (Kashyap owns those).
-
----
-
-## 1. Context & decisions this design honors
-
-- **Host:** the existing **studio-platform** (form-builder + iframe). Auth (soul ID / OAuth) is done by
-  Kashyap and passed into the iframe via URL-param access/refresh tokens. We do not build auth.
-- **JSON for Phase 1** (Ankit's ruling): mock *state* stays JSON in `cua-gym`. Our new tables are thin
-  relational **metadata** (task, seed refs, verifier, session) — the small "additional tables in the
-  staging DB" Kashyap asked for. No relational base-seed DB yet (that's the Phase-2 versioning topic).
-- **Static, frozen seed data** — no dynamic generation (dynamic data breaks verifiers).
-- **Verifier** is **pipeline-generated (Arun/Claude) then human-corrected**; the annotator's run is
-  scored **1/0** against it. We store + run it; we do not author it in the UI.
-- **Session isolation:** each attempt runs on an **ephemeral SID cloned from the task's seed**, wiped
-  after a configurable **60–90 min** TTL.
-- **New tab:** allowed apps can open in a new tab (client validates each app/DB in isolation).
-- **Client delivery:** export a **tar** per task (code + prompt + verifier + initial & final state + trace).
-- **Deferred (out of scope):** reCAPTCHA/WebArena logic, dynamic data, cross-DB relational base.
-
----
-
-## 2. Architecture at a glance
-
-```mermaid
-flowchart LR
-  A[Annotator] -->|soul login + VPN| SP[studio-platform<br/>form builder]
-  SP -->|iframe + URL-param token + SID| BG[Browser-Gym Annotation APIs]
-  BG -->|read/write metadata| PG[(cua-gym Postgres<br/>bg_* tables)]
-  BG -->|clone seed SID / read state| MS[(cua-gym mock layer<br/>mock_states / mock_state_events)]
-  SP -->|renders mock at SID| MOCK[Hosted mocks<br/>cua-hub-*.delta.deccanexperts.ai]
-  MOCK -->|every interaction = state event| MS
-  PIPE[Verifier + seed pipeline<br/>Arun/Claude] -->|create task+seed+verifier| BG
-  BG -->|run verifier vs final state + trace| SCORE{{1 / 0}}
-```
-
-**One-line flow:** pipeline creates *task + seed + verifier* → annotator opens the task in the
-studio-platform → we mint an **attempt SID cloned from the seed** → the mock renders at that SID →
-interactions log to `mock_state_events` → on submit we run the stored verifier against the final
-state + event trace → **1/0**. Golden attempts are packaged as a tar for the client.
-
----
-
-## 3. Existing `cua-gym` layer we reuse (do NOT rebuild)
-
-From the live DB (`souldb › cua-gym › public`). Columns marked *(assumed)* need Kashyap/Ganesh to confirm.
-
-| Table | Rows | Key columns | Role |
-|---|---|---|---|
-| `mock_state_events` | ~96K | `mock` text, `sid` uuid, `action` text (`set`/`set_current`/…), `state` jsonb, `created_at` timestamptz | **Append-only event log** — every interaction on a mock under a SID. This is the trace. |
-| `mock_states` | ~80K | `mock`, `sid`, `state` jsonb, `updated_at` *(assumed)* | **Current/materialized state** per (mock, SID). |
-| `mock_files` | ~64K | `id`, `mock`, `sid`?, `filename`, `mime`, `ref/url` *(assumed)* | File **metadata** for mocks (files are not stored, only metadata). |
-| `users` | — | `id`/`soul_id`, `email`, `name`, `status` *(assumed)* | Platform users (soul IDs). Our FKs point here for the annotator. |
-
-**Key fact:** `sid` is the pivot. A `(mock, sid)` pair fully addresses one mock's state. A task's
-seed is a set of `(mock, seed_sid)`; an attempt is a set of `(mock, attempt_sid)` cloned from it.
-
----
-
-## 4. New tables — the browser-gym annotation layer (`bg_*`)
-
-All in the `cua-gym` DB (prefix `bg_` to namespace against `mock_*`). Postgres.
-
-```mermaid
-erDiagram
-  bg_app       ||--o{ bg_task_app     : "used by"
-  bg_task      ||--o{ bg_task_app     : "uses"
-  bg_task      ||--o{ bg_verifier     : "has"
-  bg_task      ||--o{ bg_assignment   : "assigned via"
-  bg_task      ||--o{ bg_session      : "attempted in"
-  bg_session   ||--o{ bg_verifier_run : "scored by"
-  bg_verifier  ||--o{ bg_verifier_run : "runs"
-  bg_session   ||--o| bg_golden       : "may become"
-  users        ||--o{ bg_session      : "annotator"
-  users        ||--o{ bg_assignment   : "assignee"
-```
-
-### 4.1 `bg_app` — registry of hosted mocks
-| Column | Type | Notes |
-|---|---|---|
-| `id` | serial PK | |
-| `key` | text unique | matches `mock_state_events.mock`, e.g. `gmail_mock`, `amazon_mock`, `google_calendar_mock`, `ubereats_mock`, `ebay_mock` |
-| `display_name` | text | "Amazon", "Gmail" … |
-| `base_url` | text | e.g. `https://cua-hub-amazon.delta.deccanexperts.ai` |
-| `opens_in_new_tab` | bool | default true |
-| `active` | bool | |
-
-### 4.2 `bg_task` — the task definition (created by the pipeline)
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `task_key` | text unique | human id, e.g. `amazon.return_order.001` |
-| `instruction` | text | the prompt shown to the annotator |
-| `allowed_sites` | jsonb | array of `bg_app.key` the task may use |
-| `difficulty` | text | easy/medium/hard |
-| `failure_mode` | text | one primary mode (13-mode taxonomy / vein), nullable for happy-path |
-| `skill_tags` | jsonb | `["navigation","form_fill","state_change",…]` |
-| `expected_behavior` | text | what a correct agent/annotator should do (incl. infeasible/stop cases) |
-| `source` | text | `pipeline` \| `manual` |
-| `status` | text | `draft` \| `ready` \| `archived` |
-| `created_by` | text | soul_id / pipeline id |
-| `created_at` | timestamptz | |
-
-### 4.3 `bg_task_app` — task ↔ mock + **seed SID** (the frozen initial state)
-| Column | Type | Notes |
-|---|---|---|
-| `id` | serial PK | |
-| `task_id` | uuid FK→`bg_task` | |
-| `app_key` | text FK→`bg_app.key` | |
-| `seed_sid` | uuid | the SID whose `mock_states`/`mock_state_events` hold the **frozen seed** for this app |
-| `role` | text | `primary` \| `secondary` |
-| `start_url` | text | deep link into the mock (e.g. `/account/orders`) |
-| UNIQUE | | (`task_id`, `app_key`) |
-
-### 4.4 `bg_session` — an annotation attempt (ephemeral, isolated)
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | our session id |
-| `task_id` | uuid FK→`bg_task` | |
-| `annotator_id` | text FK→`users` | soul_id |
-| `status` | text | `active` \| `submitted` \| `approved` \| `rejected` \| `expired` |
-| `apps` | jsonb | `[{app_key, attempt_sid, start_url}]` — the cloned SIDs for this attempt |
-| `started_at` | timestamptz | |
-| `expires_at` | timestamptz | `started_at + ttl` (config 60–90 min) |
-| `score` | int | last verifier score (1/0), null until run |
-| `is_golden` | bool | promoted as the golden trajectory |
-
-> **attempt_sid** is minted per app by cloning `bg_task_app.seed_sid`'s state into a fresh SID (§6).
-> On expiry, a cleanup job drops all `mock_state*` rows for the attempt SIDs (§6.4).
-
-### 4.5 `bg_verifier` — the deterministic verifier (pipeline → human-corrected)
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `task_id` | uuid FK→`bg_task` | |
-| `spec` | jsonb | verifier definition: positive asserts + **forbidden-mutation** asserts, the state keys to diff, expected values |
-| `type` | text | `deterministic` \| `llm` (Phase-1 deterministic) |
-| `version` | int | |
-| `status` | text | `pipeline_generated` \| `human_reviewed` \| `approved` |
-| `reviewed_by` | text | annotator/soul_id who corrected it |
-| `created_at` | timestamptz | |
-
-### 4.6 `bg_verifier_run` — a scoring result
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `session_id` | uuid FK→`bg_session` | |
-| `verifier_id` | uuid FK→`bg_verifier` | |
-| `score` | int | 1 / 0 |
-| `passed` | bool | |
-| `details` | jsonb | per-assertion pass/fail (incl. which forbidden mutation fired) |
-| `run_at` | timestamptz | |
-
-### 4.7 `bg_assignment` — who should do which task
-| Column | Type | Notes |
-|---|---|---|
-| `id` | serial PK | |
-| `task_id` | uuid FK→`bg_task` | |
-| `annotator_id` | text FK→`users` | |
-| `status` | text | `assigned` \| `started` \| `done` |
-| `assigned_at` | timestamptz | |
-
-### 4.8 `bg_golden` — the approved golden output (for packaging)
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `task_id` | uuid FK→`bg_task` unique | one golden per task (Phase 1) |
-| `session_id` | uuid FK→`bg_session` | the approved attempt |
-| `verifier_id` | uuid FK→`bg_verifier` | |
-| `packaged_at` | timestamptz | |
-| `tar_ref` | text | object-store ref of the exported bundle |
-
----
-
-## 5. API contracts
-
-Base path `/api/bg`. All calls are inside the studio-platform iframe; auth = the soul token passed by
-URL param (validated per request). All behind the soul VPN.
-
-### 5.1 Task management (pipeline + admin)
-| Method · Path | Purpose | Request → Response |
-|---|---|---|
-| `POST /tasks` | pipeline creates a task | `{task_key, instruction, allowed_sites[], apps:[{app_key, seed_sid, start_url, role}], verifier:{spec,type}, difficulty, failure_mode, skill_tags, expected_behavior}` → `{task_id}` |
-| `GET /tasks` | inventory / assignment list | `?status&app&difficulty` → `[{task_id, task_key, instruction, allowed_sites, status}]` |
-| `GET /tasks/{id}` | task detail for rendering | → `{task_id, instruction, allowed_sites, apps:[{app_key, start_url}], difficulty, failure_mode}` |
-| `GET /apps` | mock registry | → `[{key, display_name, base_url, opens_in_new_tab}]` |
-
-### 5.2 Session lifecycle (the core annotation flow)
-| Method · Path | Purpose | Request → Response |
-|---|---|---|
-| `POST /sessions` | **start an attempt** — clone seed → attempt SIDs | `{task_id, annotator_id}` → `{session_id, task:{instruction, allowed_sites}, apps:[{app_key, attempt_sid, url}], expires_at}` |
-| `GET /sessions/{id}` | resume / render | → `{session_id, status, apps:[{app_key, attempt_sid, url}], expires_at, score}` |
-| `POST /sessions/{id}/heartbeat` | extend TTL while active | → `{expires_at}` |
-| `POST /sessions/{id}/submit` | annotator done → triggers verify | → `{verifier_run}` (see 5.3) |
-| `DELETE /sessions/{id}` | abandon → wipe attempt SIDs | → `204` |
-
-> `POST /sessions` is the keystone API: it returns the **attempt_sid per app** that the iframe/mock uses
-> to render the isolated seeded world.
-
-### 5.3 Verifier
-| Method · Path | Purpose | Request → Response |
-|---|---|---|
-| `POST /sessions/{id}/verify` | run stored verifier vs final state + trace | → `{score, passed, details}` |
-| `GET /tasks/{id}/verifier` | fetch spec (for reviewer correction) | → `{verifier_id, spec, status, version}` |
-| `PUT /tasks/{id}/verifier` | human-correct the verifier | `{spec}` → `{verifier_id, version, status:'human_reviewed'}` |
-
-### 5.4 Golden + packaging
-| Method · Path | Purpose | Request → Response |
-|---|---|---|
-| `POST /tasks/{id}/golden` | mark a session golden | `{session_id}` → `{golden_id}` |
-| `POST /tasks/{id}/package` | export tar (code+prompt+verifier+initial+final+trace) | → `{tar_ref}` |
-
-### 5.5 Mock state (read — from the cua-gym layer)
-| Method · Path | Purpose |
+| | |
 |---|---|
-| `GET /mocks/{app_key}/state?sid=` | current state (reads `mock_states`) |
-| `GET /mocks/{app_key}/events?sid=` | full event trace (reads `mock_state_events`) |
+| **Status** | Draft v0.3.1 |
+| **Date** | 2026-07-29 |
+| **Repos** | `deccanai-org/browser-gym-annotation` · `deccanai-org/browser-gym` |
+| **Pilot** | ~20 human golden trajectories (prompt + seed + verifier + package) |
 
-*(If Kashyap already exposes mock state/events APIs, we call those instead of duplicating.)*
-
----
-
-## 6. The SID / session-isolation model (base → clone → discard)
-
-This is the rollback mechanism Aarunik described, realized on the JSON/SID layer.
-
-1. **Seed (frozen, static).** The pipeline writes the task's initial state once, under a **`seed_sid`**
-   per app (`bg_task_app.seed_sid` → rows in `mock_states`/`mock_state_events`). Never mutated.
-2. **Clone on attempt.** `POST /sessions` mints a fresh **`attempt_sid`** per app and copies the seed
-   state into it (one `mock_states` row + a `set` event per app). Recorded in `bg_session.apps`.
-3. **Mutate in isolation.** The annotator works in the iframe/mock at `attempt_sid`; every interaction
-   appends to `mock_state_events` under that SID. No other user's SID is touched.
-4. **Discard.** On submit-approved (packaged) or on **TTL expiry (60–90 min)**, a cleanup job deletes
-   the attempt SID's `mock_state*` rows. Seed SIDs and golden SIDs are retained.
-
-> **Ownership question for Kashyap:** does the *clone* (step 2) happen in our API, or does the mock
-> service clone when it first sees a new SID? Design assumes our API performs the copy; confirm.
+Shared map for the team: what we build, how components talk, how the DB is set up, and the contracts each side must honor. Workstreams only — no personal ownership lists.
 
 ---
 
-## 7. Sequence flows
+## 1. What we are building
 
-**A. Task creation (pipeline)**
-`pipeline → POST /tasks` → insert `bg_task` + `bg_task_app`(seed_sid per app) + `bg_verifier`(spec). Task
-becomes `ready` for assignment.
+Browser-agent training / eval data over realistic multi-app worlds (shop, mail, marketplace, calendar, food).
 
-**B. Annotation attempt**
-`annotator picks task → POST /sessions{task_id,annotator}` → clone seed_sid→attempt_sid per app, insert
-`bg_session` (TTL) → iframe renders each mock at `base_url + start_url` with `attempt_sid` → interactions
-log to `mock_state_events(attempt_sid)` → `POST /sessions/{id}/submit` → `POST .../verify` runs the
-verifier vs the final `mock_states(attempt_sid)` + the event trace → **score 1/0** shown.
+| Surface | Who | What |
+|---|---|---|
+| **Annotation (studio)** | Humans | Open seeded mocks, complete a task, run verifier, package a golden |
+| **Gym + realistic UIs** | Agents / eval | Same worlds as Amazon / Gmail / eBay / Calendar / Uber Eats; bridge into the gym engine; score with gym verifiers |
 
-**C. Golden + package**
-reviewer `POST /tasks/{id}/golden{session_id}` → `POST /tasks/{id}/package` → tar bundle (prompt +
-verifier spec + seed state + final state + trace) → `tar_ref`.
+Phase-1 client pilot = **human goldens on static JSON**. No agent-correction loop, no dynamic world generation.
 
-**D. TTL cleanup**
-cron/worker: for `bg_session` past `expires_at` and not golden → delete attempt-SID `mock_state*` rows,
-set status `expired`.
+**Hard rule:** seed JSON is frozen. Attempt start **clones** `seed_sid` → `attempt_sid`, mutates the clone, then discards or promotes. Never mutate the seed. Never generate rows at runtime.
 
 ---
 
-## 8. How misfires are caught (the "ordered a MacBook too" case)
+## 2. Who owns what
 
-The verifier does **not** rely on final-state match alone. `bg_verifier.spec` carries **positive** asserts
-("headphone order exists") **and** **forbidden-mutation** asserts ("no other order line created"). The run
-reads both the final `mock_states` **and** the `mock_state_events` trace for the attempt SID, so an extra
-order / auto-added warranty fires a forbidden assert → `score 0`. This is why the event trace (not just
-final state) is stored.
+| Component | Owns | Does not own |
+|---|---|---|
+| **Studio** | Login, assignment, form-builder shell, iframe tokens | Mock worlds, verifier scoring |
+| **Annotation UI + `/api/bg`** | Task chrome, session clone, verify/submit/package | Signup, QC admin console |
+| **Hosted mocks** | Render JSON for a SID; write every click to `mock_state_*` | Task metadata, scoring |
+| **`cua-gym` Postgres** | Worlds (`mock_*`) + annotation metadata (`bg_*`) | — |
+| **Pipeline** | Prompt + seed JSON + verifier draft | Running the annotation UI |
+| **Gym bridge** (parallel) | UI click → gym engine → re-project → harness verify | Studio golden packaging |
+
+---
+
+## 3. How components interact
+
+### 3.1 One annotation attempt (sequence)
+
+```mermaid
+sequenceDiagram
+  participant A as Annotator
+  participant S as Studio
+  participant U as Annotation UI
+  participant API as BG API /api/bg
+  participant DB as cua-gym
+  participant M as Mock apps
+
+  A->>S: Login + start task
+  S->>U: iframe URL (access_token, refresh_token, task_id)
+  U->>API: POST /sessions {task_id}
+  API->>DB: Read bg_task + bg_task_app.seed_sid
+  API->>DB: Clone mock_states seed_sid → attempt_sid (per app)
+  API->>DB: Insert bg_session (attempt SIDs, expires_at)
+  API-->>U: session_id + apps[].url (?sid=attempt_sid)
+  U->>M: Open each mock URL
+  loop Human works
+    A->>M: click / type
+    M->>DB: INSERT mock_state_events; UPSERT mock_states
+  end
+  A->>U: Submit / Run verifier
+  U->>API: POST /sessions/{id}/submit
+  API->>DB: Load final states + events; eval bg_verifier.spec
+  API->>DB: Write bg_verifier_run; set bg_session.score
+  API-->>U: score 0|1 + assert details
+```
+
+### 3.2 Runtime stack
+
+```text
+Studio (login, assignment, iframe)
+    │  access_token, refresh_token, task_id
+    ▼
+Annotation UI  (browser-agent.delta.soulhq.ai)
+    │  /api/bg/sessions → clone → attempt URLs
+    ▼
+Hosted mocks  Amazon · Gmail · eBay · Uber Eats · Calendar
+    │  every click mutates JSON under attempt_sid
+    ▼
+Postgres cua-gym
+    mock_states / mock_state_events / mock_files
+    bg_*  (task, session, verifier, golden)
+    │
+    ▼
+verify → 0|1 → QC → package tar
+```
+
+**Parallel (gym repo, not the studio pilot path):** mock UI → `bridgeAct` → gym HTTP → `WorldState` → re-project → `/_harness/verify`. Driven by `tools/run_newui_eval.sh`. Annotation pilot still reads/writes `cua-gym`, not gym SQLite.
+
+### 3.3 Trust boundaries
+
+- Studio → UI: URL tokens. UI does not implement a second login.
+- UI → BG API: `Authorization: Bearer <access_token>`.
+- Mocks → DB: existing CUA write path (we do not redesign it).
+- BG API → DB: only service that clones seeds / writes `bg_*` / runs verify.
+- VPN required for platform + DB.
+
+---
+
+## 4. Hosts and apps
+
+| System | Location |
+|---|---|
+| Annotation UI | `https://browser-agent.delta.soulhq.ai/` |
+| Studio | Existing form-builder shell (embeds the UI) |
+| Amazon | `https://cua-hub-amazon.delta.deccanexperts.ai` |
+| Gmail | `https://cua-hub-gmail.delta.deccanexperts.ai` |
+| eBay | `https://cua-hub-ebay.delta.deccanexperts.ai` |
+| Uber Eats | `https://cua-hub-uber-eats.delta.deccanexperts.ai` |
+| Calendar | `https://cua-hub-google-calendar.delta.deccanexperts.ai` |
+| DB | `souldb` → `cua-gym` @ `10.0.141.72:5432` |
+
+App keys **must** match `mock_states.mock`:
+
+| key | App |
+|---|---|
+| `amazon_mock` | Amazon |
+| `gmail_mock` | Gmail |
+| `ebay_mock` | eBay |
+| `ubereats_mock` | Uber Eats |
+| `google_calendar_mock` | Calendar |
+
+SID URL param name (`sid` vs other) — confirm once; isolate in `build_mock_url(app, path, sid)`.
+
+---
+
+## 5. Database setup
+
+**Host:** same Postgres as the mocks (`cua-gym`). New tables use prefix `bg_` so they sit beside `mock_*` without colliding. Default = co-locate (no second DB) so SIDs join without cross-DB pain.
+
+### 5.1 Already there — reuse, do not redesign
+
+| Table | Columns (observed / expected) | Role |
+|---|---|---|
+| `mock_states` | `mock`, `sid`, `state` (jsonb), `updated_at` | Current world for `(mock, sid)` |
+| `mock_state_events` | `mock`, `sid`, `action`, `state` (jsonb), `created_at` | Append-only trajectory |
+| `mock_files` | file metadata (not blobs) | Uploads / assets referenced by mocks |
+
+Trajectory query: events for `(mock, attempt_sid)` ordered by `created_at`. Verifiers primarily read final `mock_states.state`; events catch sequence / forbidden mutations.
+
+### 5.2 New tables — DDL
+
+```sql
+-- App registry
+CREATE TABLE bg_app (
+  id               SERIAL PRIMARY KEY,
+  key              TEXT NOT NULL UNIQUE,   -- = mock_states.mock
+  display_name     TEXT NOT NULL,
+  base_url         TEXT NOT NULL,
+  opens_in_new_tab BOOLEAN NOT NULL DEFAULT TRUE,
+  active           BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Task (what the sidebar shows)
+CREATE TABLE bg_task (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_key          TEXT NOT NULL UNIQUE,
+  instruction       TEXT NOT NULL,
+  description       TEXT,
+  allowed_sites     JSONB NOT NULL DEFAULT '[]',  -- ["amazon_mock","gmail_mock"]
+  constraints       JSONB NOT NULL DEFAULT '{}',  -- {max_steps, flags}
+  difficulty        TEXT CHECK (difficulty IN ('easy','medium','hard')),
+  failure_mode      TEXT,
+  skill_tags        JSONB NOT NULL DEFAULT '[]',
+  expected_behavior TEXT,
+  start_state_label TEXT,
+  source            TEXT NOT NULL DEFAULT 'pipeline',
+  status            TEXT NOT NULL DEFAULT 'draft', -- draft|ready|archived
+  created_by        TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Per-app seed binding
+CREATE TABLE bg_task_app (
+  id        SERIAL PRIMARY KEY,
+  task_id   UUID NOT NULL REFERENCES bg_task(id) ON DELETE CASCADE,
+  app_key   TEXT NOT NULL REFERENCES bg_app(key),
+  seed_sid  UUID NOT NULL,
+  role      TEXT NOT NULL DEFAULT 'primary',  -- primary|secondary
+  start_url TEXT NOT NULL DEFAULT '/',
+  UNIQUE (task_id, app_key)
+);
+CREATE INDEX ON bg_task_app (seed_sid);
+
+-- One human attempt
+CREATE TABLE bg_session (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id      UUID NOT NULL REFERENCES bg_task(id),
+  annotator_id TEXT NOT NULL,              -- from studio token
+  status       TEXT NOT NULL DEFAULT 'active',
+    -- active|submitted|approved|rejected|expired|abandoned
+  apps         JSONB NOT NULL,
+    -- [{app_key, attempt_sid, start_url, url}]
+  started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at   TIMESTAMPTZ NOT NULL,
+  score        INT,                        -- last 0|1
+  is_golden    BOOLEAN NOT NULL DEFAULT FALSE,
+  notes        TEXT
+);
+CREATE INDEX ON bg_session (status, expires_at);
+CREATE INDEX ON bg_session (task_id, annotator_id);
+
+CREATE TABLE bg_verifier (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id     UUID NOT NULL REFERENCES bg_task(id) ON DELETE CASCADE,
+  version     INT NOT NULL DEFAULT 1,
+  type        TEXT NOT NULL DEFAULT 'deterministic',
+  status      TEXT NOT NULL DEFAULT 'pipeline_generated',
+    -- pipeline_generated|human_reviewed|approved
+  spec        JSONB NOT NULL,
+  reviewed_by TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (task_id, version)
+);
+
+CREATE TABLE bg_verifier_run (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id  UUID NOT NULL REFERENCES bg_session(id) ON DELETE CASCADE,
+  verifier_id UUID NOT NULL REFERENCES bg_verifier(id),
+  score       INT NOT NULL CHECK (score IN (0,1)),
+  passed      BOOLEAN NOT NULL,
+  details     JSONB NOT NULL DEFAULT '{}',
+  run_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE bg_assignment (
+  id           SERIAL PRIMARY KEY,
+  task_id      UUID NOT NULL REFERENCES bg_task(id) ON DELETE CASCADE,
+  annotator_id TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'assigned', -- assigned|started|done
+  assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE bg_golden (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id     UUID NOT NULL UNIQUE REFERENCES bg_task(id),
+  session_id  UUID NOT NULL REFERENCES bg_session(id),
+  verifier_id UUID NOT NULL REFERENCES bg_verifier(id),
+  packaged_at TIMESTAMPTZ,
+  tar_ref     TEXT
+);
+```
+
+**Seed `bg_app` once** with the five hosted URLs from §4.
+
+### 5.3 SID clone (session start)
+
+```text
+clone_seed(app_key, seed_sid) → attempt_sid:
+  1. attempt_sid := gen_random_uuid()
+  2. row := SELECT state FROM mock_states WHERE mock=app_key AND sid=seed_sid
+     (must exist — pipeline / seeder wrote it earlier)
+  3. INSERT mock_states (mock, sid, state) VALUES (app_key, attempt_sid, row.state)
+  4. INSERT mock_state_events (..., action='set', state=row.state)
+  5. optional: copy mock_files for seed_sid → attempt_sid
+  6. return attempt_sid
+```
+
+Invariants: never UPDATE/DELETE `seed_sid` from annotation APIs; cleanup deletes only expired non-golden attempt SIDs. If mocks auto-create empty state on unknown SID, we still **pre-clone** so annotators never start empty.
+
+### 5.4 Migration order
+
+1. Confirm VPN + read access to `cua-gym`.  
+2. Apply `bg_*` DDL.  
+3. Insert five `bg_app` rows.  
+4. Pipeline (or gym `seed_to_cuagym --commit`) writes `mock_states` for each task’s `seed_sid`.  
+5. `POST /api/bg/tasks` registers metadata + points at those SIDs.  
+6. Annotation can open sessions.
+
+---
+
+## 6. Contracts
+
+### 6.1 iframe boot (studio → UI)
+
+```text
+https://browser-agent.delta.soulhq.ai/
+  ?access_token=...
+  &refresh_token=...
+  &task_id=<bg_task.id>
+  (&session_id=<bg_session.id> for resume)
+```
+
+On load: validate token → create or resume session → render sidebar → open each `apps[].url` (new tab by default) → heartbeat while focused.
+
+Sidebar fields (must live in DB): task id, instruction, description, tags, start-state label, constraints, allowed sites.
+
+### 6.2 Verifier spec
+
+```json
+{
+  "version": 1,
+  "apps": ["amazon_mock", "gmail_mock"],
+  "initial_state_refs": {
+    "amazon_mock": "<seed_sid>",
+    "gmail_mock": "<seed_sid>"
+  },
+  "asserts": [
+    {
+      "id": "order_headphones",
+      "type": "jsonpath_exists",
+      "app": "amazon_mock",
+      "path": "$.orders[?(@.items[?(@.sku=='SKU_HEADPHONES')])]",
+      "required": true
+    },
+    {
+      "id": "no_extra_macbook",
+      "type": "jsonpath_forbidden",
+      "app": "amazon_mock",
+      "path": "$.orders[*].items[?(@.sku=='SKU_MACBOOK')]",
+      "required": true
+    },
+    {
+      "id": "confirmation_email",
+      "type": "jsonpath_exists",
+      "app": "gmail_mock",
+      "path": "$.emails[?(@.subject~'Order confirmation')]",
+      "required": true
+    }
+  ],
+  "diff_policy": {
+    "compare": "final_vs_initial",
+    "ignore_paths": ["$.emails[*].received_at"]
+  }
+}
+```
+
+Pipeline authors the draft; humans review a small set before scale. UI only **runs** the spec — no authoring UI in Phase 1.
+
+### 6.3 Package layout
+
+```text
+task_<task_key>/
+  manifest.json
+  prompt.txt
+  verifier.json
+  seed/<app>.json
+  final/<app>.json
+  trace/<app>.events.jsonl
+  meta/session.json
+  meta/verifier_run.json
+```
+
+---
+
+## 7. API contracts (`/api/bg`)
+
+Auth: `Authorization: Bearer <access_token>`. VPN.
+
+### 7.1 Surface
+
+| Method | Path | Responsibility |
+|---|---|---|
+| GET | `/apps` | App registry |
+| POST | `/tasks` | Pipeline ingest (task + apps + verifier) |
+| GET | `/tasks`, `/tasks/{id}` | List / detail |
+| GET/PUT | `/tasks/{id}/verifier` | Human review of spec |
+| POST | `/sessions` | Clone seeds → attempt SIDs; return open URLs |
+| GET | `/sessions/{id}` | Resume |
+| POST | `/sessions/{id}/heartbeat` | Extend TTL |
+| DELETE | `/sessions/{id}` | Abandon |
+| POST | `/sessions/{id}/submit` | Submit + verify |
+| POST | `/sessions/{id}/verify` | Score 0\|1 + details |
+| POST | `/tasks/{id}/golden` | Promote |
+| POST | `/tasks/{id}/package` | Write tar, set `tar_ref` |
+
+Prefer existing mock HTTP APIs for state/events; thin BG wrappers only if needed.
+
+### 7.2 `POST /tasks` (pipeline ingest)
+
+```json
+{
+  "task_key": "BG-2026-001",
+  "instruction": "Return the blue backpack and email support the RMA id.",
+  "description": "…",
+  "allowed_sites": ["amazon_mock", "gmail_mock"],
+  "constraints": { "max_steps": 40, "flags": ["multi_tab_allowed"] },
+  "difficulty": "medium",
+  "skill_tags": ["navigation", "form_fill"],
+  "expected_behavior": "Return exact SKU only; support email sent.",
+  "start_state_label": "Alice signed in; order ORD-9481 delivered",
+  "apps": [
+    {
+      "app_key": "amazon_mock",
+      "seed_sid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "start_url": "/orders",
+      "role": "primary"
+    },
+    {
+      "app_key": "gmail_mock",
+      "seed_sid": "ffffffff-1111-2222-3333-444444444444",
+      "start_url": "/#/inbox",
+      "role": "secondary"
+    }
+  ],
+  "verifier": { "type": "deterministic", "spec": { "...": "§6.2" } }
+}
+```
+
+→ `201 { "task_id": "…", "status": "ready" }`  
+Prereq: each `seed_sid` already exists in `mock_states`.
+
+### 7.3 `POST /sessions`
+
+Request: `{ "task_id": "…", "ttl_minutes": 90 }` (annotator from token).
+
+Behavior: load task apps → clone each seed → insert `bg_session` → return URLs.
+
+```json
+{
+  "session_id": "…",
+  "expires_at": "2026-07-29T18:00:00Z",
+  "task": {
+    "task_key": "BG-2026-001",
+    "instruction": "…",
+    "allowed_sites": ["amazon_mock", "gmail_mock"],
+    "constraints": { "max_steps": 40 }
+  },
+  "apps": [
+    {
+      "app_key": "amazon_mock",
+      "attempt_sid": "…",
+      "start_url": "/orders",
+      "url": "https://cua-hub-amazon.delta.deccanexperts.ai/orders?sid=…"
+    },
+    {
+      "app_key": "gmail_mock",
+      "attempt_sid": "…",
+      "start_url": "/#/inbox",
+      "url": "https://cua-hub-gmail.delta.deccanexperts.ai/?sid=…#/inbox"
+    }
+  ]
+}
+```
+
+### 7.4 `POST /sessions/{id}/verify`
+
+Load latest `human_reviewed`/`approved` verifier → eval asserts on final states → write `bg_verifier_run` → set `bg_session.score`.
+
+```json
+{
+  "score": 0,
+  "passed": false,
+  "details": {
+    "order_headphones": { "pass": true },
+    "no_extra_macbook": { "pass": false, "found": ["SKU_MACBOOK"] }
+  }
+}
+```
+
+---
+
+## 8. End-to-end flows (summary)
+
+**Authoring:** write frozen seed JSON into `mock_states` → `POST /tasks` with verifier → task `ready`.
+
+**Annotation:** studio assigns → UI opens session (clone) → human works in mocks → submit → verify → QC → golden → package.
+
+**Gym agent eval (optional):** bridge + `run_newui_eval` — does not replace the studio path for the first 20.
 
 ---
 
 ## 9. Non-functionals
 
-- **Auth:** none of our own — validate the soul token from the URL param; everything behind soul VPN.
-- **Scale (Phase 1):** metadata tables are tiny; state stays JSON in `mock_state*`. Must stay clean to
-  **≥500 samples** without schema change (Ankit's bar). Index `mock_state_events(mock, sid)` and
-  `bg_session(status, expires_at)`.
-- **Session TTL:** configurable 60–90 min; heartbeat extends; expiry wipes.
-- **New-tab:** `bg_app.opens_in_new_tab`; the iframe offers "open in new tab" per allowed app.
+- Studio tokens only in the annotation UI.  
+- Session TTL default 90 min; cron expires and deletes attempt state.  
+- Index `(mock, sid)` on mock tables; `bg_session(status, expires_at)`.  
+- ≥500 tasks of metadata; worlds stay JSONB.  
+- Secrets in deploy store, never git.  
+- Logs: `session_id`, `task_key`, score — no extra PII.
 
 ---
 
-## 10. Seed migration (gym world → cua-gym `mock_states`)
-
-The 20 pilot tasks' seed worlds come from the existing gym. Migrating a task's seed is a
-**dump → transform → load** pipeline — implemented in the gym repo as `tools/seed_to_cuagym.py`.
-
-1. **Dump** — `dataclasses.asdict(build_wrapped(task_id, seed))` gives the full per-app world
-   (shop / mail / market / calendar / food) as plain dicts. (Also available live via
-   `POST /_harness/reset` → `GET /_harness/world`.)
-2. **Transform** — one function per app maps the gym shape → that mock's `mock_states` shape.
-   The shapes differ, so this is real work; e.g. mail
-   `{account_email, inbox/sent/drafts:{id:email}}` → gmail_mock
-   `{user:{name,email}, emails:[{id, from, to:[{name,email}], cc, subject, body, folder…}]}`.
-   The **mail transform is done**; shop / market / calendar / food are **stubbed pending each
-   mock's schema**.
-3. **Load** — mint a `seed_sid` per (task, mock); INSERT one `mock_states` row + an initial
-   `set` `mock_state_events` row under it; record the `seed_sid` on `bg_task_app.seed_sid`.
-
-app-key → mock: `shop→amazon_mock`, `mail→gmail_mock`, `market→ebay_mock`,
-`calendar→google_calendar`, `food→uber_eats_mock`.
-
-**Blocked pending (from Kashyap / Ganesh):** each mock's `mock_states` schema (to finish the four
-transforms), the exact SID-load URL param, and cua-gym write access.
-
-## 11. Golden-trajectory logging (pilot: annotator does the task, we log the steps)
-
-The pilot has **no replay / review surface** — the annotator performs the whole task live in the
-realistic UI and we capture their steps.
-
-1. `POST /api/bg/sessions {task_id, annotator}` → clone each app's `seed_sid` into a fresh
-   `attempt_sid`; return the mock URLs (`cua_hub.mock_url(app, start_path, attempt_sid)`).
-2. The annotator works in the realistic UI; **every interaction is written by the mock to
-   `mock_state_events` under the `attempt_sid`** — that event stream **is** the trajectory, so no
-   separate capture is needed.
-3. On submit, QC promotes the session to golden (`bg_golden`); the trajectory = the ordered
-   `mock_state_events` for its `attempt_sid` + the initial/final `mock_states`.
-4. `POST /api/bg/tasks/{id}/package` bundles prompt + verifier + initial & final state + the event
-   trace as the tar for client delivery.
-
-Multiple annotators may attempt one task (alternate correct paths); each is its own session /
-`attempt_sid`. Phase 1 promotes **one** golden per task and retains the rest for QC.
-
-## 12. Open questions for Kashyap / Ganesh (please confirm before build)
-
-1. Exact columns of `mock_states`, `mock_files`, `users` (couldn't fully read from the grid).
-2. Who owns the **seed→attempt SID clone** — our API or the mock service?
-3. Is the seed stored as a normal SID in `mock_states`, or a separate "template" concept?
-4. Do you already expose **mock state/events read APIs** we should call (vs §5.5)?
-5. `soul_id` shape + how the studio-platform passes annotator identity into the iframe.
-6. Should `bg_*` tables live in `cua-gym` (recommended, co-located) or a separate `annotation` DB?
-7. Verifier `spec` schema — align with Arun's pipeline output format so `POST /tasks` ingests it directly.
-
----
-
-## 13. Out of scope (Phase 1)
-
-reCAPTCHA / WebArena logic · dynamic data generation · cross-app relational base seed DB
-(Phase-2 versioning) · building auth or the form-builder UI · authoring verifiers in the UI.
+*v0.3.1 — interaction sequence, DDL, clone steps, and concrete API payloads.*

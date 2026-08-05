@@ -29,16 +29,22 @@ class GymBadRequest(Exception):
         self.detail = detail
 
 
-def _req(method: str, path: str, body: dict | None = None, timeout: int = 20, base_url: str | None = None) -> dict | None:
+def _req(method: str, path: str, body: dict | None = None, timeout: int = 20, base_url: str | None = None,
+         token: str | None = None) -> dict | None:
     # base_url targets ONE workspace's gym (per-annotator isolation). Omitted =>
     # the single shared settings.gym_url, which is the legacy/default behaviour.
+    # token likewise: a gym we did not start (one leased from the bridged pool)
+    # runs with its OWN harness token, and every /_harness route 401s on a
+    # mismatch — so the endpoint carries its token rather than the whole
+    # deployment having to agree on one secret by convention.
     url = (base_url or settings.gym_url).rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers={"content-type": "application/json", "X-Harness-Token": settings.gym_harness_token},
+        headers={"content-type": "application/json",
+                 "X-Harness-Token": token or settings.gym_harness_token},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -131,12 +137,12 @@ def resume_verify(task_id: str, seed: int, state: dict, url_trail: list[str], fi
     return final or last
 
 
-def _screenshot_bytes(path: str, base_url: str | None = None) -> bytes | None:
+def _screenshot_bytes(path: str, base_url: str | None = None, token: str | None = None) -> bytes | None:
     """Raw PNG fetch, shared by the module function and GymEndpoint (which binds a
-    per-workspace base_url)."""
+    per-workspace base_url, and its own harness token when the gym isn't ours)."""
     import urllib.parse
     url = (base_url or settings.gym_url).rstrip("/") + "/_harness/screenshot?path=" + urllib.parse.quote(path, safe="")
-    req = urllib.request.Request(url, headers={"X-Harness-Token": settings.gym_harness_token})
+    req = urllib.request.Request(url, headers={"X-Harness-Token": token or settings.gym_harness_token})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return r.read()
@@ -162,34 +168,37 @@ class GymEndpoint:
     per process, so isolation must come from talking to a *different process*.
     """
 
-    __slots__ = ("base_url",)
+    __slots__ = ("base_url", "token")
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = base_url
+        # A gym leased from the bridged pool runs with its own HARNESS_TOKEN;
+        # None keeps the shared-deployment default.
+        self.token = token
 
     # --- read ---------------------------------------------------------------
     def tasks(self) -> list[str] | None:
-        d = _req("GET", "/_harness/tasks", base_url=self.base_url)
+        d = _req("GET", "/_harness/tasks", base_url=self.base_url, token=self.token)
         return d.get("tasks") if d else None
 
     def snapshot(self) -> dict | None:
-        return _req("GET", "/_harness/snapshot", base_url=self.base_url)
+        return _req("GET", "/_harness/snapshot", base_url=self.base_url, token=self.token)
 
     def world(self) -> dict | None:
-        return _req("GET", "/_harness/world", base_url=self.base_url)
+        return _req("GET", "/_harness/world", base_url=self.base_url, token=self.token)
 
     def state(self) -> dict | None:
-        return _req("GET", "/_harness/state", base_url=self.base_url)
+        return _req("GET", "/_harness/state", base_url=self.base_url, token=self.token)
 
     def available(self) -> bool:
-        return _req("GET", "/_harness/tasks", base_url=self.base_url) is not None
+        return _req("GET", "/_harness/tasks", base_url=self.base_url, token=self.token) is not None
 
     # --- mutate / drive -----------------------------------------------------
     def reset(self, task_id: str, seed: int = 0) -> dict | None:
-        return _req("POST", "/_harness/reset", {"task_id": task_id, "seed": seed}, base_url=self.base_url)
+        return _req("POST", "/_harness/reset", {"task_id": task_id, "seed": seed}, base_url=self.base_url, token=self.token)
 
     def verify(self, step: int = 0) -> dict | None:
-        return _req("POST", "/_harness/verify", {"step": step}, base_url=self.base_url)
+        return _req("POST", "/_harness/verify", {"step": step}, base_url=self.base_url, token=self.token)
 
     def tick(self, step: int = 0) -> dict | None:
         """Advance the deterministic clock and flush any now-due scheduled event.
@@ -200,19 +209,19 @@ class GymEndpoint:
         has. The backfill ticks when it reconstructs those tasks; a replay that
         cannot tick could never reproduce what the backfill wrote.
         """
-        return _req("POST", "/_harness/tick", {"step": step}, base_url=self.base_url)
+        return _req("POST", "/_harness/tick", {"step": step}, base_url=self.base_url, token=self.token)
 
     def load_state(self, task_id: str, seed: int, state: dict, step: int | None = None) -> dict | None:
         body: dict = {"task_id": task_id, "seed": seed, "state": state}
         if step is not None:
             body["step"] = step
-        return _req("POST", "/_harness/load_state", body, base_url=self.base_url)
+        return _req("POST", "/_harness/load_state", body, base_url=self.base_url, token=self.token)
 
     def run_agent(self, task_id: str, agent: str = "oracle", seed: int = 0, brief: str | None = None) -> dict | None:
         body: dict = {"agent": agent, "task_id": task_id, "seed": seed}
         if brief:
             body["brief"] = brief
-        return _req("POST", "/_harness/run_agent", body, timeout=260, base_url=self.base_url)
+        return _req("POST", "/_harness/run_agent", body, timeout=260, base_url=self.base_url, token=self.token)
 
     def resume_run(self, task_id: str, seed: int, state: dict, url: str, step: int | None = None,
                    agent: str = "llm", correction: str = "") -> dict | None:
@@ -221,10 +230,10 @@ class GymEndpoint:
             body["step"] = step
         if correction:
             body["correction"] = correction
-        return _req("POST", "/_harness/resume_run", body, timeout=300, base_url=self.base_url)
+        return _req("POST", "/_harness/resume_run", body, timeout=300, base_url=self.base_url, token=self.token)
 
     def screenshot(self, path: str) -> bytes | None:
-        return _screenshot_bytes(path, base_url=self.base_url)
+        return _screenshot_bytes(path, base_url=self.base_url, token=self.token)
 
 
 class LiveBrowserClient:

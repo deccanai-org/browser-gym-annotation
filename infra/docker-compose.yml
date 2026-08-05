@@ -60,6 +60,29 @@ services:
       # uncapped: capping reruns anywhere the manual fallback has not been
       # exercised strands whoever hits it. AGENT_RUN_CAP=0 turns it back off.
       AGENT_RUN_CAP: ${AGENT_RUN_CAP:-3}
+      # --- the realistic 5-app gym (cua-hub), bridged -------------------------
+      # Route gym tasks at the realistic UIs instead of the plain gym HTML.
+      CUA_HUB_MODE: ${CUA_HUB_MODE:-1}
+      # BRIDGED: clicks drive the real gym engine, so cross-app effects (an order
+      # in ShopGym producing an email in ShopMail) and the gym's own milestone
+      # verifiers work. Empty = plain per-app seed clone, no engine.
+      CUA_BRIDGE_URL: ${CUA_BRIDGE_URL:-http://host.docker.internal:8093}
+      # The bridged pool is started by the gym repo's own script and runs with ITS
+      # harness token; every /_harness world read 401s on a mismatch.
+      CUA_BRIDGE_GYM_TOKEN: ${CUA_BRIDGE_GYM_TOKEN:-bridged-stack}
+      # Two DIFFERENT namespaces on purpose: the state API is resolved by THIS
+      # container, the SPA origins by the browser on the host.
+      CUA_HUB_API_ROOT: ${CUA_HUB_API_ROOT:-http://host.docker.internal:9077}
+      CUA_HUB_UI_URL_SHOP: ${CUA_HUB_UI_URL_SHOP:-http://127.0.0.1:5201}
+      CUA_HUB_UI_URL_MARKET: ${CUA_HUB_UI_URL_MARKET:-http://127.0.0.1:5202}
+      CUA_HUB_UI_URL_MAIL: ${CUA_HUB_UI_URL_MAIL:-http://127.0.0.1:5203}
+      CUA_HUB_UI_URL_CALENDAR: ${CUA_HUB_UI_URL_CALENDAR:-http://127.0.0.1:5204}
+      CUA_HUB_UI_URL_FOOD: ${CUA_HUB_UI_URL_FOOD:-http://127.0.0.1:5205}
+      CUA_SEED_REV: ${CUA_SEED_REV:-1}
+      # Must equal the live browser service's own value. They currently agree only
+      # because both fall back to "dev-live-secret"; setting one side alone closes
+      # every socket 4401, which reads as a permanently blank pane.
+      LIVE_STREAM_SECRET: ${LIVE_STREAM_SECRET:-dev-live-secret}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -20,6 +20,53 @@ function fallbackTasks(): TaskListItem[] {
   return [{ id: t.id, title: t.title, priority: t.priority, meta: t.meta, index: 0, total: 1, source: "fixture" }];
 }
 
+// --- My tasks: the board the annotator lands on after signing in ------------
+
+export type MyTaskStatus = "todo" | "in_progress" | "returned" | "in_review" | "submitted";
+
+export interface MyTaskSite {
+  app: string;
+  title: string;
+  domain: string;
+}
+
+export interface MyTaskRow {
+  id: string;
+  title: string;
+  category: string;
+  difficulty: string;
+  prompt: string;
+  primaryApp: string;
+  sites: MyTaskSite[];
+  status: MyTaskStatus;
+  resumeStep: number | null;
+  sessionId: string | null;
+  updatedAt: string | null;
+}
+
+export interface MyTasksBoard {
+  annotator: { name: string; email: string; role: string };
+  batch: string;
+  assigned: number;
+  quota: { submitted: number; target: number };
+  counts: Record<MyTaskStatus | "all", number>;
+  nextUp: MyTaskRow | null;
+  tasks: MyTaskRow[];
+}
+
+/** The signed-in annotator's board: their breakers, each tagged with where THEY
+ *  left off. Returns null on failure so the screen can say so rather than show a
+ *  fabricated empty board. */
+export async function fetchMyTasks(): Promise<MyTasksBoard | null> {
+  try {
+    const res = await fetch(`/api/my-tasks`, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as MyTasksBoard;
+  } catch {
+    return null;
+  }
+}
+
 export type SessionStatus =
   | "draft"
   | "steps_approved"
@@ -377,6 +424,24 @@ export async function resumeGymReview(body: {
  *  (a saved correction fork restores onto the identical trajectory). Returns null
  *  when the task was never reviewed (→ caller runs a fresh agent), which persists
  *  one for next time. */
+/**
+ * The task, ready for a HUMAN to do it — instant, no agent.
+ *
+ * Selecting a task used to trigger a live model run and make the annotator wait
+ * for it, then review its attempt. The annotator now performs the task
+ * themselves, so there is nothing to run: this returns the brief with an empty
+ * step list, and their own interactions fill it in as they work.
+ */
+export async function getManualReview(taskId: string): Promise<ReviewData | null> {
+  try {
+    const res = await fetch(`/api/gym/tasks/${encodeURIComponent(taskId)}/manual-review`, { credentials: "include" });
+    if (!res.ok) return null;
+    return mapPayload((await res.json()) as ReviewPayload);
+  } catch {
+    return null;
+  }
+}
+
 export async function getPersistedGymReview(taskId: string): Promise<ReviewData | null> {
   try {
     const res = await fetch(`/api/gym/tasks/${encodeURIComponent(taskId)}/persisted-review`, { credentials: "include" });

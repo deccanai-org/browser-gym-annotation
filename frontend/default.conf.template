@@ -19,8 +19,20 @@ server {
     proxy_read_timeout 300s;
   }
 
-  # SPA fallback
+  # Hashed build assets are immutable — their name changes when the content does,
+  # so they can be cached forever.
+  location /assets/ {
+    try_files $uri =404;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+  }
+
+  # SPA fallback. index.html MUST NOT be cached: it is the only file whose name
+  # never changes, and it is what points at the current hashed bundle. A cached
+  # copy keeps loading yesterday's JS after a redeploy — which is exactly how a
+  # rebuilt UI kept showing the old screen until a manual hard-reload.
   location / {
     try_files $uri /index.html;
+    add_header Cache-Control "no-cache, must-revalidate";
+    expires off;
   }
 }

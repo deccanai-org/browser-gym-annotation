@@ -29,14 +29,32 @@ export interface LiveSession {
    *  - "preserved" — the work already in there was kept
    *  - "seeded"    — reset to the task's seed state
    *  - "shared"    — not a gym task, or the shared gym
+   *  - "cua-hub"   — the realistic 5-app gym, bridged to the real engine
    *  Surfaced because an annotator cannot otherwise tell whether the cart they
    *  spent an hour filling is still there except by going to look for it. */
-  world?: "preserved" | "seeded" | "shared";
+  world?: "preserved" | "seeded" | "shared" | "cua-hub";
   /** For a FORK: how far the branch's prefix was rebuilt into the world, so the
    *  annotator does not have to re-perform it by hand. null when there was no
    *  prefix to rebuild (an unforked attempt). `partial` means the rebuild stopped
    *  short — the world is at `done` of `total`, and `reason` says why. */
   restore?: RestoreProgress | null;
+  /** The realistic gym's five apps, each seeded for THIS attempt. The browser
+   *  opens on the task's primary app; the rest are what the tab strip offers.
+   *  Absent for a non-cua attempt. */
+  apps?: LiveApp[] | null;
+}
+
+/** One realistic app of a cua-hub attempt. */
+export interface LiveApp {
+  app: string;        // shop | mail | market | calendar | food
+  mock_key: string;   // amazon_mock | gmail_mock | …
+  title: string;      // ShopGym | ShopMail | …
+  attempt_sid: string;
+  start_path: string;
+  url: string;
+  /** Set when this app could not be prepared — shown disabled rather than
+   *  silently missing, so "ShopMail is unavailable" is visible. */
+  error?: string;
 }
 
 export interface RestoreProgress {

@@ -119,6 +119,29 @@ class ReviewSession(Base):
     # THAT annotator's own correction, never another annotator's — the isolation
     # fix for the task-global verdict leak. Null for canonical/prompt-edit runs.
     origin_session_id: Mapped[UUID | None] = mapped_column(ForeignKey("review_session.id", ondelete="SET NULL"), nullable=True, index=True)
+    # --- the realistic-UI (cua-hub) attempt -------------------------------------
+    # Which world this attempt owns. These were process-memory only (`_ATTACHED`
+    # in api/live.py), so a backend restart orphaned the annotator's world with no
+    # way to reopen it — and `world_for()` could not tell a bridged attempt from a
+    # workspace one, which is how bridged attempts ended up on the SHARED gym.
+    mode: Mapped[str] = mapped_column(String(16), default="agent_review")  # agent_review | human_do
+    prompt_override: Mapped[str] = mapped_column(Text, default="")
+    bridge_session_id: Mapped[str] = mapped_column(String(64), default="")   # == the attempt id, keyed by the bridge
+    bridge_gym_url: Mapped[str] = mapped_column(String(255), default="")     # the gym the bridge leased us
+    cua_apps: Mapped[dict | list] = mapped_column(JSON, default=list)        # [{app, mock_key, attempt_sid, url, ...}]
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # The two worlds Feature 2 scores against: the seeded start, and what the
+    # annotator's own work produced.
+    # use_alter: environment_checkpoint.attempt_id already points BACK at
+    # review_session, so these close a cycle. Without it create_all cannot order
+    # the two tables and raises CircularDependencyError at dev startup.
+    initial_checkpoint_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("environment_checkpoint.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_review_session_initial_checkpoint"), nullable=True)
+    final_checkpoint_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("environment_checkpoint.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_review_session_final_checkpoint"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
     updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
 
@@ -190,6 +213,13 @@ class TrajectoryStep(Base):
     guidance_text: Mapped[str] = mapped_column(Text, default="")     # reviewer instruction that produced this step
     guidance_author_id: Mapped[UUID | None] = _fk("annotator.id", nullable=True, ondelete="SET NULL")
     intervention_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Whether this step has been PROVEN to replay. Recording a step and proving it
+    # are separate concerns: proving restores a checkpoint, which destroys the
+    # annotator's working state, so it runs in a SCRATCH world and marks steps
+    # rather than deleting them — one bad action no longer discards the sequence.
+    # unverified | verified | diverged | failed | needs_value
+    replay_state: Mapped[str] = mapped_column(String(16), default="unverified")
+    replay_error: Mapped[str] = mapped_column(Text, default="")
 
     trajectory: Mapped[Trajectory] = relationship(back_populates="steps")
 
@@ -395,6 +425,10 @@ class TrajectoryVersion(Base):
     created_by_id: Mapped[UUID | None] = _fk("annotator.id", nullable=True, ondelete="SET NULL")
     # Content is immutable; STATUS transitions under optimistic concurrency.
     status: Mapped[str] = mapped_column(String(16), default="candidate", index=True)  # candidate|approved|rejected|published
+    # How far the raw event stream has been folded into this version's steps.
+    # Advanced in the SAME transaction as the steps it produced, so re-folding is
+    # a no-op — which is what makes "steps appear as you work" safe to run often.
+    materialized_through_seq: Mapped[int] = mapped_column(Integer, default=0)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
 
@@ -417,7 +451,17 @@ class InteractionEvent(Base):
     url: Mapped[str] = mapped_column(Text, default="")
     tab: Mapped[str] = mapped_column(String(64), default="")
     committed_step_id: Mapped[UUID | None] = _fk("trajectory_step.id", nullable=True, ondelete="SET NULL")
+    # Minted by the CLIENT, so a retried batch is recognised as the same events.
+    # The recorder re-queues a whole batch on any failure — including a network
+    # drop AFTER the server committed it — which silently appended a second copy
+    # of everything in it, and the duplicates folded into doubled clicks and
+    # doubled fills. Nullable: rows written before this existed have none.
+    client_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "client_event_id", name="uq_event_client_id"),
+    )
 
 
 class StepVerdict(Base):

@@ -210,12 +210,45 @@ const mount = async (data: ReviewData, opts?: { undecided?: boolean }) => {
 
 /** The gates between opening an attempt and shipping it. Driven through the real
  *  controls rather than seeded into state — the point of these tests is what an
- *  annotator can reach by clicking. */
-const approveSteps = () => fireEvent.click(screen.getByText(/Approve remaining|Approve all steps/));
+ *  annotator can reach by clicking.
+ *
+ *  There is no `approveSteps` helper any more. Approving the steps used to be a
+ *  click — "Approve all steps" in ActionTrace, or the per-step Verify pill in
+ *  ReplayPane — but both panes were deleted from this screen when the annotator
+ *  stopped reviewing a recorded agent run and started performing the task
+ *  themselves. A gym attempt is now human-do, so makeInitialState marks its steps
+ *  approved from the start (reviewMachine.ts::makeInitialState, `stepsApproved:
+ *  humanDo`); a fixture reaches the same gate only by being restored from a
+ *  persisted session, since the button that used to satisfy it is gone. Either
+ *  way, "Generate verifier suite" is the first control on this screen a shipping
+ *  annotator actually presses. */
 const generateSuite = () => fireEvent.click(screen.getByText("Generate verifier suite"));
 const runBenchmark = async () => {
   fireEvent.click(screen.getByText("Run benchmark"));
   await screen.findByText("Re-run benchmark");
+};
+
+/**
+ * Mount a fixture (no version rows) with its step-approval gate already satisfied.
+ *
+ * A fresh fixture can no longer be walked and approved on this screen: the per-step
+ * Verify/Correct controls left with ReplayPane/ActionTrace, and nothing on the
+ * screen replaces them. So the honest way a fixture now arrives at Section 2 is the
+ * way any half-finished attempt does — restored from a persisted session whose
+ * status is past `draft`, which flips `stepsApproved` on through the hydrate path
+ * (reviewMachine.ts::reducer "hydrate", `approved = a.status !== "draft"`). This is
+ * NOT the version path: the lineage read still comes back empty, so the attempt
+ * stays on the retired legacy submit. */
+const legacyOpen = (path: string, method: string) =>
+  path.endsWith("/sessions") && method === "POST"
+    ? { status: 200, body: { ...SNAPSHOT, status: "steps_approved" } }
+    : undefined;
+
+const mountLegacy = async () => {
+  render(<ReviewScreen data={legacyAttempt} nav={nav} startFresh={false} onStartNew={() => {}} />);
+  await screen.findByText(/Autosaved/);
+  // Restored past draft, so the suite is unlocked — the fixture's Section 2 is up.
+  await screen.findByText("Generate verifier suite");
 };
 
 const posted = (calls: Call[], suffix: string) => calls.filter((c) => c.method === "POST" && c.path.endsWith(suffix));
@@ -242,7 +275,6 @@ describe("an attempt that has a version graph", () => {
     // longer exists.
     stubApi(versioned());
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
     await runBenchmark();
 
@@ -256,10 +288,17 @@ describe("an attempt that has a version graph", () => {
     stubApi(versioned());
     await mount(gymAttempt);
 
+    // The plain per-step Verify AND Correct pills both lived in the retired
+    // ReplayPane, so both are gone from every attempt now — the earlier assertion
+    // here read `getByText("Verify")`, and that control no longer exists. Verifying
+    // a step did not disappear with the pane, though: it moved onto the version
+    // path, where a verdict is recorded against the step itself and the guide tells
+    // the annotator to mark each one Verified or Wrong. So the retired Correct pill
+    // is absent while per-step verification still has a home on the surviving path.
     expect(screen.queryByText(LEGACY_CORRECT), "the step card's Correct pill is gone").toBeNull();
     expect(screen.queryByText(/Drive forward/), "so is the drive-forward continuation").toBeNull();
     expect(screen.queryByText(/Edit state/), "and the world editor that re-verifies outside the graph").toBeNull();
-    expect(screen.getByText("Verify"), "verifying a step belongs to both paths and stays").toBeDefined();
+    expect(screen.getByText(/mark each one Verified or Wrong/), "verifying a step moved onto the version path, and stays").toBeDefined();
   });
 
   it("never calls the guarded submit route, on any click a shipping annotator makes", async () => {
@@ -269,7 +308,6 @@ describe("an attempt that has a version graph", () => {
     // product of this screen, not of the server protecting them.
     const calls = stubApi(versioned());
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
     await runBenchmark();
     fireEvent.click(screen.getByText(/Replay v2 and ship it/));
@@ -281,7 +319,6 @@ describe("an attempt that has a version graph", () => {
   it("ships the head version through finalize, and reports what the server actually froze", async () => {
     const calls = stubApi(versioned());
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
     await runBenchmark();
 
@@ -303,7 +340,6 @@ describe("an attempt that has a version graph", () => {
     // spend a replay to deliver a refusal the screen could have explained first.
     const calls = stubApi(versioned("candidate"));
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
     await runBenchmark();
 
@@ -317,7 +353,6 @@ describe("an attempt that has a version graph", () => {
     // runBenchmark is the call that persists one.
     stubApi(versioned());
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
 
     expect(screen.getByText(/Run the benchmark in step 2 above/)).toBeDefined();
@@ -335,7 +370,6 @@ describe("an attempt that has a version graph", () => {
       return versioned()(path);
     });
     await mount(gymAttempt);
-    approveSteps();
     generateSuite();
     await runBenchmark();
     fireEvent.click(screen.getByText(/Replay v2 and ship it/));
@@ -377,31 +411,39 @@ describe("an attempt that has a version graph", () => {
 
 describe("an attempt with no version rows", () => {
   it("renders the path it was started on, untouched", async () => {
-    // Rewriting history for work already in flight is worse than two code paths,
-    // so this attempt must look exactly as it did before the version path existed.
-    const calls = stubApi();
-    await mount(legacyAttempt);
+    // Rewriting history for work already in flight is worse than two code paths, so
+    // a fixture must still correct and ship through the retired path, not the
+    // version graph. One thing did change, and it is not a path change: the per-step
+    // Verify/Correct pills that used to approve the steps left with
+    // ReplayPane/ActionTrace, so the gate is reached by restoring a session past
+    // draft rather than by a click on this screen (see mountLegacy). What stays
+    // untouched is the legacy submit itself — that it is offered, and the route it
+    // takes — which is what the assertions below hold.
+    const calls = stubApi(legacyOpen);
+    await mountLegacy();
 
-    expect(screen.getByText(LEGACY_CORRECT), "the per-step correction is still offered").toBeDefined();
-    expect(screen.queryByText(/Ship v\d+ as this attempt's sample/), "and no finalize section appears").toBeNull();
+    expect(screen.queryByText(LEGACY_CORRECT), "the retired per-step Correct pill is gone from the fixture too").toBeNull();
+    expect(screen.queryByText(VERSION_GUIDE), "and a fixture never gets the version path").toBeNull();
+    expect(screen.queryByText(/Ship v\d+ as this attempt's sample/), "so no finalize section appears").toBeNull();
     expect(posted(calls, "/versions/baseline"), "nothing is migrated on open").toEqual([]);
 
-    approveSteps();
     generateSuite();
     await runBenchmark();
-    expect(screen.getByText(LEGACY_SUBMIT)).toBeDefined();
+    // The legacy submit survives and is reachable once the suite is built; its
+    // presence also confirms the lineage settled to legacy (a versioned attempt
+    // hides this button and points to step 3 instead).
+    expect(await screen.findByText(LEGACY_SUBMIT), "the legacy submit is still what a fixture ships through").toBeDefined();
   });
 
   it("still submits through the route it always used", async () => {
     // The wiring, not the handler: this path is untouched only if the click still
-    // reaches the server.
-    const calls = stubApi();
-    await mount(legacyAttempt);
-    approveSteps();
+    // reaches the server on /submit and never through finalize.
+    const calls = stubApi(legacyOpen);
+    await mountLegacy();
     generateSuite();
     await runBenchmark();
 
-    fireEvent.click(screen.getByText(LEGACY_SUBMIT));
+    fireEvent.click(await screen.findByText(LEGACY_SUBMIT));
     await screen.findByText(/Submitted to dataset/);
 
     const [submit] = posted(calls, "/submit");
@@ -420,7 +462,6 @@ describe("while the attempt's lineage is still being read", () => {
     // long as the GET takes — and that window is enough to press it.
     stubApi((path) => (path.endsWith("/versions") ? { status: 0, body: null } : undefined));
     await mount(gymAttempt, { undecided: true }); // the lineage read never comes back
-    approveSteps();
     generateSuite();
     await runBenchmark();
 

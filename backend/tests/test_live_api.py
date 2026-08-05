@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -309,6 +309,29 @@ def test_closing_forgets_the_browser_even_when_the_service_cannot_be_reached(cli
 
     live_service.reachable = True
     assert client.get(f"/api/sessions/{attempt}/live").json() == {"session": None}
+
+
+def test_closing_releases_the_pooled_gym_lease(client, attempt, live_service, db_session, monkeypatch):
+    """Closing must give the bridged gym back, not just the Chromium. Holding the
+    lease leaked one of the few pooled gyms per task an annotator opened, so after
+    a couple of tasks every /live 503'd and the board looked empty."""
+    released: list = []
+    monkeypatch.setattr(live.bridge_client, "close_session", lambda sid: (released.append(sid), True)[1])
+
+    client.post(f"/api/sessions/{attempt}/live")
+    # Mark the attempt as holding a bridge lease, the way a cua open does.
+    s = db_session.get(models.ReviewSession, UUID(attempt))
+    s.bridge_session_id = "bridge-xyz"
+    db_session.commit()
+
+    assert client.post(f"/api/sessions/{attempt}/live/close").json() == {"closed": True}
+    assert released == ["bridge-xyz"], "the pooled gym must be handed back on close"
+
+    # And it is forgotten, so a second close does not double-release: the second
+    # call finds nothing attached and returns without touching the bridge.
+    released.clear()
+    assert client.post(f"/api/sessions/{attempt}/live/close").json() == {"closed": True}
+    assert released == [], "a redundant close must not release a lease that is already gone"
 
 
 # --------------------------------------------------------------------------- ownership

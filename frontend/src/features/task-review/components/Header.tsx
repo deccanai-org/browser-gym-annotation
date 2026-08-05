@@ -29,7 +29,7 @@ function PagerBox({ dir, onClick, disabled }: { dir: "chevronLeft" | "chevronRig
   );
 }
 
-export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymTaskId, gymAdhoc, onExitGym, onOpenQa, annotator, onOpenProfile, queueSet, onToggleQueue }: { index: number; total: number; onPrev: () => void; onNext: () => void; onSkip: () => void; onBrowseGym: () => void; gymTaskId?: string | null; gymAdhoc?: boolean; onExitGym?: () => void; onOpenQa?: () => void; annotator?: Annotator | null; onOpenProfile?: () => void; queueSet?: "breakers" | "fixtures"; onToggleQueue?: () => void }) {
+export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymTaskId, gymAdhoc, onExitGym, onOpenQa, annotator, onOpenProfile, queueSet, onToggleQueue, onBackToTasks }: { index: number; total: number; onPrev: () => void; onNext: () => void; onSkip: () => void; onBrowseGym: () => void; gymTaskId?: string | null; gymAdhoc?: boolean; onExitGym?: () => void; onOpenQa?: () => void; annotator?: Annotator | null; onOpenProfile?: () => void; queueSet?: "breakers" | "fixtures"; onToggleQueue?: () => void; onBackToTasks?: () => void }) {
   const mono = { fontFamily: t.fontMono } as const;
   const name = annotator?.displayName || annotator?.email || "?";
   const initial = name.trim().charAt(0).toUpperCase() || "?";
@@ -54,7 +54,15 @@ export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymT
       <nav style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.8125rem" }}>
         <span style={{ color: t.n3 }}>Browser-Use Gym</span>
         <Icon name="chevronRight" size={14} stroke={1.6} color={t.n3} />
-        <span style={{ color: t.n1, fontWeight: weight.semibold }}>Tasking</span>
+        {onBackToTasks ? (
+          // Opened from the board — the crumb goes back to it, so leaving a task
+          // is one click and the annotator never gets stranded on a single task.
+          <span onClick={onBackToTasks} style={{ color: t.n3, cursor: "pointer" }}>My tasks</span>
+        ) : (
+          <span style={{ color: t.n1, fontWeight: weight.semibold }}>Tasking</span>
+        )}
+        {onBackToTasks && <Icon name="chevronRight" size={14} stroke={1.6} color={t.n3} />}
+        {onBackToTasks && <span style={{ color: t.n1, fontWeight: weight.semibold }}>Task</span>}
       </nav>
       <Rule />
       {gymTaskId && gymAdhoc ? (

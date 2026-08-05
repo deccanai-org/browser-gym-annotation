@@ -76,10 +76,29 @@ def record_event(
     tab: str = "",
     actor: str = "human",
     workspace_lease_id: UUID | None = None,
-) -> models.InteractionEvent:
-    """Append one raw event. Never mutates or removes anything already recorded."""
+    client_event_id: str | None = None,
+) -> models.InteractionEvent | None:
+    """Append one raw event. Never mutates or removes anything already recorded.
+
+    Returns None when `client_event_id` has already been recorded for this
+    attempt — the client re-queues a whole batch on any failure, including a
+    network drop AFTER we committed it, so a retry must be a no-op rather than a
+    second copy of every event in it.
+    """
+    if client_event_id:
+        seen = db.scalar(
+            select(models.InteractionEvent.id).where(
+                models.InteractionEvent.attempt_id == attempt_id,
+                models.InteractionEvent.client_event_id == client_event_id,
+            )
+        )
+        if seen is not None:
+            return None
     payload = dict(payload or {})
-    if kind in ("key", "type", "fill") and _is_sensitive(target):
+    # EVERY kind that can carry typed text. Missing one writes a password into an
+    # append-only log forever, so this list must grow with the client's vocabulary
+    # — `keyChar`/`keyPress`/`paste` are the current names, the rest are legacy.
+    if kind in ("key", "keyChar", "keyPress", "type", "fill", "paste") and _is_sensitive(target):
         if "text" in payload:
             payload["text"] = _REDACTED
         if "value" in payload:
@@ -96,6 +115,7 @@ def record_event(
         target=target or {},
         url=url,
         tab=tab,
+        client_event_id=client_event_id,
     )
     db.add(ev)
     db.flush()
@@ -109,12 +129,57 @@ CLICK_PAIR_MS = 700
 KEY_COALESCE_MS = 1500
 
 
+# A press that moves further than this is a drag, not a click.
+DRAG_PX = 0.012          # ~15px on a 1280-wide viewport, in normalized units
+SCROLL_COALESCE_MS = 600
+SCROLL_MIN_DY = 40       # below this a "scroll" is trackpad jitter
+
+# Keys that only EDIT the value of the field being typed into, so they belong
+# inside a fill rather than splitting it. The final value comes from the page, so
+# their effect is already accounted for.
+_EDIT_KEYS = {"Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+              "Home", "End", "Shift"}
+# Keys that END an edit: they commit, move focus, or abandon it.
+_TERMINATOR_KEYS = {"Enter", "Tab", "Escape"}
+
+# The client renamed two raw kinds so a mouse press and a non-printable key stop
+# sharing one name (they used to both fold to `press`, and the executor turned
+# that into "press Enter" — so a long-press committed as an Enter keystroke).
+_ALIASES = {"mousePressed": "mouseDown", "mouseReleased": "mouseUp", "key": "keyChar"}
+
+
+def _kind(e: dict) -> str:
+    k = str(e.get("kind") or "")
+    return _ALIASES.get(k, k)
+
+
 def _same_target(a: dict | None, b: dict | None) -> bool:
+    """Whether two events name the SAME element.
+
+    `targetKey` first: the live service derives one deterministic identity per
+    element, so this no longer depends on which call observed it. Dict equality
+    is deliberately NOT a fallback — `describe` carries `text` and `focused` does
+    not, so the same field compared unequal the moment focus moved by Tab, and a
+    single typing run split into two fills. And `{} == {}` was True, which made
+    every unnamed target "the same element" as every other.
+    """
     a, b = a or {}, b or {}
-    for k in ("testId", "id", "selector"):
+    ka, kb = a.get("targetKey"), b.get("targetKey")
+    if ka and kb:
+        return ka == kb
+    for k in ("testId", "id", "name", "selector"):
         if a.get(k) and a.get(k) == b.get(k):
             return True
-    return bool(a) and a == b
+    return False
+
+
+def _dist(a: dict, b: dict) -> float:
+    pa, pb = a.get("payload") or {}, b.get("payload") or {}
+    try:
+        return max(abs(float(pb.get("nx", 0)) - float(pa.get("nx", 0))),
+                   abs(float(pb.get("ny", 0)) - float(pa.get("ny", 0))))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
@@ -132,52 +197,117 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
     i = 0
     while i < len(raw):
         e = raw[i]
-        kind = e.get("kind")
+        kind = _kind(e)
 
-        if kind == "mousePressed":
+        # --- pointer: click / dblclick / drag / long_press ---------------------
+        if kind == "mouseDown":
             j = i + 1
-            if (
-                j < len(raw)
-                and raw[j].get("kind") == "mouseReleased"
-                and _same_target(e.get("target"), raw[j].get("target"))
-                and abs(int(raw[j].get("t", 0)) - int(e.get("t", 0))) <= CLICK_PAIR_MS
-            ):
-                out.append({**e, "kind": "click", "sources": [e.get("seq"), raw[j].get("seq")]})
+            if j < len(raw) and _kind(raw[j]) == "mouseUp":
+                up = raw[j]
+                dt = abs(int(up.get("t", 0)) - int(e.get("t", 0)))
+                moved = _dist(e, up)
+                same = _same_target(e.get("target"), up.get("target"))
+                clicks = int((up.get("payload") or {}).get("clicks", 1) or 1)
+                button = str((e.get("payload") or {}).get("button", "left"))
+                if moved > DRAG_PX or not same:
+                    # A press that travelled is a DRAG. Recording it as a click at
+                    # the start point (what synthesising both ends produced) both
+                    # loses the gesture and replays as the wrong action.
+                    act = {**up, "kind": "drag", "payload": {
+                        **(up.get("payload") or {}),
+                        "from": {"nx": (e.get("payload") or {}).get("nx"),
+                                 "ny": (e.get("payload") or {}).get("ny")},
+                        "fromLocator": e.get("target") or {},
+                        "button": button,
+                    }}
+                elif dt > CLICK_PAIR_MS:
+                    act = {**e, "kind": "long_press"}
+                else:
+                    act = {**e, "kind": "dblclick" if clicks >= 2 else "click",
+                           "payload": {**(e.get("payload") or {}), "button": button,
+                                       "clicks": clicks},
+                           "url": up.get("url") or e.get("url")}
+                out.append({**act, "sources": [e.get("seq"), up.get("seq")]})
                 i = j + 1
                 continue
-            out.append({**e, "kind": "press", "sources": [e.get("seq")]})
+            # An unpaired press. Dropped rather than guessed: it used to become
+            # `press`, which the executor turns into "press Enter".
+            out.append({**e, "kind": "press_incomplete", "incomplete": True,
+                        "sources": [e.get("seq")]})
             i += 1
             continue
 
-        if kind == "key":
+        if kind == "mouseUp":       # its down was lost; nothing to fold
+            i += 1
+            continue
+
+        # --- typing: one fill per edit ---------------------------------------
+        if kind in ("keyChar", "paste"):
             group = [e]
             j = i + 1
-            while (
-                j < len(raw)
-                and raw[j].get("kind") == "key"
-                and _same_target(e.get("target"), raw[j].get("target"))
-                and abs(int(raw[j].get("t", 0)) - int(raw[j - 1].get("t", 0))) <= KEY_COALESCE_MS
-            ):
-                group.append(raw[j])
-                j += 1
+            while j < len(raw):
+                nk = _kind(raw[j])
+                if not _same_target(e.get("target"), raw[j].get("target")):
+                    break
+                if abs(int(raw[j].get("t", 0)) - int(raw[j - 1].get("t", 0))) > KEY_COALESCE_MS:
+                    break
+                if nk in ("keyChar", "paste"):
+                    group.append(raw[j]); j += 1; continue
+                # An editing key changes the value but does not end the edit; the
+                # value we take is the page's, so its effect is already included.
+                # This is the Backspace fix: "m,u,g,⌫,s" is ONE fill of "mus",
+                # not fill("mug") + press(Backspace) + fill("s") — which replayed
+                # as "s", because fill REPLACES.
+                if nk == "keyPress" and str((raw[j].get("payload") or {}).get("key")) in _EDIT_KEYS:
+                    group.append(raw[j]); j += 1; continue
+                break
             last = group[-1]
-            value = last.get("payload", {}).get("value")
-            if value is None:  # no field value reported — fall back to the typed text
-                value = "".join(str(g.get("payload", {}).get("text", "")) for g in group)
-            redacted = any(g.get("payload", {}).get("redacted") for g in group)
-            out.append({
-                **last, "kind": "fill",
-                "payload": {"value": _REDACTED if redacted else value, "redacted": redacted},
-                "sources": [g.get("seq") for g in group],
-            })
+            value = (last.get("payload") or {}).get("value")
+            redacted = any((g.get("payload") or {}).get("redacted") for g in group)
+            act = {**last, "kind": "fill", "sources": [g.get("seq") for g in group]}
+            if redacted:
+                # Never emit the placeholder as a literal value: it used to be
+                # TYPED into the field and still pass the replay gate, shipping a
+                # golden that types "«redacted»" into a password box.
+                act["payload"] = {"value": None, "redacted": True}
+                act["needsValue"] = True
+            elif value is None:
+                # No page-reported value (an unacked keystroke). Concatenating the
+                # characters we sent would be a plausible LIE — say so instead.
+                act["payload"] = {"value": None, "redacted": False}
+                act["incomplete"] = True
+            else:
+                act["payload"] = {"value": value, "redacted": False}
+            out.append(act)
             i = j
             continue
 
-        if kind == "scroll" and e.get("payload", {}).get("auto"):
-            i += 1  # the page scrolled itself; not a human action
+        # --- scroll ------------------------------------------------------------
+        if kind == "scroll":
+            if (e.get("payload") or {}).get("auto"):
+                i += 1              # the page scrolled itself; not a human action
+                continue
+            group = [e]
+            j = i + 1
+            while (j < len(raw) and _kind(raw[j]) == "scroll"
+                   and not (raw[j].get("payload") or {}).get("auto")
+                   and raw[j].get("tab") == e.get("tab")
+                   and abs(int(raw[j].get("t", 0)) - int(raw[j - 1].get("t", 0))) <= SCROLL_COALESCE_MS):
+                group.append(raw[j]); j += 1
+            dy = sum(float((g.get("payload") or {}).get("dy", 0) or 0) for g in group)
+            dx = sum(float((g.get("payload") or {}).get("dx", 0) or 0) for g in group)
+            i = j
+            # One flick of a wheel is ~20 ticks and ONE human intent ("scroll down
+            # to the reviews"); 20 steps would drown the trajectory.
+            if abs(dy) < SCROLL_MIN_DY and abs(dx) < SCROLL_MIN_DY:
+                continue
+            last = group[-1]
+            out.append({**last, "kind": "scroll",
+                        "payload": {**(last.get("payload") or {}), "dy": dy, "dx": dx},
+                        "sources": [g.get("seq") for g in group]})
             continue
 
-        out.append({**e, "sources": [e.get("seq")]})
+        out.append({**e, "kind": kind, "sources": [e.get("seq")]})
         i += 1
     return out
 

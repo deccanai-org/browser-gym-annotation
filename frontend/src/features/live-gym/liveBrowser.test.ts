@@ -412,7 +412,10 @@ describe("EventRecorder", () => {
     rec.push({ kind: "mousePressed", payload: { nx: 0.5, ny: 0.25 }, target: { testId: "add-to-cart" }, url: "http://shop/x", tab: "shop" });
     expect(calls[0].url).toBe("/api/sessions/s-1/events");
     const [ev] = calls[0].body as Record<string, unknown>[];
-    expect(Object.keys(ev).sort()).toEqual(["kind", "payload", "target", "url", "tab"].sort());
+    // clientEventId included: it is what makes a retried batch idempotent, so a
+    // network drop after the server committed cannot duplicate the events.
+    expect(Object.keys(ev).sort()).toEqual(["clientEventId", "kind", "payload", "tab", "target", "url"].sort());
+    expect(typeof ev.clientEventId, "every event carries a distinct id").toBe("string");
     expect(ev.target).toEqual({ testId: "add-to-cart" });
     expect(ev.tab).toBe("shop");
   });

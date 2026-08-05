@@ -87,6 +87,59 @@ def create_root(
     return v
 
 
+def ensure_manual_root(
+    db: Session, attempt: models.ReviewSession, *, fork_checkpoint_id=None,
+    created_by_id=None,
+) -> models.TrajectoryVersion:
+    """v1 for an attempt the HUMAN performs — there is no recorded run to baseline
+    from. Idempotent.
+
+    Unlike `ensure_root` there is nothing to clone: the annotator has not acted
+    yet, so v1 starts empty and steps are appended as they work.
+
+    `fork_checkpoint_id` is the seeded world captured at start, and setting it is
+    what makes the replay gate real — `create_root` leaves it null, so
+    `restore_and_replay` had no state to restore and silently degraded into
+    "replay on top of whatever is in the browser right now".
+    """
+    existing = db.scalar(
+        select(models.TrajectoryVersion).where(
+            models.TrajectoryVersion.attempt_id == attempt.id,
+            models.TrajectoryVersion.parent_version_id.is_(None),
+        )
+    )
+    if existing is not None:
+        if fork_checkpoint_id and not existing.fork_checkpoint_id:
+            existing.fork_checkpoint_id = fork_checkpoint_id
+        # Claim the head if nothing has. A root can exist without being the head
+        # when another path (a racing `baseline` clone) created it first; leaving
+        # `active_version_id` null then strands the attempt — `fetchHeadVersionId`
+        # returns null, the live ActionLog polls a version that never resolves,
+        # and the annotator's own steps land nowhere they can see.
+        if attempt.active_version_id is None:
+            attempt.active_version_id = existing.id
+        db.flush()
+        return existing
+
+    own = models.Trajectory(
+        session_id=attempt.id, agent="human", seed=attempt.seed, source="manual",
+    )
+    db.add(own)
+    db.flush()
+    v1 = create_root(
+        db, attempt_id=attempt.id, base_trajectory_id=own.id,
+        producer="human", kind=MANUAL, created_by_id=created_by_id,
+    )
+    v1.fork_checkpoint_id = fork_checkpoint_id
+    # v1 IS the head immediately. The usual candidate-then-select dance exists so
+    # a slow AGENT run cannot resurrect a branch the annotator already moved past;
+    # a human's own first version has no such race, and leaving the head null
+    # means nothing can be appended to the attempt at all.
+    attempt.active_version_id = v1.id
+    db.flush()
+    return v1
+
+
 def ensure_root(
     db: Session, attempt: models.ReviewSession, base: models.Trajectory
 ) -> models.TrajectoryVersion:
@@ -330,6 +383,14 @@ def flat_view(db: Session, version: models.TrajectoryVersion) -> list[dict]:
             "reasoning": s.reasoning,
             "humanIntent": s.human_intent,
             "guidance": s.guidance_text,
+            # Aliases the live ActionLog reads (lib/actionLog.ts). Without these
+            # every row's replay state defaults to "unverified", so the verified /
+            # diverged / needs-value dots and the Check result never surface, and
+            # the tab tag is blank. `type`/`image` stay for VersionSteps.
+            "actionType": s.action_type,
+            "replayState": s.replay_state,
+            "tabId": s.tab_id,
+            "screenshotUrl": s.screenshot_url,
         })
     return out
 

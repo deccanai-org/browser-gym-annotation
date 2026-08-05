@@ -25,7 +25,10 @@ def attempt(db_session):
 # --------------------------------------------------------------------------- raw capture
 def test_events_are_appended_with_a_monotonic_sequence(db_session, attempt):
     for k in ("navigate", "click", "scroll"):
-        recorder.record_event(db_session, attempt_id=attempt.id, kind=k)
+        # A real delta: a zero-delta scroll is now folded away as trackpad jitter,
+        # and this test is about sequence ordering, not scroll semantics.
+        payload = {"dy": 300} if k == "scroll" else None
+        recorder.record_event(db_session, attempt_id=attempt.id, kind=k, payload=payload)
     db_session.commit()
     seqs = [e["seq"] for e in recorder.candidate_actions(db_session, attempt.id)]
     assert seqs == sorted(seqs) and len(set(seqs)) == 3
@@ -89,7 +92,10 @@ def test_a_long_gap_is_not_folded_into_a_click():
         {"seq": 1, "kind": "mousePressed", "target": t, "t": 0},
         {"seq": 2, "kind": "mouseReleased", "target": t, "t": 5000},
     ])
-    assert [a["kind"] for a in out] == ["press", "mouseReleased"]
+    # `long_press`, not `press`: `press` was shared with non-printable KEYS, and
+    # the executor maps act("press") to key(args.key or "Enter") — so a slider
+    # held for five seconds committed as "press Enter".
+    assert [a["kind"] for a in out] == ["long_press"]
 
 
 def test_keystrokes_coalesce_into_one_fill_with_the_final_value():
@@ -123,7 +129,12 @@ def test_a_redacted_keystroke_stays_redacted_after_coalescing():
         {"seq": 2, "kind": "key", "target": t, "payload": {"text": "«redacted»", "redacted": True, "t": 40}, "t": 40},
     ])
     assert out[0]["payload"]["redacted"] is True
-    assert out[0]["payload"]["value"] == "«redacted»"
+    # The placeholder is NOT emitted as a value. It used to be, and the executor
+    # then typed the literal "«redacted»" into the password field — and the replay
+    # gate passed it, shipping a green but broken golden. The action is flagged so
+    # certification refuses it until a human supplies the value.
+    assert out[0]["payload"]["value"] is None
+    assert out[0]["needsValue"] is True
 
 
 def test_automatic_scrolls_are_dropped_but_user_scrolls_are_kept():
@@ -188,3 +199,97 @@ def test_non_typing_events_are_untouched_by_the_empty_target_rule(db_session, at
     ev = recorder.record_event(db_session, attempt_id=attempt.id, kind="click", payload={"nx": 0.5}, target={})
     db_session.commit()
     assert not ev.payload.get("redacted") and ev.payload["nx"] == 0.5
+
+
+# --------------------------------------------------------------------------- fidelity
+# These lock in the fixes that make a HUMAN-recorded trajectory faithful. Each one
+# is a bug that used to ship a plausible-looking but wrong golden.
+
+def _k(seq, kind, t, target, **payload):
+    return {"seq": seq, "kind": kind, "target": target,
+            "payload": {"t": t, **payload}, "t": t, "url": "/", "tab": "t1"}
+
+
+def test_backspace_yields_the_field_s_real_value_not_the_keys_we_sent():
+    """"mug" + Backspace + "s" is ONE fill of "mus".
+
+    It used to become fill("mug"), press(Backspace), fill("s") — and because the
+    executor's fill REPLACES the field, replaying that produced "s". The value now
+    comes from the page via the ack, so editing keys are absorbed into the edit.
+    """
+    t = {"targetKey": "q", "testId": "q"}
+    out = recorder.coalesce([
+        _k(1, "keyChar", 0, t, text="m", value="m"),
+        _k(2, "keyChar", 100, t, text="u", value="mu"),
+        _k(3, "keyChar", 200, t, text="g", value="mug"),
+        _k(4, "keyPress", 300, t, key="Backspace", value="mu"),
+        _k(5, "keyChar", 400, t, text="s", value="mus"),
+    ])
+    assert [a["kind"] for a in out] == ["fill"]
+    assert out[0]["payload"]["value"] == "mus"
+
+
+def test_a_press_that_travels_is_a_drag_not_a_click():
+    """The pane used to synthesise the release 1ms after the press, so every drag
+    folded into a click at the START point — losing the gesture entirely."""
+    t = {"targetKey": "slider", "testId": "slider"}
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, t, nx=0.10, ny=0.5, button="left"),
+        _k(2, "mouseUp", 200, t, nx=0.60, ny=0.5, button="left", clicks=1),
+    ])
+    assert out[0]["kind"] == "drag"
+    assert out[0]["payload"]["from"]["nx"] == 0.10
+
+
+def test_a_right_click_is_not_recorded_as_a_left_click():
+    t = {"targetKey": "row", "testId": "row"}
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, t, nx=0.5, ny=0.5, button="right"),
+        _k(2, "mouseUp", 30, t, nx=0.5, ny=0.5, button="right", clicks=1),
+    ])
+    assert out[0]["kind"] == "click" and out[0]["payload"]["button"] == "right"
+
+
+def test_a_double_click_is_one_action_not_two():
+    t = {"targetKey": "cell", "testId": "cell"}
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, t, nx=0.5, ny=0.5), _k(2, "mouseUp", 30, t, nx=0.5, ny=0.5, clicks=2),
+    ])
+    assert out[0]["kind"] == "dblclick"
+
+
+def test_one_flick_of_the_wheel_is_one_scroll_and_jitter_is_dropped():
+    """20 wheel ticks are ONE human intent ('scroll to the reviews'); 20 steps
+    would drown the trajectory. Sub-threshold movement is trackpad noise."""
+    t = {"targetKey": "list"}
+    flick = [_k(i, "scroll", i * 20, t, dy=30, nx=0.5, ny=0.5) for i in range(1, 21)]
+    out = recorder.coalesce(flick)
+    assert len(out) == 1 and out[0]["payload"]["dy"] == 600
+    jitter = [_k(1, "scroll", 0, t, dy=5, nx=0.5, ny=0.5), _k(2, "scroll", 50, t, dy=-3, nx=0.5, ny=0.5)]
+    assert recorder.coalesce(jitter) == []
+
+
+def test_two_unnamed_targets_are_not_the_same_element():
+    """`{} == {}` used to be True, so every field the page could not name folded
+    into a single fill with another."""
+    out = recorder.coalesce([
+        _k(1, "keyChar", 0, {}, text="a", value="a"),
+        _k(2, "keyChar", 100, {}, text="b", value="b"),
+    ])
+    assert len(out) == 2
+
+
+def test_typed_text_is_redacted_under_every_kind_the_client_sends(db_session, attempt):
+    """Redaction keys off the event KIND, so renaming a kind silently disables it.
+
+    The client's vocabulary changed (`key` -> `keyChar`, plus `keyPress`/`paste`);
+    if this list falls behind, a password goes into an append-only log in clear.
+    """
+    pw = {"testId": "input-password", "type": "password"}
+    for kind in ("key", "keyChar", "keyPress", "type", "fill", "paste"):
+        ev = recorder.record_event(
+            db_session, attempt_id=attempt.id, kind=kind,
+            payload={"text": "hunter2", "value": "hunter2"}, target=pw,
+        )
+        assert ev.payload.get("redacted") is True, kind
+        assert "hunter2" not in str(ev.payload), f"{kind} leaked the secret"

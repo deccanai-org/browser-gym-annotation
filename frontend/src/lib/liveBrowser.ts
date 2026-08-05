@@ -337,12 +337,19 @@ export interface LiveSocketConfig {
   onState?: (s: LiveState) => void;
   /** Frames bypass onState so a 60fps stream doesn't re-render the pane. */
   onFrame?: (f: { seq: number; data: string }) => void;
+  /** An input that was APPLIED, with the state it produced. The only place
+   *  interactions should be recorded from. */
+  onRecord?: (ev: RecordedEvent) => void;
+  /** Something the page did on its own (a popup, a redirect) — no ack to ride on. */
+  onNotice?: (n: Record<string, unknown>) => void;
 }
 
 export class LiveSocket {
   private sock: WebSocket | null = null;
   private state: LiveState;
   private pending = new Set<number>();
+  // input id -> how to record it, resolved when (and only when) its ack says applied
+  private pendingRecords = new Map<number, RecordFactory>();
   private reconnectHandle: ReturnType<typeof setTimeout> | null = null;
   private pingHandle: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
@@ -437,7 +444,7 @@ export class LiveSocket {
    * session, so a counter that restarts at 1 has every input answered
    * `applied:false, reason:"stale"` — input that looks delivered and isn't.
    */
-  send(msg: Record<string, unknown>): boolean {
+  send(msg: Record<string, unknown>, record?: RecordFactory): boolean {
     if (!this.sock || this.state.status !== "live") {
       return this.refuse("not connected — that input was NOT delivered");
     }
@@ -450,6 +457,7 @@ export class LiveSocket {
     } catch (err) {
       return this.refuse(`could not send: ${String(err)}`);
     }
+    if (record) this.pendingRecords.set(id, record);
     this.pending.add(id);
     this.patch({ lastInputId: id, pendingInputs: this.pending.size });
     return true;
@@ -494,6 +502,14 @@ export class LiveSocket {
         const id = Number(msg.id ?? 0);
         this.pending.delete(id);
         const applied = msg.applied === true;
+        const rec = this.pendingRecords.get(id);
+        this.pendingRecords.delete(id);
+        // Record ONLY what actually applied, and stamp it with the state the
+        // service reports — not with what we believed we were sending.
+        if (applied && rec) {
+          const ev = rec((msg.state as AckState | undefined) ?? null);
+          if (ev) this.cfg.onRecord?.(ev);
+        }
         this.patch({
           pendingInputs: this.pending.size,
           ...(applied
@@ -505,6 +521,11 @@ export class LiveSocket {
         });
         break;
       }
+      case "notice":
+        // The page acted on its own (popup, redirect). No ack carries it, so the
+        // pane would otherwise have no idea it happened.
+        this.cfg.onNotice?.(msg);
+        break;
       case "denied":
         this.patch({ controller: false, detail: `input refused: ${String(msg.reason ?? "read-only viewer")}` });
         break;
@@ -604,12 +625,51 @@ export interface RecordedEvent {
   tab?: string;
 }
 
+/**
+ * What the service reports was true AFTER an input was applied.
+ *
+ * This is the whole point of recording on the ack. The client only knows what it
+ * SENT; it cannot know the URL a click navigated to, which tab the input landed
+ * in, or what a field's value became once Backspace and autocomplete had their
+ * say. Recording from here instead of from intent is what makes the trajectory
+ * describe what happened rather than what we hoped would happen.
+ */
+export interface AckState {
+  url?: string;
+  tabId?: string;
+  tabIndex?: number;
+  frameSeq?: number;
+  focus?: Record<string, unknown>;
+}
+
+/** Builds the event to record once the ack says the input actually applied.
+ *  Return null to record nothing (e.g. a no-op move). */
+export type RecordFactory = (state: AckState | null) => RecordedEvent | null;
+
 interface EventBody {
   kind: string;
   payload: Record<string, unknown>;
   target: Record<string, unknown>;
   url: string;
   tab: string;
+  /** Minted here, so a retry is recognised as the SAME event.
+   *
+   *  `flush` re-queues a whole batch on any error — including a network drop
+   *  AFTER the server committed it. Without an id the retry appended a second
+   *  copy of every event in that batch, and the duplicates then folded into
+   *  doubled clicks and doubled fills. */
+  clientEventId: string;
+}
+
+/** Unique per recorded event. crypto.randomUUID where available (every browser
+ *  we target), with a counter fallback so tests and older runtimes still get a
+ *  distinct id rather than silently colliding. */
+let _evtCounter = 0;
+function newEventId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  _evtCounter += 1;
+  return `e-${Date.now().toString(36)}-${_evtCounter}`;
 }
 
 export const EVENT_BATCH_AT = 40;
@@ -627,6 +687,56 @@ export interface EventRecorderConfig {
   flushMs?: number;
   now?: () => number;
   onDrop?: (dropped: number) => void;
+}
+
+/** One frame the annotator saw, keyed to the interaction it belongs to. */
+export interface RecordedFrame {
+  clientEventId: string;
+  jpegBase64: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Uploads screenshots on their OWN channel.
+ *
+ * Deliberately not part of the event batch: a frame is ~60KB, and because the
+ * event recorder re-queues a failed batch whole, one failed image would replay
+ * the entire interaction stream. Frames are best-effort — losing a picture is
+ * survivable, losing the interactions is not — so this drops rather than retries
+ * forever.
+ */
+export class FrameRecorder {
+  private queue: RecordedFrame[] = [];
+  private handle: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly cfg: { attemptId: string; base?: string; timers?: Timers }) {}
+
+  push(f: RecordedFrame): void {
+    if (this.queue.length >= 24) this.queue.shift();   // keep the newest
+    this.queue.push(f);
+    const timers = this.cfg.timers ?? REAL_TIMERS;
+    if (this.handle) return;
+    this.handle = timers.set(() => {
+      this.handle = null;
+      void this.flush();
+    }, 900);
+  }
+
+  async flush(): Promise<void> {
+    const batch = this.queue.splice(0, this.queue.length);
+    if (!batch.length) return;
+    try {
+      await fetch(`${this.cfg.base ?? ""}/api/sessions/${this.cfg.attemptId}/frames`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(batch),
+      });
+    } catch {
+      /* a lost screenshot must never disturb the interaction stream */
+    }
+  }
 }
 
 export class EventRecorder {
@@ -654,18 +764,20 @@ export class EventRecorder {
    * Queue one raw event. Never sent alone: a keystroke per request would put a
    * round trip between the annotator and every character they type.
    */
-  push(ev: RecordedEvent): void {
+  push(ev: RecordedEvent): string | null {
     if (this.queue.length >= EVENT_QUEUE_CAP) {
       this.droppedCount += 1;
       this.cfg.onDrop?.(this.droppedCount);
-      return;
+      return null;
     }
     const payload: Record<string, unknown> = { ...ev.payload };
     // `coalesce` pairs a press/release within 700ms and folds keystrokes within
     // 1500ms, reading `payload.t`. Without it every event lands at t=0 and a
     // whole session of typing folds into one fill.
     if (payload.t === undefined) payload.t = this.now();
+    const clientEventId = newEventId();
     this.queue.push({
+      clientEventId,
       kind: ev.kind,
       payload,
       target: ev.target ?? {},
@@ -674,9 +786,10 @@ export class EventRecorder {
     });
     if (this.queue.length >= (this.cfg.batchAt ?? EVENT_BATCH_AT)) {
       void this.flush();
-      return;
+      return clientEventId;
     }
     this.rearm();
+    return clientEventId;
   }
 
   /** Schedule the next flush, unless one is already scheduled. */

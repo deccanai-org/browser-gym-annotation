@@ -3,15 +3,23 @@ import type { VerifierLevel } from "../ds/tokens";
 import type { Metric, ReviewData, ReviewState, Step, Verifier } from "./types";
 
 /** Seed the review state from a loaded payload — start at step 1, with nothing
- *  reviewed yet, so the annotator walks the run from the beginning. */
+ *  reviewed yet, so the annotator walks the run from the beginning.
+ *
+ *  A gym attempt is human-do: the annotator performs the task and their own
+ *  actions ARE the trajectory (streamed into the live ActionLog, not this
+ *  reducer's `data.steps`). There is no agent run to walk and approve, so the
+ *  step-approval gate — which only ever guarded "review every agent step before
+ *  building verifiers" — is satisfied from the start. Fixtures keep the old
+ *  behaviour: they carry a baked run the annotator still steps through. */
 export function makeInitialState(data: ReviewData): ReviewState {
+  const humanDo = data.source === "gym";
   return {
     data,
     step: 0,
     activeTabId: data.steps[0]?.tabId ?? data.tabs[0]?.id ?? "",
     playing: false,
     verifiedThrough: 0,
-    stepsApproved: false,
+    stepsApproved: humanDo,
     verifiersGenerated: false,
     benchmarkRun: false,
     submitted: false,

@@ -316,6 +316,49 @@ def gym_run_review(task_id: str, body: RunReviewBody) -> dict:
     return {"jobId": job.id, "status": job.status}
 
 
+@router.get("/tasks/{task_id:path}/manual-review")
+def gym_manual_review(task_id: str, db: Session = Depends(get_db)) -> dict:
+    """The task, ready for a HUMAN to do it — no agent, no waiting.
+
+    The old flow ran a live model on every task select and had the annotator
+    review its attempt. That is gone: the annotator performs the task themselves,
+    so there is nothing to run and nothing to wait for. This returns the brief and
+    an EMPTY step list, which the annotator's own interactions then fill in as
+    they work (see app/materialize.py).
+
+    Instant and offline by construction — it reads the seeded catalog, so a task
+    opens the same whether or not a gym happens to be up.
+    """
+    task = db.scalar(select(models.Task).where(models.Task.external_id == task_id))
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+    meta = task.meta if isinstance(task.meta, dict) else {}
+    apps = meta.get("apps") or {}
+    return {
+        "task": {
+            "id": task.external_id,
+            "title": task.title,
+            "prompt": task.prompt,
+            "priority": task.priority or "Medium",
+            "meta": task.category or "",
+            "difficulty": task.difficulty or meta.get("difficulty", ""),
+            "startState": {"url": task.start_url or ""},
+            "constraints": (meta.get("constraints") or []),
+            # The five realistic apps this task's world spans — what the tab strip
+            # offers once the live browser opens.
+            "allowedSites": [{"app": k, "title": (v or {}).get("mock", k)} for k, v in apps.items()],
+            "runSummary": [],
+        },
+        "tabs": [],
+        "steps": [],            # the annotator's own actions fill this in
+        "correctionSeed": "",
+        "correctedTail": [],
+        "verifiers": [],
+        "source": "gym",
+        "mode": "human_do",
+    }
+
+
 @router.get("/tasks/{task_id:path}/persisted-review")
 def gym_persisted_review(task_id: str, db: Session = Depends(get_db)) -> dict:
     """Replay the LATEST persisted gym run for a task from the DB — no live agent.

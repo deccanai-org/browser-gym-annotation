@@ -8,6 +8,8 @@ branch the annotator already moved past.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 from uuid import UUID
 
@@ -17,8 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import (
-    agent_runs, canonical, checkpoints, finalize, gym_client, jobs, models, recorder, replay, versions,
-    workspace,
+    agent_runs, canonical, checkpoints, finalize, gym_client, jobs, live_world, materialize, models,
+    recorder, replay, versions, workspace,
 )
 from app.api import live as live_api
 from app.api.sessions import _assert_not_submitted, _owned_session
@@ -209,6 +211,27 @@ def ensure_baseline(
     """Materialize v1 for this attempt from the canonical recorded run. Idempotent,
     so the client can call it whenever it opens a task."""
     s = _owned_session(db, session_id, current)
+    # Never clone a recorded AGENT run on top of the annotator's own work. When
+    # the live browser opens it mints the attempt's v1 by hand (`human_manual`);
+    # baselining after that would fall through to `canonical.for_attempt` (the
+    # breaker's recorded agent run) and put a stranger's 13-step trajectory ahead
+    # of the annotator's — the "agent run reappeared" bug. If a human root already
+    # exists, refuse. (Keyed on the root's kind, not the attempt's mode, because
+    # mode is only set once the live browser opens — this guards the whole window
+    # and leaves the legacy version-graph setup, which baselines a fresh attempt,
+    # untouched.)
+    manual_root = db.scalar(
+        select(models.TrajectoryVersion).where(
+            models.TrajectoryVersion.attempt_id == s.id,
+            models.TrajectoryVersion.parent_version_id.is_(None),
+            models.TrajectoryVersion.kind == versions.MANUAL,
+        )
+    )
+    if manual_root is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="this attempt is performed by hand — its v1 is the annotator's own trajectory, not a baseline",
+        )
     base = db.scalar(
         select(models.Trajectory)
         .where(models.Trajectory.session_id == s.id)
@@ -276,7 +299,10 @@ def finalize_attempt(
         raise HTTPException(status_code=409, detail="this attempt has no verifier suite to score against")
 
     task = db.get(models.Task, s.task_id)
-    endpoint = workspace.endpoint_for(db, s.id)
+    # world_for, not endpoint_for: a bridged attempt holds no workspace lease, so
+    # endpoint_for would hand back the SHARED gym and finalize would score a
+    # stranger's world.
+    endpoint = live_world.world_for(db, s)
     # Finalization REPLAYS the trajectory, so it needs a real browser. This used to
     # fabricate a session id with an empty ticket, which the service has never
     # heard of — so every finalize failed "live browser unreachable" and nothing
@@ -479,6 +505,7 @@ class EventBody(BaseModel):
     target: dict = {}
     url: str = ""
     tab: str = ""
+    clientEventId: str | None = None
 
 
 @router.post("/sessions/{session_id}/events")
@@ -490,13 +517,188 @@ def record_events(
     step on its own — that separation is what lets an annotator look around
     freely without polluting the golden."""
     s = _owned_session(db, session_id, current)
+    # A submitted attempt is frozen; appending to it is a silent integrity hole.
+    _assert_not_submitted(s)
+    recorded = duplicates = 0
     for e in body:
-        recorder.record_event(
+        ev = recorder.record_event(
             db, attempt_id=s.id, kind=e.kind, payload=e.payload,
             target=e.target, url=e.url, tab=e.tab, actor="human",
+            client_event_id=e.clientEventId,
         )
+        if ev is None:
+            duplicates += 1     # already recorded — a retry, not a new interaction
+        else:
+            recorded += 1
+    # Fold the settled prefix into steps in the SAME request. The annotator sees
+    # their work become a trajectory as they do it, rather than having to hand-pick
+    # actions from a list afterwards — and because the watermark advances in this
+    # transaction, running it again produces nothing new.
+    # Only the human-do flow folds interactions into steps automatically; in the
+    # agent-review flow the annotator's clicking is exploration and must not touch
+    # the agent's trajectory.
+    steps = (materialize.materialize(db, s, world=live_world.world_for(db, s))
+             if materialize.should_materialize(s) else [])
     db.commit()
-    return {"recorded": len(body)}
+    return {"recorded": recorded, "duplicates": duplicates, "steps": len(steps)}
+
+
+class CertifyBody(BaseModel):
+    versionId: UUID | None = None
+
+
+@router.post("/sessions/{session_id}/certify")
+def certify(
+    session_id: UUID, body: CertifyBody,
+    current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db),
+) -> dict:
+    """Prove the recorded steps actually replay — WITHOUT touching the annotator's world.
+
+    Recording a step and proving it are separate claims, and conflating them is
+    what made the old `/commit` painful: it restored a checkpoint into the LIVE
+    environment, destroying the working state of whoever was mid-task, so it could
+    only ever run once, at the end, and one bad action discarded the whole
+    sequence.
+
+    This runs against a SCRATCH browser instead. So it is repeatable, safe to run
+    mid-task ("is my work still good?"), and non-destructive: a step that does not
+    replay is MARKED `diverged`, never deleted. The annotator fixes that step.
+    """
+    s = _owned_session(db, session_id, current)
+    v = _version(db, s, body.versionId) if body.versionId else versions.head(db, s)
+    if v is None:
+        raise HTTPException(status_code=409, detail="this attempt has no trajectory to certify")
+
+    steps = [st for st in versions.flatten(db, v) if st.actor == "human"]
+    if not steps:
+        return {"ok": True, "steps": [], "certified": 0, "firstFailureAt": None}
+
+    # A redacted value was never persisted, so replaying it would type the
+    # placeholder into the field. Refuse rather than certify a green-but-broken
+    # golden — the annotator supplies the value explicitly.
+    blocked = [st for st in steps if st.replay_state == "needs_value"]
+
+    task = db.get(models.Task, s.task_id)
+    world = live_world.world_for(db, s)
+    actions = [{
+        "kind": st.action_type,
+        "locator": st.semantic_locator or {},
+        "args": st.arguments or {},
+    } for st in steps]
+
+    start = db.get(models.EnvironmentCheckpoint, v.fork_checkpoint_id) if v.fork_checkpoint_id else None
+    live_id = ticket = ""
+    try:
+        live_id, ticket = live_api.open_scratch_browser(
+            live_api._browser_visible(getattr(world, "base_url", "") or settings.gym_url), current.email,
+        )
+        executor = gym_client.LiveBrowserClient(
+            base_url=settings.live_browser_url, session_id=live_id, ticket=ticket, gym=world,
+        )
+        result = replay.restore_and_replay(
+            start, actions, executor, world,
+            task_id=task.external_id if task else "", seed=s.seed,
+            # The per-action world hashes recorded at materialise time. Passing
+            # them is what makes the comparison in replay() live rather than dead
+            # code — without it the only check is "did the action land".
+            expected_hashes=[checkpoints.hash_world(st.world_after) if st.world_after else ""
+                             for st in steps],
+            strict=False,   # report EVERY problem, not just the first
+        )
+    except replay.ReplayRejected as exc:
+        result = None
+        rejected_at, reason = exc.at, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=f"could not certify: {exc}") from exc
+    else:
+        rejected_at, reason = result.rejected_at, result.reason
+    finally:
+        if live_id:
+            with contextlib.suppress(Exception):
+                live_api.close_scratch_browser(live_id)
+
+    outcomes = (result.steps if result else []) or []
+    for i, st in enumerate(steps):
+        if st in blocked:
+            continue
+        out = outcomes[i] if i < len(outcomes) else None
+        if out is None:
+            st.replay_state = "unverified"
+        elif out.get("ok"):
+            st.replay_state = "verified"
+            st.replay_error = ""
+        else:
+            st.replay_state = "diverged"
+            st.replay_error = str(out.get("error") or reason or "did not replay")
+    db.add(models.AuditLog(
+        session_id=s.id, actor=current.email, action="version.certify", target=str(v.id),
+        meta={"steps": len(steps), "firstFailureAt": rejected_at},
+    ))
+    db.commit()
+    return {
+        "ok": bool(result and result.ok) and not blocked,
+        "certified": sum(1 for st in steps if st.replay_state == "verified"),
+        "firstFailureAt": rejected_at,
+        "needsValue": [str(st.id) for st in blocked],
+        "steps": [{"stepId": str(st.id), "state": st.replay_state, "error": st.replay_error}
+                  for st in steps],
+    }
+
+
+class FrameBody(BaseModel):
+    """One frame the annotator actually saw, at the moment they acted."""
+    clientEventId: str
+    jpegBase64: str
+    width: int = 0
+    height: int = 0
+
+
+@router.post("/sessions/{session_id}/frames")
+def record_frames(
+    session_id: UUID, body: list[FrameBody],
+    current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db),
+) -> dict:
+    """Attach screenshots to recorded interactions.
+
+    A SEPARATE endpoint from /events on purpose: a frame is ~60KB, and putting it
+    in the event batch would both bloat every request and — because the recorder
+    re-queues a failed batch whole — let one failed image upload replay the entire
+    interaction stream. A screenshot is nice to have; the events are not.
+    """
+    s = _owned_session(db, session_id, current)
+    _assert_not_submitted(s)
+    stored = 0
+    for f in body:
+        ev = db.scalar(
+            select(models.InteractionEvent).where(
+                models.InteractionEvent.attempt_id == s.id,
+                models.InteractionEvent.client_event_id == f.clientEventId,
+            )
+        )
+        if ev is None:
+            continue        # the frame outlived its event; nothing to hang it on
+        try:
+            raw = base64.b64decode(f.jpegBase64 or "", validate=False)
+        except (ValueError, binascii.Error):
+            continue
+        if not raw:
+            continue
+        art = checkpoints.add_artifact(
+            db, kind="screenshot", uri=f"attempt/{s.id}/{f.clientEventId}.jpg", data=raw,
+            meta={"width": f.width, "height": f.height, "clientEventId": f.clientEventId},
+        )
+        payload = dict(ev.payload or {})
+        payload["screenshotArtifactId"] = str(art.id)
+        ev.payload = payload
+        # If the event already became a step, give the step its picture too.
+        if ev.committed_step_id:
+            st = db.get(models.TrajectoryStep, ev.committed_step_id)
+            if st is not None and not st.screenshot_url:
+                st.screenshot_url = art.uri
+                st.marks_artifact_id = art.id
+        stored += 1
+    db.commit()
+    return {"stored": stored}
 
 
 @router.get("/sessions/{session_id}/actions")
@@ -547,7 +749,9 @@ def commit_actions(
     if not body.actions:
         raise HTTPException(status_code=422, detail="nothing to commit")
 
-    endpoint = workspace.endpoint_for(db, s.id)
+    # world_for, not endpoint_for — see finalize_attempt. A bridged attempt that
+    # committed against the shared gym would read and checkpoint someone else's world.
+    endpoint = live_world.world_for(db, s)
     live = gym_client.LiveBrowserClient(
         base_url=settings.live_browser_url, session_id=body.liveSessionId, ticket=body.ticket, gym=endpoint,
     )

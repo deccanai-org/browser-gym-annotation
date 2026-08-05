@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { t } from "../../ds";
@@ -56,54 +56,70 @@ const live: LiveSession = {
 describe("the review screen", () => {
   const html = renderToStaticMarkup(<ReviewScreen data={data} nav={nav} startFresh={false} onStartNew={() => {}} />);
 
-  it("opens on the recorded run", () => {
-    // An annotator opening a breaker is there to review the attempt that
-    // already happened; a live browser on load would also start a Chromium for
-    // every task they merely page past.
-    expect(html).toContain("captured frame");
-    expect(html, "the live pane must not be mounted until it is asked for").not.toContain("No live browser attached");
+  it("opens on the workspace, never on a recorded run", () => {
+    // The annotator performs the task themselves. There is no agent attempt to
+    // replay, so landing anywhere but the gym would be landing on a surface
+    // that has nothing to show — and the old replay pane would happily render
+    // somebody else's steps if a stale payload ever reached it.
+    expect(html).toContain("Do the task");
+    expect(html, "the replay pane is gone, not merely hidden").not.toContain("captured frame");
   });
 
-  it("offers the live browser as the other view of the same box", () => {
-    expect(html).toContain("Live browser");
-    expect(html).toContain("Replay");
+  it("has no replay/live toggle to get lost behind", () => {
+    // The gym IS the workspace. A toggle is what made it a place you had to go
+    // and find, which is exactly how it stayed invisible.
+    expect(html).not.toContain("Live browser");
+    expect(html).not.toContain("Replay");
   });
 
-  it("mounts the version lineage next to the run it describes", () => {
+  it("mounts the version lineage next to the trajectory it describes", () => {
     expect(html).toContain("Version lineage");
     expect(html).toContain("Steps in this version");
   });
 });
 
-describe("the review surface", () => {
+describe("the workspace surface", () => {
   it("hands the live pane the session that was minted for this attempt", () => {
-    // The pane prints the session it is streaming: if the toggle dropped the
+    // The pane prints the session it is streaming: if the surface dropped the
     // minted session the pane would silently fall back to its own empty state.
     const html = renderToStaticMarkup(
-      <ReviewSurface view="live" session={live} attemptId="att-1" owner="ann@deccan.ai" replay={<div>RECORDED RUN</div>} />,
+      <ReviewSurface session={live} attemptId="att-1" owner="ann@deccan.ai" />,
     );
     expect(html).toContain("live-7 · 1280×800");
-    expect(html, "the replay is not rendered underneath the live view").not.toContain("RECORDED RUN");
+  });
+
+  it("shows the trajectory beside the gym, so capture is visible while working", () => {
+    // A lost interaction found at the END of a task is an hour thrown away.
+    const html = renderToStaticMarkup(<ReviewSurface session={live} attemptId="att-1" />);
+    expect(html).toContain("Trajectory");
+    expect(html).toContain("Nothing recorded yet");
   });
 
   it("records the annotator's interactions against the review session", () => {
     // Without the attempt id the pane drives the browser but writes nothing, so
     // the interaction never reaches the trajectory.
-    const withAttempt = renderToStaticMarkup(
-      <ReviewSurface view="live" session={live} attemptId="att-1" replay={<div />} />,
-    );
-    const without = renderToStaticMarkup(<ReviewSurface view="live" session={live} attemptId={null} replay={<div />} />);
+    const withAttempt = renderToStaticMarkup(<ReviewSurface session={live} attemptId="att-1" />);
+    const without = renderToStaticMarkup(<ReviewSurface session={live} attemptId={null} />);
 
     expect(withAttempt).toContain("Recording interactions");
     expect(without).toContain("Not recording");
   });
 
-  it("keeps the recorded run as the default view", () => {
+  it("says the gym is coming up rather than showing an empty frame", () => {
+    const html = renderToStaticMarkup(<ReviewSurface session={null} attemptId="att-1" opening />);
+    expect(html).toContain("Opening the gym…");
+  });
+
+  it("replaces the workspace when the gym refused to start", () => {
+    // A live pane with no stream accepts every click and records none of them,
+    // which is strictly worse than showing nothing: the annotator works for an
+    // hour and the trajectory is empty.
     const html = renderToStaticMarkup(
-      <ReviewSurface view="replay" session={null} attemptId="att-1" replay={<div>RECORDED RUN</div>} />,
+      <ReviewSurface session={null} attemptId="att-1" error="the gym pool is full" />,
     );
-    expect(html).toContain("RECORDED RUN");
-    expect(html).not.toContain("No live browser attached");
+    expect(html).toContain("The gym could not be opened");
+    expect(html).toContain("the gym pool is full");
+    expect(html).not.toContain("Recording interactions");
   });
 });
 
@@ -153,9 +169,6 @@ function stubApi(): string[] {
 
 afterEach(() => vi.unstubAllGlobals());
 
-const LIVE_TAB = /drive the same page/;
-const REPLAY_TAB = /screenshots of the attempt/;
-
 describe("entering and leaving the live view", () => {
   const mount = async () => {
     const calls = stubApi();
@@ -165,52 +178,19 @@ describe("entering and leaving the live view", () => {
     return calls;
   };
 
-  it("opens a browser for this attempt and streams it into the pane", async () => {
+  it("opens the gym on its own and streams it into the pane — no click", async () => {
+    // The workspace is the whole job of the screen, so it must come up by
+    // itself. Requiring a toggle is what kept it invisible.
     const calls = await mount();
-    fireEvent.click(screen.getByTitle(LIVE_TAB));
-
     await screen.findByText(/live-7 · 1280×800/);
-    expect(calls, "the toggle must mint a session, not render an empty pane").toContain("POST /api/sessions/att-1/live");
-  });
-
-  it("KEEPS the browser when the annotator glances at the replay", async () => {
-    // This used to close it, and that made the toggle quietly destructive: the
-    // server reseeds the gym on a fresh open, so checking a step on the replay
-    // and coming back reset an hour of hand-built world to the task seed. The
-    // Chromium-per-view leak this once guarded against is handled where it
-    // actually belongs — leaving the task, covered by the next test.
-    const calls = await mount();
-    fireEvent.click(screen.getByTitle(LIVE_TAB));
-    await screen.findByText(/live-7 · 1280×800/);
-
-    fireEvent.click(screen.getByTitle(REPLAY_TAB));
-    // The pane is unmounted (the socket drops) but the browser is not given back.
-    await waitFor(() => expect(screen.queryByText(/live-7/)).toBeNull());
-    expect(calls, "the browser must survive a look at the replay").not.toContain(
-      "POST /api/sessions/att-1/live/close",
-    );
-  });
-
-  it("re-mints a ticket when the annotator comes back to the live pane", async () => {
-    // The browser survived, but its ticket does not: tickets expire, and a socket
-    // opened with a stale one closes 4401, which is terminal in the client. So
-    // returning must still go through the open call — the server re-tickets the
-    // SAME browser rather than starting a second one.
-    const calls = await mount();
-    fireEvent.click(screen.getByTitle(LIVE_TAB));
-    await screen.findByText(/live-7 · 1280×800/);
-    fireEvent.click(screen.getByTitle(REPLAY_TAB));
-    await waitFor(() => expect(screen.queryByText(/live-7/)).toBeNull());
-
-    const before = calls.filter((c) => c === "POST /api/sessions/att-1/live").length;
-    fireEvent.click(screen.getByTitle(LIVE_TAB));
-    await screen.findByText(/live-7 · 1280×800/);
-    expect(calls.filter((c) => c === "POST /api/sessions/att-1/live").length).toBe(before + 1);
+    expect(calls, "the attempt must mint a session on load, not render an empty pane")
+      .toContain("POST /api/sessions/att-1/live");
   });
 
   it("closes the browser when the annotator leaves the task", async () => {
+    // A live browser is a real Chromium; leaving without closing leaks one per
+    // task opened. Nothing to click now — the auto-open above is what launched it.
     const calls = await mount();
-    fireEvent.click(screen.getByTitle(LIVE_TAB));
     await screen.findByText(/live-7 · 1280×800/);
 
     cleanup();
@@ -224,10 +204,16 @@ describe("entering and leaving the live view", () => {
     expect(calls).toContain("GET /api/sessions/att-1/live");
   });
 
-  it("materializes the canonical v1 when a gym attempt opens", async () => {
-    // There is no lineage to read, and nothing to fork from, until v1 exists.
+  it("never baselines a gym attempt from the canonical agent run", async () => {
+    // v1 is now minted empty by the live open (ensure_manual_root), and the
+    // annotator's own actions fill it. The old baseline call cloned the breaker's
+    // recorded AGENT run into the attempt — 13 steps nobody took — and, racing the
+    // multi-second live open, won and became the head. That is the exact bug the
+    // user saw. It must not fire on open, ever.
     const calls = await mount();
-    await waitFor(() => expect(calls).toContain("POST /api/sessions/att-1/versions/baseline"));
+    // Give any stray effect a tick to fire, then assert it did not.
+    await waitFor(() => expect(calls).toContain("POST /api/sessions/att-1/live"));
+    expect(calls.filter((c) => c.endsWith("/versions/baseline"))).toEqual([]);
   });
 });
 

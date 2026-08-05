@@ -116,6 +116,24 @@ async function mountPane(over: Partial<ComponentProps<typeof LiveBrowserPane>> =
         fireEvent(surface, new MouseEvent("pointerdown", { bubbles: true, clientX, clientY }));
       });
     },
+    /** A COMPLETE click: press, release, and the acks that carry the state the
+     *  service reports. Interactions are recorded from the ack, so a gesture
+     *  without one is (correctly) never recorded. */
+    clickAt: async (clientX: number, clientY: number, state?: Record<string, unknown>) => {
+      await act(async () => {
+        fireEvent(surface, new MouseEvent("pointerdown", { bubbles: true, clientX, clientY }));
+      });
+      await act(async () => {
+        fireEvent(surface, new MouseEvent("pointerup", { bubbles: true, clientX, clientY }));
+      });
+      const sent = sock().messages.filter((m) => typeof m.id === "number");
+      for (const m of sent) {
+        await act(async () => server({
+          type: "ack", id: m.id, applied: true,
+          state: state ?? { url: "https://shop.gym.local/", tabId: "t1" },
+        }));
+      }
+    },
   };
 }
 
@@ -307,8 +325,11 @@ describe("a click on the surface", () => {
     sizeSurface(h.surface, { left: 120, top: 40, width: 1920, height: 1200 });
     await h.pointerAt(120 + 1920 * 0.25, 40 + 1200 * 0.6);
 
-    await waitFor(() => expect(h.sock().messages.filter((m) => m.type === "click")).toHaveLength(2));
-    for (const click of h.sock().messages.filter((m) => m.type === "click")) {
+    // A press is its own message now (phase "down"), so a real release can be
+    // distinguished from a synthesised one — that is what makes a drag a drag.
+    await waitFor(() =>
+      expect(h.sock().messages.filter((m) => m.type === "mouse" && m.phase === "down")).toHaveLength(2));
+    for (const click of h.sock().messages.filter((m) => m.type === "mouse" && m.phase === "down")) {
       expect(click.nx as number).toBeCloseTo(0.25, 6);
       expect(click.ny as number).toBeCloseTo(0.6, 6);
     }
@@ -326,7 +347,7 @@ describe("a click on the surface", () => {
 
     const described = h.calls.find((c) => c.url.endsWith("/describe"));
     expect(described?.body).toEqual({ x: 0.25, y: 0.6, ticket: SESSION.ticket });
-    expect(h.sock().messages.map((m) => m.type)).toEqual(["click"]);
+    expect(h.sock().messages.map((m) => m.type)).toEqual(["mouse"]);
   });
 
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {
@@ -335,13 +356,17 @@ describe("a click on the surface", () => {
     const h = await mountPane();
     await h.hello(true);
     sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
-    await h.pointerAt(225, 338);
+    await h.clickAt(225, 338);
 
     await act(async () => cleanup());
 
     const posted = h.calls.find((c) => c.url === "/api/sessions/A-1/events");
-    const events = (posted?.body ?? []) as { kind: string; target: Record<string, string> }[];
-    expect(events.map((e) => e.kind), "a press with no release folds into a bogus step").toEqual(["mousePressed", "mouseReleased"]);
+    const events = (posted?.body ?? []) as { kind: string; target: Record<string, string>; url?: string }[];
+    // Down and up are recorded SEPARATELY; the backend folds them into a click
+    // only when they share a target and land close together. Synthesising the
+    // release (what this used to do) made every drag look like a click.
+    expect(events.map((e) => e.kind)).toEqual(["mouseDown", "mouseUp"]);
     expect(events[0].target.testId, "a pixel is not a locator").toBe("add-to-cart");
+    expect(events[1].url, "the URL comes from the ack, not from what we believed").toBe("https://shop.gym.local/");
   });
 });
