@@ -49,9 +49,15 @@ def _per_annotator_votes(rows) -> tuple[dict, int, bool]:
 
 
 @router.get("/tasks")
-def qa_tasks(db: Session = Depends(get_db)) -> dict:
+def qa_tasks(_current: Annotator = Depends(require_reviewer),
+             db: Session = Depends(get_db)) -> dict:
     """Every task that has ≥1 submission, with inter-annotator agreement (one vote
-    per distinct annotator)."""
+    per distinct annotator).
+
+    Reviewer-only: this is the whole cohort's work. Agreement numbers reveal how
+    every other annotator scored a task, so an annotator who could read this
+    could align their answer to the majority before submitting — which is exactly
+    the signal the agreement math exists to measure."""
     rows = db.execute(
         select(
             models.Task.external_id, models.Task.title,
@@ -83,7 +89,11 @@ def qa_tasks(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/tasks/{external_id:path}/submissions")
-def qa_submissions(external_id: str, db: Session = Depends(get_db)) -> dict:
+def qa_submissions(external_id: str,
+                   _current: Annotator = Depends(require_reviewer),
+                   db: Session = Depends(get_db)) -> dict:
+    """Reviewer-only, for the same reason as /tasks: it names each annotator and
+    the reward they submitted."""
     task = db.scalar(select(models.Task).where(models.Task.external_id == external_id))
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -107,7 +117,9 @@ def qa_submissions(external_id: str, db: Session = Depends(get_db)) -> dict:
 
 class AdjudicateBody(BaseModel):
     sessionId: str
-    reviewer: str = "reviewer@deccan.ai"
+    # No `reviewer` field: the audit actor is taken from the authenticated
+    # identity below. A client-supplied one let the caller sign someone else's
+    # name to the decision that picks the golden sample.
     note: str = ""
 
 
@@ -134,7 +146,7 @@ def qa_adjudicate(external_id: str, body: AdjudicateBody,
     if target is None:
         raise HTTPException(status_code=404, detail="no submission for that session on this task")
     db.add(models.AuditLog(
-        session_id=target.session_id, actor=body.reviewer, action="qa.adjudicate",
+        session_id=target.session_id, actor=current.email, action="qa.adjudicate",
         target=external_id, meta={"acceptedReward": target.reward, "note": body.note},
     ))
     db.commit()

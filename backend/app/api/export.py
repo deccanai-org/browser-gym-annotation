@@ -224,8 +224,13 @@ def _submitted_sessions(db: Session, accepted_only: bool):
 
 
 @router.get("/samples")
-def list_samples(accepted: bool = False, db: Session = Depends(get_db)) -> dict:
-    """Exportable golden samples (submitted; `accepted=true` = adjudicator-accepted)."""
+def list_samples(accepted: bool = False,
+                 _current: models.Annotator = Depends(require_reviewer),
+                 db: Session = Depends(get_db)) -> dict:
+    """Exportable golden samples (submitted; `accepted=true` = adjudicator-accepted).
+
+    Reviewer-only, like /dataset.jsonl below: this lists every annotator's
+    submission and its reward across the whole cohort."""
     rows = []
     for s in _submitted_sessions(db, accepted):
         task = db.get(models.Task, s.task_id)
@@ -239,7 +244,11 @@ def list_samples(accepted: bool = False, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/samples/{session_id}")
-def export_sample(session_id: UUID, db: Session = Depends(get_db)) -> dict:
+def export_sample(session_id: UUID,
+                  _current: models.Annotator = Depends(require_reviewer),
+                  db: Session = Depends(get_db)) -> dict:
+    """One complete golden bundle. Reviewer-only — it returns another annotator's
+    entire frozen submission, trajectory included."""
     s = db.get(models.ReviewSession, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="sample (session) not found")

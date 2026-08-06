@@ -1389,7 +1389,7 @@ function QaPanel({ onClose, reviewer }: { onClose: () => void; reviewer: string 
   const accept = async (sessionId: string) => {
     if (!selected) return;
     setBusy(true);
-    await adjudicate(selected, sessionId, reviewer);
+    await adjudicate(selected, sessionId);
     await openTask(selected);
     await reload();
     setBusy(false);

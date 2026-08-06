@@ -220,8 +220,11 @@ export async function fetchQaSubmissions(taskId: string): Promise<{ title: strin
   }
 }
 
-export async function adjudicate(taskId: string, sessionId: string, reviewer: string, note = ""): Promise<boolean> {
-  const out = await post<{ accepted: string }>(`/api/qa/tasks/${encodeURIComponent(taskId)}/adjudicate`, { sessionId, reviewer, note });
+/** Accept one annotator's submission as the golden for a task. The reviewer is
+ *  the authenticated caller — the server reads it from the session cookie, so
+ *  there is deliberately no `reviewer` argument to pass, mistype, or forge. */
+export async function adjudicate(taskId: string, sessionId: string, note = ""): Promise<boolean> {
+  const out = await post<{ accepted: string }>(`/api/qa/tasks/${encodeURIComponent(taskId)}/adjudicate`, { sessionId, note });
   return !!out;
 }
 
