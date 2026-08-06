@@ -425,7 +425,11 @@ describe("an attempt that has a version graph", () => {
     await mount(gymAttempt);
 
     expect(screen.getByText(/correction rounds recorded on the retired path, from step 1/)).toBeDefined();
-    expect(screen.getByText(/Read those rounds/), "and they stay readable — read-only is not a second path").toBeDefined();
+    // The reader that used to sit here opened the retired iteration-history
+    // modal, which could only ever be reached on a path a versioned attempt
+    // cannot take. Saying the rounds exist and will not ship is the part that
+    // protects the annotator; offering to open a dead surface was not.
+    expect(screen.getByText(/finalizing will not ship them/)).toBeDefined();
   });
 });
 

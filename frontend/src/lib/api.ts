@@ -1,24 +1,5 @@
 import { APP_COLOR } from "./appColors";
-import { reviewFixture } from "../fixtures/reviewPayload";
-import type { GymResume, ReviewData, ReviewPayload, Step, TaskListItem } from "./types";
-
-/** The task queue. Default = the 85 breakers; `set=fixtures` = the demo
- *  fixtures. Falls back to a single synthetic row offline. */
-export async function fetchTasks(set: "breakers" | "fixtures" | "all" = "breakers"): Promise<TaskListItem[]> {
-  try {
-    const res = await fetch(`/api/tasks?set=${set}`, { credentials: "include" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const list = (await res.json()) as TaskListItem[];
-    return list.length ? list : fallbackTasks();
-  } catch {
-    return fallbackTasks();
-  }
-}
-
-function fallbackTasks(): TaskListItem[] {
-  const t = reviewFixture.task;
-  return [{ id: t.id, title: t.title, priority: t.priority, meta: t.meta, index: 0, total: 1, source: "fixture" }];
-}
+import type {ReviewData, ReviewPayload, Step} from "./types";
 
 // --- My tasks: the board the annotator lands on after signing in ------------
 
@@ -137,19 +118,6 @@ function mapPayload(p: ReviewPayload): ReviewData {
 export interface LoadResult {
   data: ReviewData;
   source: "api" | "fallback";
-}
-
-/** Fetch a task's review payload from the backend; fall back to the bundled
- *  fixture if the API is unreachable (so the app runs standalone). */
-export async function fetchReview(taskId: string): Promise<LoadResult> {
-  try {
-    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/review`, { credentials: "include" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const payload = (await res.json()) as ReviewPayload;
-    return { data: mapPayload(payload), source: "api" };
-  } catch {
-    return { data: mapPayload(reviewFixture), source: "fallback" };
-  }
 }
 
 // ---- session persistence (M4) ---------------------------------------------
@@ -347,14 +315,6 @@ export function runVerifiers(
   return post<RunResult>(`/api/sessions/${sid}/run`, body);
 }
 
-/** Re-run from a corrected step — persists an immutable branch, returns its steps. */
-export function rerunTrajectory(
-  sid: string,
-  body: { fromStep: number; correction: string; mode?: string },
-): Promise<{ fromStep: number; mode: string; steps: Step[] } | null> {
-  return post<{ fromStep: number; mode: string; steps: Step[] }>(`/api/sessions/${sid}/rerun`, body);
-}
-
 export function submitSession(
   sid: string,
   body: { reward: number; override: boolean; overrideReason?: string; kind?: string },
@@ -474,66 +434,6 @@ export async function autogenVerifiers(
   return null;
 }
 
-/** Drive-forward resume (async): load the corrected world (+ edits) and drive a
- *  LIVE agent FORWARD from the mid-episode URL in the gym, then verify. Slow +
- *  (for LLM agents) stochastic. Submits to the job queue and polls to the driven
- *  verdict. onStatus fires on each phase change. */
-export async function driveForwardGym(
-  body: {
-    taskId: string;
-    seed: number;
-    worldState?: Record<string, unknown>;
-    edits?: Record<string, unknown>;
-    resumeUrl: string;
-    resumeStep?: number;
-    agent?: string;
-    sessionId?: string; // the human session driving this correction → verdict isolation
-    correction?: string; // reviewer's natural-language instruction, injected into the agent
-  },
-  opts?: { onStatus?: (s: GymJob["status"]) => void; intervalMs?: number; timeoutMs?: number },
-): Promise<{ reward: number; steps: Step[]; gymResume?: GymResume } | null> {
-  const out = await post<{ jobId: string }>("/api/gym/resume-run", body);
-  const jobId = out?.jobId;
-  if (!jobId) return null;
-  const interval = opts?.intervalMs ?? 2000;
-  const deadline = Date.now() + (opts?.timeoutMs ?? 320_000);
-  let last: GymJob["status"] | null = null;
-  while (Date.now() < deadline) {
-    await sleep(interval);
-    const j = await pollGymJob(jobId);
-    if (!j) continue;
-    if (j.status !== last) { last = j.status; opts?.onStatus?.(j.status); }
-    if (j.status === "done") {
-      const review = j.review as { gymReward?: number; steps?: Step[]; gymResume?: GymResume } | undefined;
-      // Carry the RESUMED world forward: the next correction must continue from
-      // where this one ended, so iterations compound instead of re-anchoring to
-      // the original run's end-state.
-      return { reward: review?.gymReward ?? 0, steps: review?.steps ?? [], gymResume: review?.gymResume };
-    }
-    if (j.status === "error") return null;
-  }
-  return null;
-}
-
-/** Persist a gym drive-forward branch on the session so the fork round-trips
- *  (rerun_from + the branch restore via the open-session snapshot). */
-export function rerunGymBranch(sid: string, body: { fromStep: number; steps: Step[]; mode?: string; correction?: string }): Promise<{ fromStep: number; mode: string; steps: Step[] } | null> {
-  return post<{ fromStep: number; mode: string; steps: Step[] }>(`/api/sessions/${sid}/rerun-gym`, body);
-}
-
-/** Resume a gym task from its corrected state: load the captured world (+ optional
- *  dot-path edits) into the gym and replay the trajectory → REAL milestone verdict. */
-export async function resumeGymReview(body: {
-  taskId: string;
-  seed: number;
-  worldState?: Record<string, unknown>;
-  urlTrail: string[];
-  finalUrl: string;
-  edits?: Record<string, unknown>;
-}): Promise<ResumeResult | null> {
-  return post<ResumeResult>("/api/gym/resume", body);
-}
-
 /** Replay the LATEST persisted gym run for a task from the DB — no live agent, so
  *  reopening a task is instant AND shows the SAME run the annotator was reviewing
  *  (a saved correction fork restores onto the identical trajectory). Returns null
@@ -557,23 +457,6 @@ export async function getManualReview(taskId: string): Promise<ReviewData | null
   }
 }
 
-export async function getPersistedGymReview(taskId: string): Promise<ReviewData | null> {
-  try {
-    const res = await fetch(`/api/gym/tasks/${encodeURIComponent(taskId)}/persisted-review`, { credentials: "include" });
-    if (!res.ok) return null; // 404 = never reviewed → run fresh
-    return mapPayload((await res.json()) as ReviewPayload);
-  } catch {
-    return null;
-  }
-}
-
-/** Enqueue a real gym run; returns the jobId to poll, or null if unreachable.
- *  `brief` (annotator prompt edit) re-drives the whole run under the new prompt. */
-export async function startGymReview(taskId: string, agent = "oracle", seed = 0, brief?: string): Promise<string | null> {
-  const out = await post<{ jobId: string }>(`/api/gym/tasks/${taskId}/run-review`, { agent, seed, ...(brief ? { brief } : {}) });
-  return out?.jobId ?? null;
-}
-
 /** One poll of a gym job. */
 export async function pollGymJob(jobId: string): Promise<GymJob | null> {
   try {
@@ -583,31 +466,6 @@ export async function pollGymJob(jobId: string): Promise<GymJob | null> {
   } catch {
     return null;
   }
-}
-
-/** Start a real gym run and poll to completion (the run is now OFF the request
- *  path, so a slow browser run can't time out the POST). onStatus fires on each
- *  phase change for the loading UI. */
-export async function runGymReview(
-  taskId: string,
-  agent = "oracle",
-  seed = 0,
-  opts?: { onStatus?: (s: GymJob["status"]) => void; intervalMs?: number; timeoutMs?: number; brief?: string },
-): Promise<ReviewData | null> {
-  const jobId = await startGymReview(taskId, agent, seed, opts?.brief);
-  if (!jobId) return null;
-  const interval = opts?.intervalMs ?? 1500;
-  const deadline = Date.now() + (opts?.timeoutMs ?? 300_000);
-  let last: GymJob["status"] | null = null;
-  while (Date.now() < deadline) {
-    await sleep(interval);
-    const j = await pollGymJob(jobId);
-    if (!j) continue; // transient blip — keep polling
-    if (j.status !== last) { last = j.status; opts?.onStatus?.(j.status); }
-    if (j.status === "done") return j.review ? mapPayload(j.review) : null;
-    if (j.status === "error") return null;
-  }
-  return null; // client-side timeout guard
 }
 
 // ---- iteration history -----------------------------------------------------
@@ -622,16 +480,4 @@ export interface HistoryRound {
   steps: Step[];
   stepCount: number;
   at: string;
-}
-
-/** Every correction round on this session — how the annotator steered the agent.
- *  The main view only restores the LATEST round; this is the full chain. */
-export async function fetchSessionHistory(sid: string): Promise<HistoryRound[]> {
-  try {
-    const res = await fetch(`/api/sessions/${sid}/history`, { credentials: "include" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return ((await res.json()) as { rounds?: HistoryRound[] }).rounds ?? [];
-  } catch {
-    return [];
-  }
 }

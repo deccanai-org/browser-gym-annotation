@@ -1,30 +1,23 @@
 import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { ACTION_COLOR, Button, Icon, t, tint, weight } from "../../ds";
+import { Button, Icon, t, tint, weight } from "../../ds";
 import {
   type ShipBlocker,
   applyAutogenSuite,
   autogenVerifiers,
   fetchCachedAutogenSuite,
-  driveForwardGym,
   fetchGymStatus,
   fetchGymTasks,
-  fetchReview,
-  fetchTasks,
   getManualReview,
   openSession,
   patchSession,
   prepareShip,
-  rerunGymBranch,
-  resumeGymReview,
-  runGymReview,
   runVerifiers,
   saveSuite,
   submitSession,
-  fetchSessionHistory,
 } from "../../lib/api";
 import { continuingAfter, FORK_COPY, headOf, rejecting, type VersionNode } from "../../lib/versionsApi";
-import type { AutogenResult, CachedAutogenSuite, HistoryRound, VerifierPayload } from "../../lib/api";
-import type { ReviewData, TaskListItem, Verifier } from "../../lib/types";
+import type {AutogenResult, CachedAutogenSuite, VerifierPayload} from "../../lib/api";
+import type {ReviewData, Verifier} from "../../lib/types";
 import type { VerifierLevel } from "../../ds";
 import {
   canSubmit,
@@ -35,7 +28,7 @@ import {
   runSummary,
   sessionStatus,
   verifierPayloads,
-  visibleSteps,
+
 } from "../../lib/reviewMachine";
 import { useAuth } from "../auth/AuthContext";
 import { ProfilePanel } from "../auth/ProfilePanel";
@@ -51,7 +44,6 @@ import { Header } from "./components/Header";
 import { RightPanel } from "./components/RightPanel";
 import { VerifierSuite } from "./components/VerifierSuite";
 
-const TASK_ID = "GYM-2041";
 
 /** Close a modal on Escape + move focus into it on open (a11y). */
 function useModalA11y(onClose: () => void, ref: { current: HTMLDivElement | null }) {
@@ -369,7 +361,6 @@ export function LineagePanel({ sessionId, sessionSettled = true, isGym, onLineag
   onLineage?: (l: Lineage) => void;
 }) {
   const versions = useVersionGraph(sessionId);
-  const steps = useVersionSteps(sessionId, versions.viewingId);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const viewing = versions.viewingId;
 
@@ -400,6 +391,7 @@ export function LineagePanel({ sessionId, sessionSettled = true, isGym, onLineag
           ? "unknown" // a gym attempt's v1 is being minted by the live open; wait for it — it never takes the legacy path
           : "legacy"; // a fixture, read and empty: nothing here migrates it
 
+  const steps = useVersionSteps(sessionId, versions.viewingId);
   const head = headOf(graph);
   useEffect(() => {
     onLineage?.({ path, head });
@@ -653,24 +645,14 @@ function Frame({ children }: { children: ReactNode }) {
 }
 
 interface TaskNav {
-  index: number;
-  total: number;
-  onPrev: () => void;
-  onNext: () => void;
-  onSkip: () => void;
   onBrowseGym: () => void;
   gymTaskId?: string | null;
   onExitGym?: () => void;
   annotator: Annotator | null;
   onOpenProfile: () => void;
-  queueSet?: "breakers" | "fixtures";
-  onToggleQueue?: () => void;
   gymAdhoc?: boolean;
   /** Back to the My-tasks board. Present only when the screen was opened from it. */
   onBackToTasks?: () => void;
-  // Editing the prompt re-drives the WHOLE run from the initial state under the
-  // new instruction (gym tasks only), then a fresh review of that run.
-  onPromptRerun?: (prompt: string) => Promise<void>;
 }
 
 export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: ReviewData; nav: TaskNav; startFresh: boolean; onStartNew: () => void }) {
@@ -706,8 +688,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   const versioned = lineage.path === "versions";
   const legacy = lineage.path === "legacy";
   const [promptOverride, setPromptOverride] = useState<string | null>(null);
-  const [driving, setDriving] = useState<null | "queued" | "running">(null);
-  const [driveError, setDriveError] = useState<string | null>(null);
   const [autogen, setAutogen] = useState<null | "queued" | "running">(null);
   const [autogenResult, setAutogenResult] = useState<AutogenResult | null>(null);
   const [usingSuite, setUsingSuite] = useState(false);
@@ -746,13 +726,10 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
       setUsingSuite(false);
     }
   };
-  const [editingState, setEditingState] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
   // The LIVE resume context. Each drive-forward returns the world it ended in, and
   // we adopt it — so successive corrections COMPOUND (round N+1 continues from where
   // round N got to) instead of re-anchoring to the original run's end-state. That's
   // what lets an annotator iteratively steer the agent to the target.
-  const [liveResume] = useState(data.gymResume);
   const [liveSession, setLiveSession] = useState<LiveSession | null>(null);
   const [resettingWorld, setResettingWorld] = useState(false);
   const [liveOpening, setLiveOpening] = useState(false);
@@ -1043,7 +1020,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
     }
   };
 
-  const steps = visibleSteps(state);
 
   const onAddVerifier = (assertion: string, code: string) => {
     const placeholder = !code.trim() || code.includes("/* define check */");
@@ -1054,9 +1030,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   return (
     <Frame>
       <Header {...nav} />
-      {driving && <GymLoading taskId={data.task.id} phase={driving} />}
-      {driveError && <Toast message={driveError} onDismiss={() => setDriveError(null)} />}
-      {liveNotice && <Toast message={liveNotice} onDismiss={() => setLiveNotice(null)} bottom={driveError ? 82 : 24} />}
+      {liveNotice && <Toast message={liveNotice} onDismiss={() => setLiveNotice(null)} bottom={24} />}
       <div style={{ padding: "16px 16px 8px" }}>
         <SectionHeader n={1} title="Do the task" subtitle="Work through it in the live gym. Every action you take is recorded as the trajectory." right={
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1075,44 +1049,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
                 On a versioned attempt they are absent rather than disabled: an
                 annotator who can see a control they must not use still has to
                 ask somebody why. */}
-            {legacy && sessionId && state.rerunFrom != null && (
-              <span onClick={() => setShowHistory(true)} title="Every correction round you made on this task"
-                style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9, color: t.n1, fontSize: "0.75rem", fontWeight: weight.semibold, cursor: "pointer", whiteSpace: "nowrap" }}>
-                ⟲ Iterations
-              </span>
-            )}
-            {legacy && data.source === "gym" && data.gymResume && (
-              <span onClick={() => setEditingState(true)} title="Edit the world state and re-verify against the gym"
-                style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9, color: t.primary6, fontSize: "0.75rem", fontWeight: weight.semibold, cursor: "pointer", whiteSpace: "nowrap" }}>
-                ✎ Edit state
-              </span>
-            )}
-            {legacy && data.source === "gym" && data.gymResume && (
-              <span
-                onClick={driving ? undefined : async () => {
-                  // Continue the task from where it stopped: drive the live agent
-                  // forward from the final state and fork on the new steps.
-                  setDriveError(null);
-                  const fromStep = steps.length;
-                  setDriving("queued");
-                  const res = await driveForwardGym(
-                    { taskId: data.task.id, seed: data.gymResume!.seed, worldState: data.gymResume!.worldState, resumeUrl: data.gymResume!.finalUrl || "/", resumeStep: fromStep, agent: "openai", sessionId: sessionId ?? undefined },
-                    { onStatus: (s) => setDriving(s === "done" || s === "error" ? null : s) },
-                  );
-                  setDriving(null);
-                  if (res && res.steps.length) {
-                    const branch = res.steps.map((s, i) => ({ ...s, idx: fromStep + i + 1 }));
-                    if (sessionId) await rerunGymBranch(sessionId, { fromStep, steps: branch, mode: "agent" });
-                    dispatch({ t: "correctAndRerun", fromStep, branch, mode: "agent", gymReward: res.reward });
-                  } else {
-                    setDriveError("The live agent couldn't continue — the gym may be unreachable or the model unavailable.");
-                  }
-                }}
-                title="Load the corrected state and let a live agent (gpt-5.1) continue the task in the gym (slow)"
-                style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9, color: driving ? t.n3 : t.primary6, fontSize: "0.75rem", fontWeight: weight.semibold, cursor: driving ? "default" : "pointer", whiteSpace: "nowrap" }}>
-                {driving ? (driving === "queued" ? "Queued…" : "Agent driving…") : "⚡ Drive forward (live agent)"}
-              </span>
-            )}
             {(state.submitted || status === "submitted") && (
               <span onClick={onStartNew} title="This session is submitted and locked — start a fresh annotation of this task"
                 style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n9, color: t.primary6, fontSize: "0.75rem", fontWeight: weight.semibold, cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -1165,11 +1101,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
                 This attempt also has correction rounds recorded on the retired path, from step {state.rerunFrom}. They are part of no
                 version, so finalizing will not ship them — the lineage below is what ships.
               </span>
-              {sessionId && (
-                <span onClick={() => setShowHistory(true)} style={{ flexShrink: 0, fontSize: "0.72rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
-                  Read those rounds
-                </span>
-              )}
             </div>
           )}
           <LineagePanel sessionId={sessionId} sessionSettled={sessionSettled} isGym={data.source === "gym"} onLineage={setLineage} />
@@ -1257,25 +1188,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
           using={usingSuite}
         />
       )}
-      {showHistory && sessionId && <IterationHistory sessionId={sessionId} onClose={() => setShowHistory(false)} />}
-      {editingState && data.source === "gym" && data.gymResume && (
-        <StateEditor
-          world={(liveResume ?? data.gymResume).worldState ?? {}}
-          onClose={() => setEditingState(false)}
-          onApply={async (edits) => {
-            const res = await resumeGymReview({
-              taskId: data.task.id,
-              seed: data.gymResume!.seed,
-              worldState: data.gymResume!.worldState,
-              urlTrail: data.gymResume!.urlTrail,
-              finalUrl: data.gymResume!.finalUrl,
-              edits,
-            });
-            if (res) dispatch({ t: "gymResumed", reward: res.reward });
-            setEditingState(false);
-          }}
-        />
-      )}
     </Frame>
   );
 }
@@ -1283,147 +1195,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
 /** The iteration history: every correction ROUND the annotator made on this
  *  session, oldest → newest. The main view only restores the latest round, so this
  *  is how you step back through how the agent was steered toward the target. */
-function IterationHistory({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useModalA11y(onClose, dialogRef);
-  const [rounds, setRounds] = useState<HistoryRound[] | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
-  useEffect(() => { void fetchSessionHistory(sessionId).then(setRounds); }, [sessionId]);
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 56 }}>
-      <div ref={dialogRef} {...DIALOG} aria-label="Iteration history" onClick={(e) => e.stopPropagation()}
-           style={{ width: 660, maxHeight: "82vh", background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, display: "flex", flexDirection: "column", overflow: "hidden", outline: "none" }}>
-        <div style={{ padding: "18px 22px 14px", borderBottom: `1px solid ${t.n7}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <div style={{ fontSize: "1rem", fontWeight: weight.bold, color: t.n0 }}>⟲ Iteration history</div>
-            <div style={{ marginTop: 3, fontSize: "0.8rem", color: t.n2 }}>
-              Every correction round on this task — each kept its own fork point, instruction and steps.
-            </div>
-          </div>
-          <span onClick={onClose} style={{ cursor: "pointer", color: t.n3, display: "inline-flex" }}><Icon name="close" size={18} /></span>
-        </div>
-        <div style={{ overflowY: "auto", padding: "6px 0" }}>
-          {rounds === null && <div style={{ padding: "22px", fontSize: "0.84rem", color: t.n3 }}>Loading…</div>}
-          {rounds?.length === 0 && (
-            <div style={{ padding: "22px", fontSize: "0.84rem", color: t.n3 }}>
-              No corrections yet — correct a step to start iterating.
-            </div>
-          )}
-          {rounds?.map((r) => {
-            const isOpen = open === r.branchId;
-            return (
-              <div key={r.branchId} style={{ borderBottom: `1px solid ${t.n8}` }}>
-                <div onClick={() => setOpen(isOpen ? null : r.branchId)}
-                     style={{ padding: "12px 22px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 12 }}>
-                  <span style={{ flexShrink: 0, width: 26, height: 26, borderRadius: t.radiusFull, background: t.primary6, color: t.n9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: "0.72rem", fontWeight: weight.bold }}>{r.round}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: "0.84rem", fontWeight: weight.semibold, color: t.n0 }}>
-                      Corrected step {r.fromStep} → {r.stepCount} new step{r.stepCount === 1 ? "" : "s"}
-                    </div>
-                    {r.correction ? (
-                      <div style={{ marginTop: 3, fontSize: "0.79rem", color: t.n2, fontStyle: "italic" }}>“{r.correction}”</div>
-                    ) : (
-                      <div style={{ marginTop: 3, fontSize: "0.76rem", color: t.n3 }}>(no instruction recorded)</div>
-                    )}
-                    <div style={{ marginTop: 4, fontSize: "0.72rem", color: t.n3, fontFamily: t.fontMono }}>
-                      {r.mode} · {new Date(r.at).toLocaleString()}
-                    </div>
-                  </div>
-                  <span style={{ flexShrink: 0, color: t.n3, fontSize: "0.72rem" }}>{isOpen ? "▲" : "▼"}</span>
-                </div>
-                {isOpen && (
-                  <div style={{ padding: "2px 22px 14px 60px", display: "flex", flexDirection: "column", gap: 6 }}>
-                    {r.steps.map((st) => (
-                      <div key={st.idx} style={{ display: "flex", alignItems: "center", gap: 9, fontSize: "0.79rem", color: t.n1 }}>
-                        <span style={{ fontFamily: t.fontMono, color: t.n3, width: 22, flexShrink: 0 }}>{String(st.idx).padStart(2, "0")}</span>
-                        <span style={{ fontSize: "0.63rem", fontWeight: weight.bold, textTransform: "uppercase", letterSpacing: "0.04em", color: ACTION_COLOR[st.type], width: 62, flexShrink: 0 }}>{st.type}</span>
-                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{st.description}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StateEditor({ world, onClose, onApply }: { world: Record<string, unknown>; onClose: () => void; onApply: (edits: Record<string, unknown>) => Promise<void> }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useModalA11y(onClose, dialogRef);
-  const shop = ((world?.shop ?? {}) as Record<string, unknown>);
-  const cart = ((shop.cart ?? {}) as Record<string, unknown>);
-  const nOrders = Object.keys((shop.orders ?? {}) as object).length;
-  const nCart = ((cart.items ?? []) as unknown[]).length;
-  const nReturns = Object.keys((shop.returns ?? {}) as object).length;
-  const nSubs = Object.keys((shop.subscriptions ?? {}) as object).length;
-  const [user, setUser] = useState<string>((shop.current_user_id as string) ?? "");
-  const [promo, setPromo] = useState<string>((cart.applied_promo as string) ?? "");
-  const [voidOrders, setVoidOrders] = useState(false);
-  const [emptyCart, setEmptyCart] = useState(false);
-  const [voidReturns, setVoidReturns] = useState(false);
-  const [voidSubs, setVoidSubs] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  const build = (): Record<string, unknown> => {
-    const e: Record<string, unknown> = {};
-    if (((shop.current_user_id as string) ?? "") !== user) e["shop.current_user_id"] = user || null;
-    if (((cart.applied_promo as string) ?? "") !== promo) e["shop.cart.applied_promo"] = promo || null;
-    if (voidOrders) e["shop.orders"] = {};
-    if (emptyCart) e["shop.cart.items"] = [];
-    if (voidReturns) e["shop.returns"] = {};
-    if (voidSubs) e["shop.subscriptions"] = {};
-    return e;
-  };
-  const edits = build();
-  const field = { display: "block", marginTop: 5, width: "100%", boxSizing: "border-box" as const, padding: "8px 11px", borderRadius: t.radiusLg, border: `1px solid ${t.n6}`, background: t.n85, color: t.n0, fontFamily: t.fontMono, fontSize: "0.8rem", outline: "none" };
-  const label = { fontSize: "0.72rem", fontWeight: weight.semibold, color: t.n2, textTransform: "uppercase" as const, letterSpacing: "0.05em" };
-  const toggle = (on: boolean, set: (v: boolean) => void, text: string, count: number) => (
-    <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 0", cursor: "pointer", fontSize: "0.83rem", color: t.n1 }}>
-      <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} style={{ width: 15, height: 15, accentColor: t.primary6 }} />
-      {text} <span style={{ color: t.n3, fontFamily: t.fontMono, fontSize: "0.74rem" }}>(now {count})</span>
-    </label>
-  );
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 56 }}>
-      <div ref={dialogRef} {...DIALOG} aria-label="Edit the corrected state" onClick={(e) => e.stopPropagation()} style={{ width: 520, background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, display: "flex", flexDirection: "column", overflow: "hidden", outline: "none" }}>
-        <div style={{ padding: "18px 22px 14px", borderBottom: `1px solid ${t.n7}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <div style={{ fontSize: "1rem", fontWeight: weight.bold, color: t.n0 }}>✎ Edit the corrected state</div>
-            <div style={{ marginTop: 3, fontSize: "0.8rem", color: t.n2 }}>Change the world, then re-verify against the live gym for a real verdict.</div>
-          </div>
-          <span onClick={onClose} style={{ cursor: "pointer", color: t.n3, display: "inline-flex" }}><Icon name="close" size={18} /></span>
-        </div>
-        <div style={{ padding: "16px 22px", display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <span style={label}>Logged-in user</span>
-            <input value={user} onChange={(e) => setUser(e.target.value)} placeholder="(none)" style={field} />
-          </div>
-          <div>
-            <span style={label}>Applied promo</span>
-            <input value={promo} onChange={(e) => setPromo(e.target.value)} placeholder="(none)" style={field} />
-          </div>
-          <div style={{ borderTop: `1px solid ${t.n8}`, paddingTop: 4 }}>
-            {toggle(voidOrders, setVoidOrders, "Void all orders", nOrders)}
-            {toggle(emptyCart, setEmptyCart, "Empty the cart", nCart)}
-            {toggle(voidReturns, setVoidReturns, "Void all returns", nReturns)}
-            {toggle(voidSubs, setVoidSubs, "Cancel all subscriptions", nSubs)}
-          </div>
-        </div>
-        <div style={{ padding: "14px 22px", borderTop: `1px solid ${t.n7}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: "0.74rem", color: t.n3, fontFamily: t.fontMono }}>{Object.keys(edits).length} edit{Object.keys(edits).length === 1 ? "" : "s"}</span>
-          <Button variant="primary" disabled={busy || Object.keys(edits).length === 0} onClick={async () => { setBusy(true); await onApply(edits); }} style={{ minHeight: 40 }}>
-            {busy ? "Re-verifying…" : "Re-verify against gym"}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AutogenPanel({ result, onClose, onUse, using }: {
   result: AutogenResult;
   onClose: () => void;
@@ -1555,35 +1326,15 @@ function GymLoading({ taskId, phase }: { taskId: string; phase: "queued" | "runn
   );
 }
 
-export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: string; onExitToTasks?: () => void } = {}) {
-  const [tasks, setTasks] = useState<TaskListItem[]>([]);
-  const [index, setIndex] = useState(0);
-  const [data, setData] = useState<ReviewData | null>(null);
+export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId: string; onExitToTasks?: () => void }) {
   const [gymData, setGymData] = useState<ReviewData | null>(null);
   const [gymLoading, setGymLoading] = useState<string | null>(null);
-  const [gymPhase, setGymPhase] = useState<"queued" | "running" | "done" | "error">("queued");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [gymError, setGymError] = useState<string | null>(null);
   const [freshNonce, setFreshNonce] = useState(0); // >0 forces a new session on remount ("New annotation")
-  const [queueSet, setQueueSet] = useState<"breakers" | "fixtures">("breakers");
-  const [gymAdhoc, setGymAdhoc] = useState(false); // true = loaded off-queue via the Gym picker (not the main queue)
+  const [gymAdhoc, setGymAdhoc] = useState(false); // true = opened off-board via the gym picker
   const { annotator } = useAuth(); // the signed-in identity — replaces the old free-text "AS" field
   const [profileOpen, setProfileOpen] = useState(false);
-
-  // The review queue: the 85 breakers by default, or the demo fixtures. When the
-  // annotator arrived by picking a task on the My-tasks board, start the pager on
-  // THAT task rather than the first — the pager still works, they just open where
-  // they clicked.
-  useEffect(() => {
-    let alive = true;
-    fetchTasks(queueSet).then((ts) => {
-      if (!alive) return;
-      setTasks(ts);
-      const at = initialTaskId ? ts.findIndex((x) => x.id === initialTaskId) : -1;
-      setIndex(at >= 0 ? at : 0);
-    });
-    return () => { alive = false; };
-  }, [queueSet, initialTaskId]);
 
   const loadGym = async (id: string, adhoc = false) => {
     setPickerOpen(false);
@@ -1604,75 +1355,38 @@ export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: s
     else setGymError(id);
   };
 
-  const currentTask = tasks[index];
-  const taskId = currentTask?.id ?? TASK_ID;
-  // A new task (or entering/exiting the gym) resets the fresh-start intent.
-  useEffect(() => { setFreshNonce(0); }, [taskId, gymData?.task.id]);
-  // Load the selected task. Breakers (source "gym") run the agent LIVE in the gym
-  // and load the real trajectory; demo fixtures load a baked review payload.
+  // ONE task: the one opened from the board. There used to be a queue and a
+  // pager here, and Next/Prev walked an annotator straight off their assigned
+  // task into someone else's queue position — which is precisely what
+  // assignment exists to prevent.
+  useEffect(() => { setFreshNonce(0); }, [initialTaskId, gymData?.task.id]);
   useEffect(() => {
-    let alive = true;
-    setData(null);
     setGymData(null);
-    if (!tasks.length) return;
-    if (currentTask?.source === "gym") {
-      void loadGym(taskId, false); // a QUEUE breaker — keep the Task N/M pager
-    } else {
-      fetchReview(taskId).then((r) => {
-        if (!alive) return;
-        setData(r.data);
-        // eslint-disable-next-line no-console
-        console.info(`[annotator] review ${taskId} loaded from ${r.source}`);
-      });
-    }
-    return () => { alive = false; };
+    void loadGym(initialTaskId, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, tasks.length]);
+  }, [initialTaskId]);
 
-  const total = tasks.length || 1;
-  const effective = gymData ?? data;
+  const effective = gymData;
   const nav: TaskNav = {
-    index: Math.min(index, total - 1),
-    total,
-    onPrev: () => { setGymData(null); setIndex((i) => Math.max(0, i - 1)); },
-    onNext: () => { setGymData(null); setIndex((i) => Math.min(total - 1, i + 1)); },
-    onSkip: () => { setGymData(null); setIndex((i) => (i + 1) % total); },
     onBrowseGym: () => setPickerOpen(true),
     gymTaskId: gymData?.task.id ?? null,
     gymAdhoc,
-    // Exiting an off-queue pick returns to the current queue task (reloading it
-    // if it's a breaker); it does not leave the queue.
+    // Leaving an off-board pick returns to the task they were assigned.
     onExitGym: () => {
       setGymAdhoc(false);
       setGymData(null);
-      if (currentTask?.source === "gym") void loadGym(taskId, false);
+      void loadGym(initialTaskId, false);
     },
     annotator,
     onOpenProfile: () => setProfileOpen(true),
     onBackToTasks: onExitToTasks,
-    queueSet,
-    onToggleQueue: () => { setGymData(null); setQueueSet((q) => (q === "breakers" ? "fixtures" : "breakers")); },
-    // Prompt edit → re-drive the WHOLE run from the initial state under the new
-    // brief (a live gpt-5.5 run), then remount a FRESH review of that new run.
-    // Re-drives the DISPLAYED task (an off-queue picker task, else the queue task)
-    // — defined whenever a gym task is on screen, not only when the queue task is gym.
-    onPromptRerun: (gymData || currentTask?.source === "gym") ? async (prompt: string) => {
-      const rid = gymData?.task.id ?? taskId; // the task actually shown, not always the queue task
-      setGymError(null);
-      setGymPhase("queued");
-      setGymLoading(rid);
-      const rv = await runGymReview(rid, "openai", 0, { onStatus: setGymPhase, brief: prompt });
-      setGymLoading(null);
-      if (rv) { setGymData(rv); setFreshNonce((n) => n + 1); } // new trajectory + fresh session
-      else setGymError(rid);
-    } : undefined,
   };
 
   return (
     <>
       {effective ? (
         <ReviewScreen
-          key={`${gymData ? `gym:${gymData.task.id}` : taskId}#${freshNonce}#${annotator?.email ?? ""}`}
+          key={`${gymData?.task.id ?? initialTaskId}#${freshNonce}#${annotator?.email ?? ""}`}
           data={effective}
           nav={nav}
           startFresh={freshNonce > 0}
@@ -1683,7 +1397,7 @@ export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: s
       )}
       {pickerOpen && <GymPicker onClose={() => setPickerOpen(false)} onPick={(id) => loadGym(id, true)} />}
       {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
-      {gymLoading && <GymLoading taskId={gymLoading} phase={gymPhase} />}
+      {gymLoading && <GymLoading taskId={gymLoading} phase="running" />}
       {gymError && (
         <div style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 16, background: t.redLite, color: t.redDark, border: `1px solid color-mix(in srgb, ${t.red} 42%, ${t.n9})`, padding: "10px 16px", borderRadius: t.radiusLg, fontSize: "0.84rem", fontWeight: weight.semibold, zIndex: 70, fontFamily: t.fontPrimary, boxShadow: t.shadowLg }}>
           <span>Couldn't run <span style={{ fontFamily: t.fontMono }}>{gymError}</span> — the model produced no run (it may be rate-limited, or the gym is down).</span>

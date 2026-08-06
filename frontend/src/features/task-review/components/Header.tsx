@@ -5,31 +5,15 @@ function Rule() {
   return <span style={{ width: 1, height: 22, background: t.n7, flexShrink: 0 }} />;
 }
 
-function PagerBox({ dir, onClick, disabled }: { dir: "chevronLeft" | "chevronRight"; onClick: () => void; disabled: boolean }) {
-  return (
-    <span
-      onClick={disabled ? undefined : onClick}
-      title={dir === "chevronLeft" ? "Previous task" : "Next task"}
-      style={{
-        width: 30,
-        height: 30,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: 7,
-        border: `1px solid ${t.n6}`,
-        background: t.n9,
-        color: t.n2,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.4 : 1,
-      }}
-    >
-      <Icon name={dir} size={16} stroke={1.8} />
-    </span>
-  );
-}
-
-export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymTaskId, gymAdhoc, onExitGym, annotator, onOpenProfile, queueSet, onToggleQueue, onBackToTasks }: { index: number; total: number; onPrev: () => void; onNext: () => void; onSkip: () => void; onBrowseGym: () => void; gymTaskId?: string | null; gymAdhoc?: boolean; onExitGym?: () => void; annotator?: Annotator | null; onOpenProfile?: () => void; queueSet?: "breakers" | "fixtures"; onToggleQueue?: () => void; onBackToTasks?: () => void }) {
+export function Header({ onBrowseGym, gymTaskId, gymAdhoc, onExitGym, annotator, onOpenProfile, onBackToTasks }: {
+  onBrowseGym: () => void;
+  gymTaskId?: string | null;
+  gymAdhoc?: boolean;
+  onExitGym?: () => void;
+  annotator?: Annotator | null;
+  onOpenProfile?: () => void;
+  onBackToTasks?: () => void;
+}) {
   const mono = { fontFamily: t.fontMono } as const;
   const name = annotator?.displayName || annotator?.email || "?";
   const initial = name.trim().charAt(0).toUpperCase() || "?";
@@ -71,25 +55,18 @@ export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymT
           <span style={{ fontSize: "0.8125rem", fontWeight: weight.semibold, color: t.n1, whiteSpace: "nowrap" }}>
             Gym · <span style={mono}>{gymTaskId}</span>
           </span>
-          <span onClick={onExitGym} style={{ marginLeft: 4, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer" }}>Back to queue</span>
+          <span onClick={onExitGym} style={{ marginLeft: 4, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer" }}>Back to my task</span>
         </div>
       ) : (
-        // The main queue — breakers or demo fixtures — navigated by the pager.
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }} title="One task at a time">
-          <PagerBox dir="chevronLeft" onClick={onPrev} disabled={index <= 0} />
-          <span style={{ fontSize: "0.8125rem", fontWeight: weight.semibold, color: t.n1, whiteSpace: "nowrap" }}>
-            {queueSet === "fixtures" ? "Demo" : "Breaker"} <span style={mono}>{index + 1}</span> of <span style={mono}>{total}</span>
-          </span>
-          <PagerBox dir="chevronRight" onClick={onNext} disabled={index >= total - 1} />
-          <span onClick={onSkip} style={{ marginLeft: 4, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer" }}>Skip</span>
-        </div>
-      )}
-      <span style={{ width: 1, height: 22, background: t.n7 }} />
-      {onToggleQueue && (
-        <span onClick={onToggleQueue} title="Switch between the breaker queue and the demo fixtures" style={{ fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
-          {queueSet === "breakers" ? "Demos" : "Breakers"}
+        // One task, the one you opened from your board. There used to be a pager
+        // and a Demos toggle here; Next/Prev walked an annotator straight off
+        // their assigned task into someone else's queue position, which is
+        // exactly what assignment exists to prevent.
+        <span style={{ fontSize: "0.8125rem", fontWeight: weight.semibold, color: t.n1, whiteSpace: "nowrap" }}>
+          Task
         </span>
       )}
+      <span style={{ width: 1, height: 22, background: t.n7 }} />
       <span onClick={onBrowseGym} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
         <Icon name="swap" size={14} /> All gym tasks
       </span>
