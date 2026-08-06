@@ -57,15 +57,11 @@ export function Header({ onBrowseGym, gymTaskId, gymAdhoc, onExitGym, annotator,
           </span>
           <span onClick={onExitGym} style={{ marginLeft: 4, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer" }}>Back to my task</span>
         </div>
-      ) : (
-        // One task, the one you opened from your board. There used to be a pager
-        // and a Demos toggle here; Next/Prev walked an annotator straight off
-        // their assigned task into someone else's queue position, which is
-        // exactly what assignment exists to prevent.
-        <span style={{ fontSize: "0.8125rem", fontWeight: weight.semibold, color: t.n1, whiteSpace: "nowrap" }}>
-          Task
-        </span>
-      )}
+      ) : null /* One task, the one opened from the board — the breadcrumb above
+                    already names it. There used to be a pager and a Demos toggle
+                    here; Next/Prev walked an annotator straight off their assigned
+                    task into someone else's queue position, which is exactly what
+                    assignment exists to prevent. */}
       <span style={{ width: 1, height: 22, background: t.n7 }} />
       <span onClick={onBrowseGym} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
         <Icon name="swap" size={14} /> All gym tasks
