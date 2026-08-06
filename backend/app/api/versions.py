@@ -22,8 +22,9 @@ from app import (
     agent_runs, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs, live_world,
     materialize, models, recorder, replay, replay_surface, versions, workspace,
 )
+from app import gym_review
 from app.api import live as live_api
-from app.api.sessions import _assert_not_submitted, _owned_session
+from app.api.sessions import _assert_not_submitted, _latest_suite, _owned_session
 from app.auth import current_annotator
 from app.config import settings
 from app.db import SessionLocal, get_db
@@ -280,6 +281,86 @@ class GymScorer:
             passed = bool(verdict.get("success"))
             results = {v.ext_id: ("pass" if passed else "fail") for v in suite.verifiers}
         return (1 if verdict.get("success") else 0), results
+
+
+@router.post("/sessions/{session_id}/prepare-ship")
+def prepare_ship(
+    session_id: UUID,
+    current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db),
+) -> dict:
+    """Assemble what an attempt needs to ship, and say what is still missing.
+
+    A human-do attempt could record a perfect trajectory and still have no way to
+    ship it: finalize needs an approved version AND a verifier suite, and nothing
+    in the live path created either. The annotator was left to discover that one
+    409 at a time — from a button that looked like it had worked, because the
+    client collapsed every error to null.
+
+    Idempotent, and safe to call on every render. It folds any pending
+    interactions, resolves the head version, gives the attempt a suite if it has
+    none (the gym's own milestones — the same verdict finalize scores against),
+    and returns every unmet gate rather than the first.
+    """
+    s = _owned_session(db, session_id, current)
+    _assert_not_submitted(s)
+
+    # Fold anything still unfolded, so the last few actions are in the version
+    # the annotator is about to ship rather than arriving after it.
+    with contextlib.suppress(Exception):
+        materialize.materialize(db, s, world=live_world.world_for(db, s))
+
+    v = versions.head(db, s)
+    suite = _latest_suite(db, s.id)
+
+    # No suite, or an empty one: derive it from the gym's own milestones. That is
+    # already what the reward is computed from, so this makes explicit the suite
+    # the attempt was going to be scored against anyway rather than inventing one.
+    created_suite = False
+    if v is not None and (suite is None or not (suite.verifiers or [])):
+        milestones = []
+        with contextlib.suppress(Exception):
+            world = live_world.world_for(db, s)
+            verdict = world.verify(0) if hasattr(world, "verify") else None
+            milestones = list((verdict or {}).get("milestones") or [])
+        if milestones:
+            suite = models.VerifierSuite(
+                session_id=s.id, version=((suite.version + 1) if suite else 1))
+            db.add(suite)
+            db.flush()
+            for m in milestones:
+                db.add(models.Verifier(
+                    suite_id=suite.id,
+                    ext_id=str(m.get("id") or m.get("name") or ""),
+                    level=gym_review._level(m),
+                    assertion=str(m.get("description") or m.get("name") or ""),
+                    code="",
+                    # Named, not executable: the gym owns this verdict, and
+                    # pretending we can re-run it here would be a second, weaker
+                    # copy of the check.
+                    check_ir={"kind": "gym_milestone", "id": m.get("id") or m.get("name")},
+                    added_by_human=False,
+                    gym_result=str(m.get("result") or ""),
+                ))
+            created_suite = True
+            db.add(models.AuditLog(
+                session_id=s.id, actor=current.email, action="suite.from_milestones",
+                target=str(suite.id), meta={"count": len(milestones)}))
+    db.commit()
+
+    blockers = finalize.gate_report(db, s, v, suite)
+    return {
+        "versionId": str(v.id) if v else None,
+        "versionNo": v.version_no if v else None,
+        "suiteId": str(suite.id) if suite else None,
+        "suiteCreated": created_suite,
+        "verifiers": [
+            {"id": x.ext_id, "level": x.level, "assertion": x.assertion,
+             "gymResult": x.gym_result, "addedByHuman": x.added_by_human}
+            for x in (suite.verifiers if suite else [])
+        ],
+        "blockers": blockers,
+        "canShip": not blockers,
+    }
 
 
 class FinalizeBody(BaseModel):

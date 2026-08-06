@@ -166,6 +166,66 @@ async function post<T>(url: string, body: unknown): Promise<T | null> {
   }
 }
 
+/** POST that REFUSES to fail quietly.
+ *
+ *  `post` above returns null on any error, which is right for best-effort
+ *  persistence but wrong for anything the annotator is waiting on: a 409 came
+ *  back as null, the caller treated it as "no data" and carried on, and the
+ *  screen showed success for a call that never happened. Anything that gates the
+ *  annotator's next move goes through here and gets the server's own sentence.
+ */
+export async function postStrict<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await refusalText(res));
+  return (await res.json()) as T;
+}
+
+/** The server's own explanation, or a usable fallback. FastAPI puts it in
+ *  `detail`, which is sometimes a string and sometimes a structured object. */
+export async function refusalText(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const d = (body as { detail?: unknown }).detail;
+    if (typeof d === "string" && d) return d;
+    if (d && typeof d === "object") {
+      const o = d as { error?: string; reason?: string; at?: number };
+      const at = typeof o.at === "number" ? ` (step ${o.at + 1})` : "";
+      if (o.error || o.reason) return `${o.error ?? ""}${o.reason ? `: ${o.reason}` : ""}${at}`.trim();
+    }
+  } catch {
+    /* fall through to the status line */
+  }
+  return `The server refused that (HTTP ${res.status}).`;
+}
+
+export interface ShipBlocker {
+  code: string;
+  message: string;
+  at?: number;
+}
+
+export interface PrepareShipResult {
+  versionId: string | null;
+  versionNo: number | null;
+  suiteId: string | null;
+  suiteCreated: boolean;
+  verifiers: { id: string; level: string; assertion: string; gymResult?: string; addedByHuman?: boolean }[];
+  blockers: ShipBlocker[];
+  canShip: boolean;
+}
+
+/** What this attempt still needs before it can ship. Idempotent — it folds any
+ *  pending interactions and gives the attempt a verifier suite if it has none,
+ *  so calling it on render is both safe and the point. */
+export async function prepareShip(sessionId: string): Promise<PrepareShipResult> {
+  return postStrict<PrepareShipResult>(`/api/sessions/${sessionId}/prepare-ship`, {});
+}
+
 async function send(url: string, method: "PATCH" | "PUT", body: unknown): Promise<void> {
   try {
     await fetch(url, {

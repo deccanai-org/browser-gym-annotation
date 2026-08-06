@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { ACTION_COLOR, Button, Icon, t, tint, weight } from "../../ds";
 import {
   adjudicate,
+  type ShipBlocker,
   autogenVerifiers,
   downloadSampleBundle,
   driveForwardGym,
@@ -14,6 +15,7 @@ import {
   getManualReview,
   openSession,
   patchSession,
+  prepareShip,
   rerunGymBranch,
   resumeGymReview,
   runGymReview,
@@ -546,13 +548,14 @@ async function shipVersion(
  * nothing to somebody who has never read the schema — and every reason it cannot
  * run yet is written as the thing to go and do.
  */
-function FinalizeDock({ sessionId, head, benchmarkRun, kind, alreadyShipped, onShipped }: {
+function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipped }: {
   sessionId: string | null;
   head: VersionNode | null;
-  /** The benchmark has been run. Doubles as "a suite exists server-side":
-   *  `runBenchmark` SAVES the suite before scoring it, and finalize refuses
-   *  (409) an attempt with no suite to score against. */
-  benchmarkRun: boolean;
+  /** What the SERVER says still blocks this ship, from `prepare-ship`. It reads
+   *  the same predicates finalize enforces, so the button and the gate cannot
+   *  disagree — the old client-side chain was a second copy of those rules and
+   *  gated on a benchmark a human-do attempt can never run. */
+  blockers: ShipBlocker[];
   kind: string;
   alreadyShipped: boolean;
   onShipped: (r: ShipResult) => void;
@@ -562,15 +565,11 @@ function FinalizeDock({ sessionId, head, benchmarkRun, kind, alreadyShipped, onS
   const [shipped, setShipped] = useState<ShipResult | null>(null);
 
   const v = head ? `v${head.versionNo}` : "this version";
-  const blocker = !sessionId
+  // Only the one thing the server cannot tell us: there is no server.
+  const offline = !sessionId
     ? "This attempt was never saved — the backend is offline, so there is nothing to ship."
-    : !head
-      ? "No version is the head yet. In Version lineage above, open the branch you want to ship and press “Make it the head”."
-      : head.status !== "approved"
-        ? `${v} is the head, but nobody has approved it. Approve it in Version lineage above — finalize refuses a version no reviewer signed off.`
-        : !benchmarkRun
-          ? "No suite has been scored yet. Run the benchmark in step 2 above — that is what saves the suite finalize scores against."
-          : null;
+    : null;
+  const blocker = offline ?? (blockers.length ? blockers[0].message : null);
 
   const shell = { background: t.n9, border: `1px solid ${t.n7}`, borderRadius: t.radiusXl, boxShadow: t.shadowMd, padding: "16px 22px", display: "flex", flexDirection: "column" as const, gap: 12 };
 
@@ -599,7 +598,18 @@ function FinalizeDock({ sessionId, head, benchmarkRun, kind, alreadyShipped, onS
         rejected are not in it, and no other branch is included.
       </span>
       {blocker ? (
-        <span style={{ fontSize: "0.78rem", lineHeight: 1.5, fontWeight: weight.semibold, color: t.n1, background: tint(t.yellow, 14), padding: "9px 12px", borderRadius: t.radiusLg }}>{blocker}</span>
+        // Every unmet gate at once. Showing one at a time turned shipping into
+        // fix-one, press, discover-the-next — and the server already knows the
+        // whole list.
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {(offline ? [{ code: "offline", message: offline }] : blockers).map((b) => (
+            <span key={b.code}
+                  style={{ fontSize: "0.78rem", lineHeight: 1.5, fontWeight: weight.semibold, color: t.n1,
+                           background: tint(t.yellow, 14), padding: "9px 12px", borderRadius: t.radiusLg }}>
+              {b.message}
+            </span>
+          ))}
+        </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           <Button
@@ -679,6 +689,22 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   // answered: guessing "legacy" would show the retired Submit on a versioned
   // attempt, which is the exact failure being retired here.
   const [lineage, setLineage] = useState<Lineage>(NO_LINEAGE_YET);
+  // What the SERVER says still blocks shipping. Re-read whenever the lineage
+  // moves (approve, fork, certify) — exactly the actions that clear a blocker.
+  // Asking the server beats re-deriving its rules here, which is how the dock
+  // came to gate on a benchmark a human-do attempt can never run.
+  const [shipBlockers, setShipBlockers] = useState<ShipBlocker[]>([]);
+  useEffect(() => {
+    if (!sessionId) { setShipBlockers([]); return; }
+    let live = true;
+    prepareShip(sessionId)
+      .then((r) => { if (live) setShipBlockers(r.blockers ?? []); })
+      // A failure here must never read as "ready to ship".
+      .catch((e: unknown) => {
+        if (live) setShipBlockers([{ code: "unknown", message: e instanceof Error ? e.message : String(e) }]);
+      });
+    return () => { live = false; };
+  }, [sessionId, lineage.head?.id, lineage.head?.status, lineage.path]);
   const versioned = lineage.path === "versions";
   const legacy = lineage.path === "legacy";
   const [promptOverride, setPromptOverride] = useState<string | null>(null);
@@ -895,7 +921,14 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
       if (sessionId) {
         await saveSuite(sessionId, verifierPayloads(state)); // persist the milestones as the human suite
         const out = await runVerifiers(sessionId, { corrected, verifiers: verifierPayloads(state), overrides });
-        dispatch({ t: "benchmarkComplete", results: out?.results ?? {}, reward: out?.reward ?? null });
+        // `out` is null when the server REFUSED — a human-do attempt has no
+        // canonical agent run to benchmark against, so this 409s every time.
+        // Dispatching a completion anyway painted a green "benchmarked" badge
+        // over a call that never happened, and the annotator only found out at
+        // the ship gate. Say nothing rather than something false; the real gate
+        // is `prepare-ship`, which lists what is actually missing.
+        if (!out) return;
+        dispatch({ t: "benchmarkComplete", results: out.results ?? {}, reward: out.reward ?? null });
         return;
       }
       dispatch({ t: "benchmarkComplete", results: {} }); // offline — reveal only
@@ -1154,7 +1187,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
           <FinalizeDock
             sessionId={sessionId}
             head={lineage.head}
-            benchmarkRun={state.benchmarkRun}
+            blockers={shipBlockers}
             kind={reward(state) === 1 ? "golden" : "breaker"}
             alreadyShipped={state.submitted || status === "submitted"}
             onShipped={(r) => {

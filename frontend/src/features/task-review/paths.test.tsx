@@ -338,24 +338,46 @@ describe("an attempt that has a version graph", () => {
   it("will not ship a version nobody approved, and names who has to approve it", async () => {
     // finalize.py raises NotApproved for this, so an enabled button here would
     // spend a replay to deliver a refusal the screen could have explained first.
-    const calls = stubApi(versioned("candidate"));
+    // The blockers come from the SERVER now (`prepare-ship` reads the same
+    // predicates finalize enforces) rather than from a second copy of the rules
+    // kept in the dock — that copy is how the gate came to demand a benchmark a
+    // human-do attempt can never run.
+    const calls = stubApi((path) => {
+      if (path.endsWith("/prepare-ship")) {
+        return { status: 200, body: { blockers: [{ code: "not_approved", message: "v2 is the head, but nobody has approved it — approve it in Version lineage." }], canShip: false, verifiers: [] } };
+      }
+      return versioned("candidate")(path);
+    });
     await mount(gymAttempt);
     generateSuite();
     await runBenchmark();
 
+    // the gate is read from the server, so wait for that answer
+    expect(await screen.findByText(/nobody has approved it/)).toBeDefined();
     expect(screen.queryByText(/Replay v2 and ship it/)).toBeNull();
-    expect(screen.getByText(/v2 is the head, but nobody has approved it/)).toBeDefined();
     expect(posted(calls, "/finalize"), "nothing is sent until it can succeed").toEqual([]);
   });
 
-  it("will not ship before a benchmark, because running it is what saves the suite", async () => {
-    // finalize refuses an attempt with no suite (409, api/versions.py:266), and
-    // runBenchmark is the call that persists one.
-    stubApi(versioned());
+  it("lists every unmet gate at once, not one per attempt", async () => {
+    // Showing them one at a time turned shipping into fix-one, press,
+    // discover-the-next — and the server already knows the whole list.
+    stubApi((path) => {
+      if (path.endsWith("/prepare-ship")) {
+        return { status: 200, body: {
+          blockers: [
+            { code: "not_approved", message: "v2 is the head, but nobody has approved it — approve it in Version lineage." },
+            { code: "no_verifiers", message: "This attempt has no verifier suite — generate one in step 2 before shipping." },
+          ],
+          canShip: false, verifiers: [],
+        } };
+      }
+      return versioned("candidate")(path);
+    });
     await mount(gymAttempt);
     generateSuite();
 
-    expect(screen.getByText(/Run the benchmark in step 2 above/)).toBeDefined();
+    expect(await screen.findByText(/nobody has approved it/)).toBeDefined();
+    expect(screen.getByText(/no verifier suite/)).toBeDefined();
     expect(screen.queryByText(/Replay v2 and ship it/)).toBeNull();
   });
 

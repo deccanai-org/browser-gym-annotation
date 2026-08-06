@@ -77,6 +77,61 @@ def replayable(actions: list[dict]) -> tuple[bool, list[int]]:
     return (not missing), missing
 
 
+def gate_report(db: Session, attempt: models.ReviewSession,
+                version: models.TrajectoryVersion | None,
+                suite: models.VerifierSuite | None) -> list[dict]:
+    """Every reason this attempt cannot ship yet, phrased as the thing to go and do.
+
+    `finalize` raises on the FIRST unmet gate, which is right for an operation
+    that must not half-ship — but it makes the UI a guessing game: fix one thing,
+    press the button, discover the next. This reads the same predicates and
+    returns all of them, so the annotator sees the whole list at once.
+
+    Deliberately the same source of truth. A second, hand-maintained copy of
+    "what blocks a ship" would drift, and the drift would show up as a button
+    that is enabled and then refuses.
+    """
+    out: list[dict] = []
+    if version is None:
+        return [{"code": "no_version", "message": "Nothing has been recorded on this task yet."}]
+
+    actions = actions_of(db, version)
+    if not actions:
+        out.append({"code": "no_steps",
+                    "message": "You have not recorded any actions yet."})
+    if version.status != "approved":
+        out.append({
+            "code": "not_approved",
+            "message": (f"v{version.version_no} is the head, but nobody has approved it — "
+                        f"approve it in Version lineage. Finalize refuses a version no reviewer signed off."),
+        })
+    rejected = _rejected_steps(db, attempt.id, version)
+    if rejected:
+        out.append({
+            "code": "rejected_steps",
+            "message": ("this version still contains "
+                        + ("a step" if len(rejected) == 1 else f"{len(rejected)} steps")
+                        + " you marked wrong — fork before "
+                        + ("it" if len(rejected) == 1 else "them")
+                        + " so the correction replaces it, or clear the verdict if it was a mistake"),
+        })
+    if actions:
+        ok, missing = replayable(actions)
+        if not ok:
+            out.append({
+                "code": "unreplayable_step",
+                "message": (f"step {missing[0] + 1} has no semantic locator, so the trajectory "
+                            f"cannot be replayed."),
+                "at": missing[0],
+            })
+    if suite is None or not (suite.verifiers or []):
+        out.append({
+            "code": "no_verifiers",
+            "message": "This attempt has no verifier suite — generate one in step 2 before shipping.",
+        })
+    return out
+
+
 def finalize(
     db: Session,
     *,

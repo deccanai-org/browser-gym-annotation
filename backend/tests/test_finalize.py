@@ -423,3 +423,45 @@ def test_a_click_without_a_locator_is_still_refused():
         {"kind": "click", "locator": {}, "args": {}},
     ])
     assert not ok and missing == [0]
+
+
+# --------------------------------------------------------- prepare-ship gates
+
+def test_the_blockers_and_the_real_gates_agree(db_session, setup):
+    """`gate_report` lists every unmet gate; `finalize` raises on the first. They
+    read the same predicates deliberately — a second hand-maintained copy of
+    "what blocks a ship" would drift, and the drift shows up as a button that is
+    enabled and then refuses."""
+    attempt, version, suite, _steps, _task = setup
+    version.status = "candidate"          # not approved
+    db_session.commit()
+
+    codes = [b["code"] for b in finalize.gate_report(db_session, attempt, version, suite)]
+    assert "not_approved" in codes
+    # and finalize refuses for exactly that reason
+    with pytest.raises(finalize.NotApproved):
+        _finalize(db_session, setup)
+
+
+def test_an_approved_ready_attempt_reports_no_blockers(db_session, setup):
+    attempt, version, suite, _steps, _task = setup
+    _approve(db_session, version)
+    db_session.commit()
+    assert finalize.gate_report(db_session, attempt, version, suite) == []
+
+
+def test_an_attempt_with_no_verifiers_is_blocked_before_it_wastes_a_replay(db_session, setup):
+    """Shipping needs a suite. Saying so up front beats discovering it after a
+    full clean-reset replay has run."""
+    attempt, version, _suite, _steps, _task = setup
+    codes = [b["code"] for b in finalize.gate_report(db_session, attempt, version, None)]
+    assert "no_verifiers" in codes
+
+
+def test_every_blocker_says_what_to_go_and_do(db_session, setup):
+    """A code alone is not actionable. The message is the product."""
+    attempt, version, _suite, _steps, _task = setup
+    version.status = "candidate"
+    db_session.commit()
+    for b in finalize.gate_report(db_session, attempt, version, None):
+        assert b["message"] and len(b["message"]) > 20, b
