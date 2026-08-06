@@ -372,7 +372,12 @@ def prepare_ship(
         with contextlib.suppress(Exception):
             world = live_world.world_for(db, s)
             verdict = world.verify(0) if hasattr(world, "verify") else None
-            milestones = list((verdict or {}).get("milestones") or [])
+            # The gym names this `all_milestones`; the bridge passes the verdict
+            # through unchanged. Reading `milestones` found nothing, so the
+            # fallback silently never fired and every attempt still reported
+            # "no verifier suite" — a miss only a full-stack run could show.
+            milestones = list((verdict or {}).get("all_milestones")
+                              or (verdict or {}).get("milestones") or [])
         if milestones:
             suite = models.VerifierSuite(
                 session_id=s.id, version=((suite.version + 1) if suite else 1))
@@ -390,7 +395,10 @@ def prepare_ship(
                     # copy of the check.
                     check_ir={"kind": "gym_milestone", "id": m.get("id") or m.get("name")},
                     added_by_human=False,
-                    gym_result=str(m.get("result") or ""),
+                    # The gym reports firing, not a verdict string — and a
+                    # FORBIDDEN milestone passes by NOT firing, so this cannot be
+                    # read off `fired_at_step` naively.
+                    gym_result=gym_review._milestone_result(m),
                 ))
             created_suite = True
             db.add(models.AuditLog(
