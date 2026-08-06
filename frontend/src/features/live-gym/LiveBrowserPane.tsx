@@ -552,7 +552,27 @@ export function LiveBrowserPane({
             // Switch over the socket so the service rebinds the screencast AND
             // the mouse to that tab. Optimistic: the ack carries the tab it
             // actually landed on, and reconciles this if they disagree.
-            const ok = sockRef.current?.send({ type: "switch_tab", app: a.app, url: a.url }) ?? false;
+            //
+            // RECORDED, like every other action — moving between apps is the
+            // whole shape of a cross-app task ("read the order id in mail, then
+            // cancel it in shop"), and without a record factory here the
+            // trajectory showed the two halves with nothing between them.
+            // Recorded on the ACK, so a switch the service refuses (another
+            // connection holds control) never becomes a step.
+            const idx = apps.findIndex((x) => x.app === a.app);
+            const ok = sockRef.current?.send(
+              { type: "switch_tab", app: a.app, url: a.url },
+              (st) => ({
+                kind: "switch_tab",
+                // All three: the executor addresses tabs by index, the pane
+                // knows the app key, and the url is the fallback a replay can
+                // always fall back to.
+                payload: { app: a.app, url: a.url, tabIndex: idx, t: Date.now() },
+                target: { app: a.app, title: a.title, targetKey: `app:${a.app}` },
+                url: st?.url ?? a.url,
+                tab: st?.tabId ?? a.app,
+              }),
+            ) ?? false;
             if (ok) {
               setActiveApp(a.app);
               setPageUrl(a.url);

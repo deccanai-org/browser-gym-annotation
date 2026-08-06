@@ -674,6 +674,11 @@ function newEventId(): string {
 
 export const EVENT_BATCH_AT = 40;
 export const EVENT_FLUSH_MS = 1200;
+
+/** Kinds that CLOSE an action, so the batch holding them should go now — see
+ *  `EventRecorder.push`. A click, a navigation and a tab switch are each
+ *  complete the moment they ack; a keystroke is not. */
+export const BOUNDARY_KINDS = new Set(["mouseUp", "mouseReleased", "navigate", "switch_tab"]);
 /** Above this the backend is clearly gone; keep a contiguous PREFIX and count
  *  the rest, because a hole in the middle of the stream mis-folds (a
  *  `mousePressed` whose `mouseReleased` was dropped becomes a bogus `press`). */
@@ -784,7 +789,14 @@ export class EventRecorder {
       url: ev.url ?? "",
       tab: ev.tab ?? "",
     });
-    if (this.queue.length >= (this.cfg.batchAt ?? EVENT_BATCH_AT)) {
+    // Send immediately on an action BOUNDARY. The server reads the gym world
+    // once per folded batch, so an action that waits out the 1.2s timer shares
+    // its observation with whatever the annotator did next, and the state change
+    // can only be attributed to the window rather than to the step. Flushing
+    // here is what makes a per-step delta observable in the normal case.
+    // Deliberately not keyChar: a request per keystroke is what the batch exists
+    // to avoid, and an edit is not finished until the field settles anyway.
+    if (BOUNDARY_KINDS.has(ev.kind) || this.queue.length >= (this.cfg.batchAt ?? EVENT_BATCH_AT)) {
       void this.flush();
       return clientEventId;
     }

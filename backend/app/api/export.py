@@ -70,7 +70,7 @@ def _versioned_sample(
     ]
     return {
         "sample_id": str(s.id),
-        "schema": "golden-sample/2",
+        "schema": "golden-sample/3",
         "task": {
             "id": task.external_id if task else None,
             "revision": frozen.get("task_revision", 1),
@@ -99,6 +99,14 @@ def _versioned_sample(
         "verifier_suite_version": frozen.get("suite_version"),
         "reward": frozen.get("reward"),
         "final_world_hash": frozen.get("final_world_hash", ""),
+        # The attempt-scope state transition: seeded world -> end state. Per-step
+        # deltas ride inside `golden_trajectory` above.
+        "state_trajectory": {
+            "schema": "world-delta/1",
+            "initial_hash": frozen.get("initial_world_hash", ""),
+            "final_hash": frozen.get("final_world_hash", ""),
+            "summary": frozen.get("world_summary") or {},
+        },
         "submission": {
             "reward": sub.reward, "kind": sub.kind, "accepted": sub.accepted,
             "override": sub.submitted_with_override,

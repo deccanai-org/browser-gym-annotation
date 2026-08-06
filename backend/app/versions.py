@@ -24,7 +24,7 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import models
+from app import models, worlddiff
 
 ROOT = "agent_run"
 CORRECTION = "agent_correction"
@@ -391,6 +391,12 @@ def flat_view(db: Session, version: models.TrajectoryVersion) -> list[dict]:
             "replayState": s.replay_state,
             "tabId": s.tab_id,
             "screenshotUrl": s.screenshot_url,
+            # What this step changed in the world. `compact`, not the raw delta:
+            # this whole view is re-sent by a 1.5s poll, so a 200-change delta on
+            # each of 60 steps would ride along every time.
+            "worldDelta": worlddiff.compact(s.world_delta),
+            "stateChange": worlddiff.summarize(s.world_delta),
+            "deltaSpan": (s.delta_span or {}).get("stepIds") or [],
         })
     return out
 

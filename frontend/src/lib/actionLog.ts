@@ -26,6 +26,9 @@ interface RawStep {
   screenshot_url?: string;
   tabId?: string;
   tab_id?: string;
+  worldDelta?: unknown;
+  stateChange?: string;
+  deltaSpan?: string[];
 }
 
 function normalise(raw: RawStep[]): LoggedStep[] {
@@ -37,6 +40,12 @@ function normalise(raw: RawStep[]): LoggedStep[] {
     replayState: s.replayState ?? s.replay_state ?? "unverified",
     screenshotUrl: s.screenshotUrl ?? s.screenshot_url ?? "",
     tabId: s.tabId ?? s.tab_id ?? "",
+    // What this step changed in the world. `undefined` means NOT OBSERVED —
+    // deliberately distinct from an object with `changed: false`, which means
+    // observed and nothing moved.
+    worldDelta: (s.worldDelta as LoggedStep["worldDelta"]) ?? undefined,
+    stateChange: s.stateChange ?? "",
+    deltaSpan: s.deltaSpan ?? [],
   }));
 }
 

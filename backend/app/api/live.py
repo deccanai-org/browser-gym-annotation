@@ -771,6 +771,10 @@ def close_live_session(
                                      world_full=full,
                                      step_clock=int(world.get("step") or 0))
             s.final_checkpoint_id = cp.id
+            # What this attempt changed overall, seeded start vs end state — the
+            # per-attempt DB diff. Recomputed on each close because closing is a
+            # suspend, not a finish.
+            s.world_summary = worlddiff.attempt_summary(db, s, final_world=world)
 
     # Release the pooled gym. Closing only the Chromium leaked the bridge lease —
     # every task an annotator opened held one of the (few) gym instances forever,

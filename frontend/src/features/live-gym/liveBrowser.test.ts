@@ -397,6 +397,38 @@ describe("EventRecorder", () => {
     expect((calls[0].body as unknown[]).length).toBe("wireless mouse".length);
   });
 
+  it("sends a completed action immediately, without waiting out the batch timer", () => {
+    // The server reads the gym world once per folded batch. An action that sits
+    // in the queue for 1.2s shares its observation with whatever came next, and
+    // the state change can then only be attributed to the window rather than to
+    // the step. Flushing on a boundary is what makes a per-step delta real.
+    const { impl, calls } = fakeFetch();
+    const clock = fakeTimers();
+    const rec = new EventRecorder({ attemptId: "s-1", fetchImpl: impl, timers: clock.timers });
+    rec.push({ kind: "mouseDown", payload: {} });
+    expect(calls).toHaveLength(0);          // a press is not a completed action
+    rec.push({ kind: "mouseUp", payload: {} });
+    expect(calls).toHaveLength(1);          // the release completes it — go now
+  });
+
+  it("does not flush on every keystroke", () => {
+    // The guard on the above: an edit is not finished until the field settles,
+    // and a request per character is exactly what the batch exists to avoid.
+    const { impl, calls } = fakeFetch();
+    const clock = fakeTimers();
+    const rec = new EventRecorder({ attemptId: "s-1", fetchImpl: impl, timers: clock.timers });
+    for (const ch of "hello") rec.push({ kind: "keyChar", payload: { text: ch } });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("sends a tab switch immediately, like any other completed action", () => {
+    const { impl, calls } = fakeFetch();
+    const clock = fakeTimers();
+    const rec = new EventRecorder({ attemptId: "s-1", fetchImpl: impl, timers: clock.timers });
+    rec.push({ kind: "switch_tab", payload: { app: "mail" } });
+    expect(calls).toHaveLength(1);
+  });
+
   it("flushes early once the batch is full, so a long session is not held in memory", () => {
     const { impl, calls } = fakeFetch();
     const clock = fakeTimers();

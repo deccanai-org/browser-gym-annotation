@@ -271,7 +271,7 @@ def test_the_exported_sample_ships_the_lineage_and_authorship(db_session, setup)
     db_session.commit()
 
     sample = build_sample(db_session, s)
-    assert sample["schema"] == "golden-sample/2"
+    assert sample["schema"] == "golden-sample/3"
     assert sample["task"]["revision"] == 3
     assert sample["trajectory_version"]["version_no"] == 2
     assert [v["versionNo"] for v in sample["trajectory_version"]["lineage"]] == [1, 2]
@@ -401,3 +401,25 @@ def test_a_submitted_attempt_cannot_be_finalized_again(client, db_session, setup
 
     r = client.post(f"/api/sessions/{s.id}/finalize", json={"versionId": str(v1.id)})
     assert r.status_code in (403, 404, 409), r.text
+
+
+def test_a_tab_switch_does_not_block_finalization():
+    """A tab switch names an APP, not a page element, so it has no semantic
+    locator by nature. Before `_NO_LOCATOR` covered it, every multi-app
+    trajectory — the whole point of the cross-app breakers — was refused at the
+    last gate for "this step has no semantic locator"."""
+    ok, missing = finalize.replayable([
+        {"kind": "click", "locator": {"testId": "buy"}, "args": {}},
+        {"kind": "switch_tab", "locator": {}, "args": {"app": "mail"}},
+        {"kind": "navigate", "locator": {}, "args": {"url": "/cart"}},
+    ])
+    assert ok and missing == []
+
+
+def test_a_click_without_a_locator_is_still_refused():
+    """The guard on the above: widening the exemption must not make everything
+    replayable-by-assertion."""
+    ok, missing = finalize.replayable([
+        {"kind": "click", "locator": {}, "args": {}},
+    ])
+    assert not ok and missing == [0]

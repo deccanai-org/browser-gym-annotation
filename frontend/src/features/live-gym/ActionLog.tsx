@@ -24,6 +24,53 @@ export interface LoggedStep {
   screenshotUrl?: string;
   tabId?: string;
   pending?: boolean;
+  /** What this step changed. `undefined` = not observed (it shared an
+   *  observation window with a later step); `changed: false` = observed and
+   *  nothing moved, which is worth showing — it means the click did nothing. */
+  worldDelta?: { changed: boolean; apps?: string[]; summary?: string } | null;
+  stateChange?: string;
+  deltaSpan?: string[];
+}
+
+/** Per-app dot colours, so a mail-side effect of a shop action reads at a
+ *  glance — the cross-app signal these tasks exist to test. */
+const APP_DOT: Record<string, string> = {
+  shop: "#f59e0b", mail: "#dc2626", market: "#2563eb",
+  calendar: "#16a34a", food: "#7c3aed",
+};
+
+/** What the step did to the WORLD, under what it did to the page.
+ *
+ *  Three distinct states, and the distinction is the feature:
+ *    · not observed  → render nothing. Absence of observation is not
+ *                      observation of absence.
+ *    · nothing moved → say so. "Your click did nothing" is useful.
+ *    · something moved → name the apps and the change.
+ */
+function StateChange({ step }: { step: LoggedStep }) {
+  const d = step.worldDelta;
+  if (d === undefined || d === null) return null;
+  if (!d.changed) {
+    return (
+      <span style={{ display: "block", marginTop: 2, fontSize: "0.66rem", color: t.n4 }}>
+        no state change
+      </span>
+    );
+  }
+  const apps = d.apps ?? [];
+  return (
+    <span style={{ display: "flex", marginTop: 3, fontSize: "0.68rem", color: t.n2,
+                   flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+      {apps.map((a) => (
+        <span key={a} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          <span aria-hidden style={{ width: 6, height: 6, borderRadius: 999,
+                                     background: APP_DOT[a] ?? t.n3 }} />
+          <span style={{ fontWeight: weight.medium }}>{a}</span>
+        </span>
+      ))}
+      <span style={{ overflowWrap: "anywhere" }}>{step.stateChange || d.summary}</span>
+    </span>
+  );
 }
 
 const STATE_STYLE: Record<string, { dot: string; label: string }> = {
@@ -128,6 +175,7 @@ export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifyin
                   {s.pending ? "sending…" : st.label}
                   {s.tabId ? ` · ${s.tabId}` : ""}
                 </span>
+                <StateChange step={s} />
               </span>
             </li>
           );

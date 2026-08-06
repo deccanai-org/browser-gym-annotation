@@ -25,7 +25,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import checkpoints, models, replay, versions
+from app import checkpoints, models, replay, versions, worlddiff
 
 
 class NotApproved(RuntimeError):
@@ -253,6 +253,15 @@ def freeze(
             "reasoning": s.reasoning or "", "human_intent": s.human_intent or "",
             "guidance": s.guidance_text or "",
             "world_hash": after.world_hash if after else "",
+            # The state transition this step produced — the SFT target's actual
+            # signal, and the DB-diff a verifier validates against.
+            "world_delta": s.world_delta or None,
+            "state_change": worlddiff.summarize(s.world_delta),
+            "delta_span": (s.delta_span or {}).get("stepIds") or [],
+            # Provenance a consumer filtering for locator-grounded data needs;
+            # neither was ever exported before.
+            "coordinate_fallback": s.coordinate_fallback or {},
+            "replay_state": s.replay_state,
         })
     return {
         "task_revision": attempt.task_revision,
@@ -268,4 +277,11 @@ def freeze(
         "overridden": run.overridden or [],
         "final_world_hash": final_checkpoint.world_hash,
         "final_checkpoint_id": str(final_checkpoint.id),
+        # The attempt-scope diff: the seeded world vs what the annotator's work
+        # produced. Frozen here because everything it references keeps moving.
+        "initial_world_hash": (
+            (db.get(models.EnvironmentCheckpoint, attempt.initial_checkpoint_id) or
+             models.EnvironmentCheckpoint()).world_hash
+            if attempt.initial_checkpoint_id else ""),
+        "world_summary": attempt.world_summary or {},
     }
