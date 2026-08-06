@@ -4,13 +4,14 @@ inter-annotator agreement, and let a reviewer adjudicate one as the accepted gol
 from __future__ import annotations
 
 from collections import Counter
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import models
+from app import disposition, models
 from app.auth import require_reviewer
 from app.db import get_db
 from app.models import Annotator
@@ -151,3 +152,50 @@ def qa_adjudicate(external_id: str, body: AdjudicateBody,
     ))
     db.commit()
     return {"accepted": str(target.session_id), "reward": target.reward}
+
+
+class ReturnBody(BaseModel):
+    note: str = ""
+
+
+@router.post("/submissions/{submission_id}/return")
+def qa_return(submission_id: UUID, body: ReturnBody,
+              current: Annotator = Depends(require_reviewer),
+              db: Session = Depends(get_db)) -> dict:
+    """Send a submission back to its annotator for another attempt.
+
+    Adjudicating was the only verb a reviewer had: a sample they judged wrong
+    could be left unaccepted, but nothing told the annotator, and the board's
+    `returned` tab could never fill. So rework happened over Slack, or not at all.
+
+    This deliberately does NOT unlock the submitted session. `_assert_not_submitted`
+    riding every mutating endpoint is what makes the frozen snapshot trustworthy —
+    an exported sample must still describe what was actually reviewed. The redo is
+    a NEW attempt, linked back through `origin_session_id` when the annotator
+    reopens the task, so the history stays readable in both directions.
+    """
+    sub = db.get(models.Submission, submission_id)
+    if sub is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    s = db.get(models.ReviewSession, sub.session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="the attempt behind that submission is gone")
+
+    note = (body.note or "").strip()
+    if not note:
+        # Same rule the disposition path enforces: "do it again" without a reason
+        # is not a review, and the annotator has no way to act on it.
+        raise HTTPException(status_code=422,
+                            detail="say why you are sending it back — the annotator only sees this note")
+    if s.annotator_id is not None and s.annotator_id == current.id:
+        raise HTTPException(status_code=409, detail="you cannot send your own attempt back to yourself")
+
+    sub.accepted = False
+    s.rework_status = disposition.REWORK_REQUESTED
+    s.rework_note = note
+    db.add(models.AuditLog(
+        session_id=s.id, actor=current.email, action="qa.return",
+        target=str(sub.id), meta={"note": note, "reward": sub.reward},
+    ))
+    db.commit()
+    return {"returned": str(sub.session_id), "reworkStatus": s.rework_status, "note": note}

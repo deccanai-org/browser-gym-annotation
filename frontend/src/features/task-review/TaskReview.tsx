@@ -1,14 +1,10 @@
 import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { ACTION_COLOR, Button, Icon, t, tint, weight } from "../../ds";
 import {
-  adjudicate,
   type ShipBlocker,
   autogenVerifiers,
-  downloadSampleBundle,
   driveForwardGym,
   fetchGymStatus,
-  fetchQaSubmissions,
-  fetchQaTasks,
   fetchGymTasks,
   fetchReview,
   fetchTasks,
@@ -25,7 +21,7 @@ import {
   fetchSessionHistory,
 } from "../../lib/api";
 import { continuingAfter, FORK_COPY, headOf, rejecting, type VersionNode } from "../../lib/versionsApi";
-import type { AutogenResult, HistoryRound, QaSubmission, QaTaskRow } from "../../lib/api";
+import type {AutogenResult, HistoryRound} from "../../lib/api";
 import type { ReviewData, TaskListItem, Verifier } from "../../lib/types";
 import {
   canSubmit,
@@ -662,7 +658,6 @@ interface TaskNav {
   onBrowseGym: () => void;
   gymTaskId?: string | null;
   onExitGym?: () => void;
-  onOpenQa: () => void;
   annotator: Annotator | null;
   onOpenProfile: () => void;
   queueSet?: "breakers" | "fixtures";
@@ -1409,89 +1404,6 @@ function AutogenPanel({ result, onClose }: { result: AutogenResult; onClose: () 
   );
 }
 
-function QaPanel({ onClose, reviewer }: { onClose: () => void; reviewer: string }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useModalA11y(onClose, dialogRef);
-  const [tasks, setTasks] = useState<QaTaskRow[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [subs, setSubs] = useState<QaSubmission[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const reload = () => fetchQaTasks().then(setTasks);
-  useEffect(() => { void reload(); }, []);
-  const openTask = async (id: string) => { setSelected(id); setSubs(null); const r = await fetchQaSubmissions(id); setSubs(r?.submissions ?? []); };
-  const accept = async (sessionId: string) => {
-    if (!selected) return;
-    setBusy(true);
-    await adjudicate(selected, sessionId);
-    await openTask(selected);
-    await reload();
-    setBusy(false);
-  };
-  const badge = (row: QaTaskRow) => {
-    if (row.adjudicated) return { txt: "adjudicated", bg: t.greenLite, fg: t.greenDark };
-    if (row.disputed) return { txt: `disputed · ${Math.round((row.agreement ?? 0) * 100)}%`, bg: t.redLite, fg: t.redDark };
-    return { txt: "unanimous", bg: t.surfaceTint, fg: t.n2 };
-  };
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55 }}>
-      <div ref={dialogRef} {...DIALOG} aria-label="Multi-annotator QA" onClick={(e) => e.stopPropagation()} style={{ width: 840, height: "78vh", background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, display: "flex", flexDirection: "column", overflow: "hidden", outline: "none" }}>
-        <div style={{ padding: "18px 22px 14px", borderBottom: `1px solid ${t.n7}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div style={{ fontSize: "1rem", fontWeight: weight.bold, color: t.n0 }}>⚖ Multi-annotator QA</div>
-            <div style={{ marginTop: 3, fontSize: "0.8rem", color: t.n2 }}>Agreement across annotators; accept one submission as the golden. Reviewing as <span style={{ fontFamily: t.fontMono, fontSize: "0.74rem" }}>{reviewer}</span>.</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <a href="/api/export/dataset.jsonl?accepted=true" download style={{ fontSize: "0.74rem", fontWeight: weight.semibold, color: t.primary6, textDecoration: "none", whiteSpace: "nowrap" }} title="Download the accepted golden samples as JSONL (the deliverable dataset)">⬇ Export golden dataset</a>
-            <span onClick={onClose} style={{ cursor: "pointer", color: t.n3, display: "inline-flex" }}><Icon name="close" size={18} /></span>
-          </div>
-        </div>
-        <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-          <div style={{ width: 320, borderRight: `1px solid ${t.n7}`, overflowY: "auto" }}>
-            {tasks == null ? (
-              <div style={{ padding: 24, color: t.n3, fontSize: "0.85rem" }}>Loading…</div>
-            ) : tasks.length === 0 ? (
-              <div style={{ padding: 24, color: t.n3, fontSize: "0.85rem" }}>No submissions yet. Submit a task as a couple of annotators (change the identity in the header) to see agreement here.</div>
-            ) : tasks.map((row) => {
-              const b = badge(row);
-              return (
-                <div key={row.taskExternalId} onClick={() => openTask(row.taskExternalId)} style={{ padding: "11px 18px", cursor: "pointer", borderBottom: `1px solid ${t.n8}`, background: selected === row.taskExternalId ? t.surfaceTint : "transparent" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontFamily: t.fontMono, fontSize: "0.76rem", color: t.n1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.taskExternalId}</span>
-                    <span style={{ fontSize: "0.64rem", fontWeight: weight.bold, padding: "2px 7px", borderRadius: 5, background: b.bg, color: b.fg, whiteSpace: "nowrap" }}>{b.txt}</span>
-                  </div>
-                  <div style={{ marginTop: 3, fontSize: "0.72rem", color: t.n3 }}>{row.submissions} submissions · {row.annotators} annotators · majority reward {row.majorityReward}</div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
-            {selected == null ? (
-              <div style={{ padding: 28, color: t.n3, fontSize: "0.85rem", textAlign: "center" }}>Select a task to see each annotator's submission.</div>
-            ) : subs == null ? (
-              <div style={{ padding: 24, color: t.n3, fontSize: "0.85rem" }}>Loading submissions…</div>
-            ) : subs.map((s) => (
-              <div key={s.sessionId} style={{ padding: "12px 22px", borderBottom: `1px solid ${t.n8}`, display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ width: 30, height: 30, borderRadius: t.radiusFull, background: t.primary7, color: t.n9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: "0.78rem", fontWeight: weight.bold, flexShrink: 0 }}>{s.annotator.charAt(0).toUpperCase()}</span>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: "0.82rem", color: t.n1, fontFamily: t.fontMono }}>{s.annotator}</div>
-                  <div style={{ fontSize: "0.72rem", color: t.n3, marginTop: 1 }}>{s.kind}{s.override ? " · overridden" : ""} · {new Date(s.at).toLocaleString()}</div>
-                </div>
-                <span style={{ fontFamily: t.fontMono, fontSize: "0.78rem", fontWeight: weight.bold, padding: "3px 10px", borderRadius: 6, background: s.reward === 1 ? t.greenLite : t.redLite, color: s.reward === 1 ? t.greenDark : t.redDark }}>reward {s.reward}</span>
-                {s.accepted ? (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: "0.72rem", fontWeight: weight.bold, color: t.greenDark }}><Icon name="check" size={14} stroke={2.4} color={t.greenDark} /> accepted</span>
-                ) : (
-                  <span onClick={busy ? undefined : () => accept(s.sessionId)} style={{ fontSize: "0.72rem", fontWeight: weight.semibold, color: busy ? t.n4 : t.primary6, cursor: busy ? "default" : "pointer", padding: "5px 11px", border: `1px solid ${t.n6}`, borderRadius: t.radiusLg, whiteSpace: "nowrap" }}>Accept as golden</span>
-                )}
-                <span onClick={() => downloadSampleBundle(s.sessionId)} title="Download this sample's golden bundle (JSON)" style={{ fontSize: "0.72rem", fontWeight: weight.semibold, color: t.n2, cursor: "pointer", whiteSpace: "nowrap" }}>⬇ bundle</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function GymPicker({ onClose, onPick }: { onClose: () => void; onPick: (id: string) => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalA11y(onClose, dialogRef);
@@ -1573,7 +1485,6 @@ export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: s
   const [pickerOpen, setPickerOpen] = useState(false);
   const [gymError, setGymError] = useState<string | null>(null);
   const [freshNonce, setFreshNonce] = useState(0); // >0 forces a new session on remount ("New annotation")
-  const [qaOpen, setQaOpen] = useState(false);
   const [queueSet, setQueueSet] = useState<"breakers" | "fixtures">("breakers");
   const [gymAdhoc, setGymAdhoc] = useState(false); // true = loaded off-queue via the Gym picker (not the main queue)
   const { annotator } = useAuth(); // the signed-in identity — replaces the old free-text "AS" field
@@ -1656,7 +1567,6 @@ export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: s
       setGymData(null);
       if (currentTask?.source === "gym") void loadGym(taskId, false);
     },
-    onOpenQa: () => setQaOpen(true),
     annotator,
     onOpenProfile: () => setProfileOpen(true),
     onBackToTasks: onExitToTasks,
@@ -1692,7 +1602,6 @@ export function TaskReview({ initialTaskId, onExitToTasks }: { initialTaskId?: s
         <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: t.n3, fontFamily: t.fontPrimary }}>Loading task…</div>
       )}
       {pickerOpen && <GymPicker onClose={() => setPickerOpen(false)} onPick={(id) => loadGym(id, true)} />}
-      {qaOpen && <QaPanel onClose={() => setQaOpen(false)} reviewer={annotator?.email ?? ""} />}
       {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
       {gymLoading && <GymLoading taskId={gymLoading} phase={gymPhase} />}
       {gymError && (

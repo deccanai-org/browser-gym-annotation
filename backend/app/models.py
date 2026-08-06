@@ -114,6 +114,11 @@ class ReviewSession(Base):
     disposition_by_id: Mapped[UUID | None] = _fk("annotator.id", nullable=True, ondelete="SET NULL")
     disposition_at: Mapped[datetime | None] = mapped_column(nullable=True)
     rework_status: Mapped[str] = mapped_column(String(16), default="")  # "" | requested | done
+    # WHY it was sent back, in the reviewer's own words. Without this the board
+    # can say "Returned" and nothing else, which tells the annotator to redo the
+    # task without telling them what was wrong — the audit row holds the note but
+    # it is not theirs to read.
+    rework_note: Mapped[str] = mapped_column(Text, default="")
     # For a SYSTEM gym run produced by an annotator's correction (drive-forward),
     # the HUMAN session that triggered it. Lets a corrected re-benchmark score from
     # THAT annotator's own correction, never another annotator's — the isolation

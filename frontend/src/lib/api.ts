@@ -41,6 +41,8 @@ export interface MyTaskRow {
   status: MyTaskStatus;
   resumeStep: number | null;
   sessionId: string | null;
+  /** Why a reviewer sent it back — empty unless status is "returned". */
+  reworkNote?: string;
   updatedAt: string | null;
 }
 
@@ -48,7 +50,10 @@ export interface MyTasksBoard {
   annotator: { name: string; email: string; role: string };
   batch: string;
   assigned: number;
-  quota: { submitted: number; target: number };
+  /** `submitted` is what the annotator FINISHED; `accepted` is how much of it a
+   *  reviewer has ruled on. Two numbers because one person controls the first
+   *  and someone else controls the second. */
+  quota: { submitted: number; accepted?: number; target: number };
   counts: Record<MyTaskStatus | "all", number>;
   nextUp: MyTaskRow | null;
   tasks: MyTaskRow[];
@@ -256,7 +261,7 @@ export interface QaTaskRow {
   unanimous: boolean; disputed: boolean; distribution: Record<string, number>;
 }
 export interface QaSubmission {
-  sessionId: string; annotator: string; reward: number; kind: string;
+  sessionId: string; submissionId: string; annotator: string; reward: number; kind: string;
   override: boolean; overrideReason: string | null; accepted: boolean; at: string;
 }
 
@@ -278,6 +283,15 @@ export async function fetchQaSubmissions(taskId: string): Promise<{ title: strin
   } catch {
     return null;
   }
+}
+
+/** Send a submission back to its annotator, with the reason they will read.
+ *
+ *  Deliberately strict: a failure here must not look like it worked, or the
+ *  reviewer moves on believing the annotator was told. The note is required by
+ *  the server — "do it again" without a reason is not a review. */
+export async function returnSubmission(submissionId: string, note: string): Promise<void> {
+  await postStrict<{ returned: string }>(`/api/qa/submissions/${submissionId}/return`, { note });
 }
 
 /** Accept one annotator's submission as the golden for a task. The reviewer is

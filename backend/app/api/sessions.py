@@ -585,9 +585,29 @@ def open_session(external_id: str, body: OpenSessionBody, current: Annotator = D
             .order_by(ReviewSession.created_at.desc())
         )
     if existing is None:
-        existing = ReviewSession(task_id=task.id, annotator_id=ann.id, status="draft", source=task.source)
+        # Reopening a task a reviewer SENT BACK. The returned attempt stays
+        # frozen — its submitted snapshot must keep describing what was actually
+        # reviewed — so the rework is this new attempt, linked back through
+        # `origin_session_id`. Without the link the two are unrelated rows and
+        # nobody can tell a rework from a second opinion.
+        returned = db.scalar(
+            select(ReviewSession)
+            .where(ReviewSession.task_id == task.id,
+                   ReviewSession.annotator_id == ann.id,
+                   ReviewSession.rework_status == "requested")
+            .order_by(ReviewSession.created_at.desc())
+        )
+        existing = ReviewSession(task_id=task.id, annotator_id=ann.id, status="draft",
+                                 source=task.source,
+                                 origin_session_id=returned.id if returned is not None else None)
         db.add(existing)
         db.flush()
+        if returned is not None:
+            # The request has been answered; the board must stop showing it as
+            # outstanding or the annotator sees "Returned" forever.
+            returned.rework_status = "done"
+            _audit(db, ann.email, "session.rework_started", str(existing.id),
+                   {"origin": str(returned.id)}, session_id=existing.id)
         if fixture is not None:
             _record_trajectory(db, existing, fixture)  # only fixtures carry a baked trajectory
         _audit(db, ann.email, "session.open", str(existing.id), session_id=existing.id)

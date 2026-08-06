@@ -29,7 +29,7 @@ function PagerBox({ dir, onClick, disabled }: { dir: "chevronLeft" | "chevronRig
   );
 }
 
-export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymTaskId, gymAdhoc, onExitGym, onOpenQa, annotator, onOpenProfile, queueSet, onToggleQueue, onBackToTasks }: { index: number; total: number; onPrev: () => void; onNext: () => void; onSkip: () => void; onBrowseGym: () => void; gymTaskId?: string | null; gymAdhoc?: boolean; onExitGym?: () => void; onOpenQa?: () => void; annotator?: Annotator | null; onOpenProfile?: () => void; queueSet?: "breakers" | "fixtures"; onToggleQueue?: () => void; onBackToTasks?: () => void }) {
+export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymTaskId, gymAdhoc, onExitGym, annotator, onOpenProfile, queueSet, onToggleQueue, onBackToTasks }: { index: number; total: number; onPrev: () => void; onNext: () => void; onSkip: () => void; onBrowseGym: () => void; gymTaskId?: string | null; gymAdhoc?: boolean; onExitGym?: () => void; annotator?: Annotator | null; onOpenProfile?: () => void; queueSet?: "breakers" | "fixtures"; onToggleQueue?: () => void; onBackToTasks?: () => void }) {
   const mono = { fontFamily: t.fontMono } as const;
   const name = annotator?.displayName || annotator?.email || "?";
   const initial = name.trim().charAt(0).toUpperCase() || "?";
@@ -93,11 +93,7 @@ export function Header({ index, total, onPrev, onNext, onSkip, onBrowseGym, gymT
       <span onClick={onBrowseGym} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
         <Icon name="swap" size={14} /> All gym tasks
       </span>
-      {onOpenQa && (
-        <span onClick={onOpenQa} title="Multi-annotator QA — agreement + adjudication" style={{ fontSize: "0.78125rem", fontWeight: weight.semibold, color: t.primary6, cursor: "pointer", whiteSpace: "nowrap" }}>
-          ⚖ QA review
-        </span>
-      )}
+
       <span style={{ flex: 1 }} />
       <FocusBadge>Multitab · Web Navigation</FocusBadge>
       <span

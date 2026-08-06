@@ -7,7 +7,7 @@
  * seeing progress, so it is read-only and quiet.
  */
 import { useEffect, useMemo, useState } from "react";
-import { Icon, t, weight } from "../../ds";
+import { Icon, t, tint, weight } from "../../ds";
 import { APP_COLOR } from "../../lib/appColors";
 import type { AppKey } from "../../lib/types";
 import { fetchMyTasks, type MyTaskRow, type MyTaskStatus, type MyTasksBoard } from "../../lib/api";
@@ -106,7 +106,7 @@ function NextUp({ row, onOpen }: { row: MyTaskRow; onOpen: (id: string) => void 
 }
 
 function QuotaCard({ board }: { board: MyTasksBoard }) {
-  const { submitted, target } = board.quota;
+  const { submitted, target, accepted } = board.quota;
   const pct = target > 0 ? Math.round((submitted / target) * 100) : 0;
   return (
     <div style={{
@@ -123,11 +123,24 @@ function QuotaCard({ board }: { board: MyTasksBoard }) {
       <div style={{ height: 6, borderRadius: 999, background: t.n7, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: t.greenDark, borderRadius: 999, transition: "width .3s" }} />
       </div>
+      {typeof accepted === "number" && (
+        // Two numbers because one person controls each: what you finished, and
+        // how much of it a reviewer has ruled on. Showing only the second made
+        // your own count fall whenever review was behind.
+        <div style={{ marginTop: 8, fontSize: "0.72rem", color: t.n3 }}>
+          {accepted} accepted by a reviewer
+        </div>
+      )}
     </div>
   );
 }
 
-export function MyTasks({ onOpenTask }: { onOpenTask: (taskId: string) => void }) {
+export function MyTasks({ onOpenTask, onOpenQa }: {
+  onOpenTask: (taskId: string) => void;
+  /** Reviewers only — the shell passes it undefined for everyone else, so the
+   *  entry point does not exist rather than existing and refusing. */
+  onOpenQa?: () => void;
+}) {
   const { annotator } = useAuth();
   const [board, setBoard] = useState<MyTasksBoard | null>(null);
   const [loading, setLoading] = useState(true);
@@ -167,6 +180,16 @@ export function MyTasks({ onOpenTask }: { onOpenTask: (taskId: string) => void }
           <span style={{ color: t.n1, fontWeight: weight.semibold }}>My tasks</span>
         </nav>
         <div style={{ flex: 1 }} />
+        {onOpenQa && (
+          // Reviewers only. Reaching QA used to mean opening somebody's task,
+          // which boots a Chromium and leases a gym just to read a list.
+          <button onClick={onOpenQa}
+                  style={{ padding: "6px 14px", borderRadius: t.radiusPill, border: `1px solid ${t.n7}`,
+                           background: "transparent", color: t.n1, fontSize: "0.8rem",
+                           fontWeight: weight.semibold, cursor: "pointer" }}>
+            ⚖ QA review
+          </button>
+        )}
         <span style={{ padding: "6px 14px", borderRadius: t.radiusPill, border: `1px solid ${t.primary7}`, color: t.primary6, fontSize: "0.8rem", fontWeight: weight.semibold }}>
           Multitab · Web Navigation
         </span>
@@ -234,6 +257,16 @@ export function MyTasks({ onOpenTask }: { onOpenTask: (taskId: string) => void }
                     <div style={{ fontSize: "0.72rem", color: t.n3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {r.category || "Breaker"}{r.status === "in_progress" && r.resumeStep != null ? ` · resume at step ${r.resumeStep}` : ""}
                     </div>
+                    {r.status === "returned" && r.reworkNote && (
+                      // What the reviewer asked for. Without it "Returned" tells
+                      // someone to redo the work without saying what was wrong.
+                      <div title={r.reworkNote}
+                           style={{ marginTop: 3, fontSize: "0.72rem", color: t.n1, background: tint(t.yellow, 14),
+                                    padding: "3px 8px", borderRadius: t.radiusSm, overflow: "hidden",
+                                    textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {r.reworkNote}
+                      </div>
+                    )}
                   </div>
                   <StatusPill status={r.status} />
                   <Sites row={r} />
