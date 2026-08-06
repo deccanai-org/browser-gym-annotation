@@ -90,8 +90,15 @@ def finalize(
     task_external_id: str = "",
     accept_failing: bool = False,
     require_replay: bool = True,
+    rewrite=None,
 ) -> dict:
-    """Replay, score, bind, freeze. Raises rather than shipping something unbound."""
+    """Replay, score, bind, freeze. Raises rather than shipping something unbound.
+
+    `rewrite` retargets each recorded action at the surface it is being replayed
+    on (see app/replay_surface.py). A recorded `navigate` carries the attempt's
+    own sid, so replaying it verbatim in a scratch world would drive the browser
+    straight back into the annotator's — the one world this must not touch.
+    """
     if version.attempt_id != attempt.id:
         raise versions.LineageError("that version belongs to another attempt")
     if suite.session_id != attempt.id:
@@ -102,6 +109,8 @@ def finalize(
     actions = actions_of(db, version)
     if not actions:
         raise NotApproved("this version has no steps to finalize")
+    if rewrite is not None:
+        actions = [rewrite(a) for a in actions]
 
     # A step the annotator marked WRONG must not be in the shipped golden. Forking
     # before it is how that normally happens, but a verdict recorded without a

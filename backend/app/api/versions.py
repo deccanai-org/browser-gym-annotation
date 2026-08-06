@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app import (
     agent_runs, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs, live_world,
-    materialize, models, recorder, replay, versions, workspace,
+    materialize, models, recorder, replay, replay_surface, versions, workspace,
 )
 from app.api import live as live_api
 from app.api.sessions import _assert_not_submitted, _owned_session
@@ -317,49 +317,48 @@ def finalize_attempt(
         raise HTTPException(status_code=409, detail="this attempt has no verifier suite to score against")
 
     task = db.get(models.Task, s.task_id)
-    # _live_world, not endpoint_for: a bridged attempt holds no workspace lease, so
-    # endpoint_for would hand back the SHARED gym and finalize would score a
-    # stranger's world. It also refuses outright when the gym was released.
-    endpoint = _live_world(db, s)
-    # Finalization REPLAYS the trajectory, so it needs a real browser. This used to
-    # fabricate a session id with an empty ticket, which the service has never
-    # heard of — so every finalize failed "live browser unreachable" and nothing
-    # could ship at all. Open one for the duration and always give it back.
-    start_url = live_api.browser_visible_gym_url(endpoint.base_url)
-    try:
-        live_sid, live_ticket = live_api.open_scratch_browser(start_url, current.email)
-    except HTTPException:
-        raise
-    live = gym_client.LiveBrowserClient(
-        base_url=settings.live_browser_url, session_id=live_sid, ticket=live_ticket, gym=endpoint,
-    )
-    try:
-        out = finalize.finalize(
-            db, attempt=s, version=v, suite=suite, executor=live, gym=endpoint,
-            scorer=GymScorer(endpoint), annotator_id=current.id,
-            accept_failing=body.acceptFailing,
-            task_external_id=task.external_id if task else "",
+    # Finalization does a CLEAN reset and replays the whole trajectory, so it must
+    # run somewhere throwaway AND on the surface the steps were recorded on. It
+    # used to do neither: it took the attempt's own world (so the reset wiped the
+    # annotator's work before reading it) and opened the browser on the gym's own
+    # pages (so a bridged attempt's mock-DOM locators could never resolve, and
+    # nothing could ship at all).
+    with replay_surface.scratch_surface(db, s, task, purpose="finalize") as surface:
+        endpoint = surface.world
+        live_sid, live_ticket = live_api.open_scratch_browser(surface.start_url, current.email)
+        live = gym_client.LiveBrowserClient(
+            base_url=settings.live_browser_url, session_id=live_sid, ticket=live_ticket, gym=endpoint,
         )
-    except finalize.NotApproved as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except replay.ReplayRejected as exc:
-        raise HTTPException(status_code=422, detail={
-            "error": "the approved version does not replay cleanly", "at": exc.at, "reason": exc.reason,
-        }) from exc
-    except versions.ConcurrencyError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    finally:
-        live_api.close_scratch_browser(live_sid)
-        # Finalization resets this attempt's OWN gym and replays the whole
-        # trajectory into it, so whatever the annotator was exploring is gone
-        # regardless of how this call ended. Forget the seed marker: on success the
-        # lease is released below and the marker goes with the row, but on FAILURE
-        # the workspace survives holding a replayed world under a marker that would
-        # otherwise vouch for it as the annotator's own. One extra reseed is the
-        # right price for never handing back a world we did not build for them.
-        with contextlib.suppress(Exception):
-            workspace.clear_seed_mark(db, workspace.active_lease(db, s.id))
+        try:
+            out = finalize.finalize(
+                db, attempt=s, version=v, suite=suite, executor=live, gym=endpoint,
+                scorer=GymScorer(endpoint), annotator_id=current.id,
+                accept_failing=body.acceptFailing,
+                task_external_id=task.external_id if task else "",
+                rewrite=surface.rewrite,
+            )
+        except finalize.NotApproved as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except replay.ReplayRejected as exc:
+            raise HTTPException(status_code=422, detail={
+                "error": "the approved version does not replay cleanly", "at": exc.at, "reason": exc.reason,
+            }) from exc
+        except versions.ConcurrencyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            live_api.close_scratch_browser(live_sid)
+            # A NON-bridged attempt's scratch surface IS its own gym (that is the
+            # surface it was recorded on), so there the replayed world does land
+            # in its workspace. Forget the seed marker: on success the lease is
+            # released below and the marker goes with the row, but on FAILURE the
+            # workspace survives holding a replayed world under a marker that
+            # would otherwise vouch for it as the annotator's own. One extra
+            # reseed is the right price for never handing back a world we did not
+            # build for them.
+            if not surface.bridged:
+                with contextlib.suppress(Exception):
+                    workspace.clear_seed_mark(db, workspace.active_lease(db, s.id))
 
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="attempt.finalize", target=out["submissionId"],
@@ -565,47 +564,6 @@ class CertifyBody(BaseModel):
     versionId: UUID | None = None
 
 
-@contextlib.contextmanager
-def _scratch_world(db: Session, s: models.ReviewSession, task):
-    """A throwaway world for certify — never the annotator's own.
-
-    Certify REPLAYS, and replaying restores a checkpoint into whatever world it
-    is handed. Handing it the attempt's own world rewinds the annotator's live
-    session to the fork point mid-task, and their five tabs keep rendering the
-    pre-rewind projection over an engine that no longer matches: they see a world
-    that does not exist.
-
-    So a bridged attempt certifies in its own leased gym under a DIFFERENT bridge
-    session, with FRESH throwaway SIDs — fresh because the replay pushes its
-    projection to the hub, and reusing the attempt's SIDs would overwrite the
-    annotator's saved app state with the replay's.
-
-    Non-bridged attempts keep the previous behaviour: they own their gym outright,
-    and the workspace path is not what the 85 gym tasks use.
-    """
-    if not live_world.owns_bridged_world(s):
-        yield _live_world(db, s)
-        return
-
-    scratch_id = f"{s.id}:certify"
-    sids = cua_hub.attempt_sids()          # throwaway; discarded with the session
-    try:
-        out = bridge_client.open_session(scratch_id, task.external_id if task else "", s.seed, sids)
-    except bridge_client.BridgePoolExhausted as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(f"no free gym to check this in — {exc}. Checking needs its own gym so it "
-                    f"cannot disturb yours; try again shortly."),
-        ) from exc
-    except bridge_client.BridgeError as exc:
-        raise HTTPException(status_code=409, detail=f"could not start a gym to check in: {exc}") from exc
-    try:
-        yield live_world.BridgedWorld(str(out.get("gym_url") or ""), scratch_id)
-    finally:
-        with contextlib.suppress(Exception):
-            bridge_client.close_session(scratch_id)
-
-
 @router.post("/sessions/{session_id}/certify")
 def certify(
     session_id: UUID, body: CertifyBody,
@@ -648,16 +606,19 @@ def certify(
     live_id = ticket = ""
     # A scratch WORLD as well as a scratch browser — replaying restores a
     # checkpoint, and doing that in the annotator's own gym rewinds them mid-task.
-    with _scratch_world(db, s, task) as world:
+    with replay_surface.scratch_surface(db, s, task, purpose="certify") as surface:
+        world = surface.world
         try:
-            live_id, ticket = live_api.open_scratch_browser(
-                live_api._browser_visible(getattr(world, "base_url", "") or settings.gym_url), current.email,
-            )
+            # Open where the steps were RECORDED. A bridged attempt's locators are
+            # captured from the mock SPA's DOM, so opening the gym's own pages
+            # meant not one of them could resolve and certify reported every step
+            # diverged however good the trajectory was.
+            live_id, ticket = live_api.open_scratch_browser(surface.start_url, current.email)
             executor = gym_client.LiveBrowserClient(
                 base_url=settings.live_browser_url, session_id=live_id, ticket=ticket, gym=world,
             )
             result = replay.restore_and_replay(
-                start, actions, executor, world,
+                start, [surface.rewrite(a) for a in actions], executor, world,
                 task_id=task.external_id if task else "", seed=s.seed,
                 # The per-action world hashes recorded at materialise time. Passing
                 # them is what makes the comparison in replay() live rather than dead
