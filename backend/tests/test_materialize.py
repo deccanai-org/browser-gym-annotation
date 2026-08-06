@@ -171,3 +171,148 @@ def test_certification_marks_steps_rather_than_deleting_them(db_session, attempt
     assert still.replay_state == "diverged"
     assert still.replay_error
     assert db_session.query(models.TrajectoryStep).count() == 1, "a diverged step was deleted"
+
+
+# --------------------------------------------------------------------- state deltas
+
+class _FakeWorld:
+    """A WorldPort that hands back a scripted sequence of worlds — one per read."""
+
+    def __init__(self, *worlds):
+        self._worlds = list(worlds)
+        self.reads = 0
+
+    def world(self):
+        w = self._worlds[min(self.reads, len(self._worlds) - 1)]
+        self.reads += 1
+        return w
+
+
+def _w(orders=None, cart=None, unread=0):
+    return {
+        "task_id": "MT", "seed": 0, "step": 1, "finished": False,
+        "shop": {"cart": {"items": cart or [], "applied_promo": None},
+                 "orders": orders or {}},
+        "mail": {"inbox": {}, "sent": {}, "unread_count": unread},
+        "events": [],
+    }
+
+
+def _seed_initial(db, attempt, world):
+    from app import checkpoints
+    cp = checkpoints.capture(db, attempt_id=attempt.id, world=world, step_clock=0)
+    attempt.initial_checkpoint_id = cp.id
+    db.commit()
+    return cp
+
+
+def test_a_step_records_the_state_change_its_action_produced(db_session, attempt):
+    """The whole point: the trajectory says what the world DID, not where the
+    mouse was."""
+    base = _settled_base()
+    empty = _w()
+    ordered = _w(orders={"ORD_7": {"id": "ORD_7", "status": "placed", "total": 49.99}})
+    _seed_initial(db_session, attempt, empty)
+
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+
+    made = materialize.materialize(db_session, attempt, world=_FakeWorld(ordered))
+    assert len(made) == 1
+    d = made[0].world_delta
+    assert d and d["changed"] is True
+    assert d["apps"] == ["shop"]
+    add = next(c for c in d["changes"] if c["op"] == "add")
+    assert add["id"] == "ORD_7" and add["path"] == "shop.orders"
+    # and it is attributed to exactly this step
+    assert made[0].delta_span["observed"] == "step"
+    assert made[0].delta_span["stepIds"] == [str(made[0].id)]
+
+
+def test_a_batch_that_changed_nothing_writes_no_new_checkpoint(db_session, attempt):
+    """Exploration must not cost a full world blob per batch — and the annotator
+    should still be told their click did nothing."""
+    from sqlalchemy import func, select
+
+    base = _settled_base()
+    world = _w()
+    _seed_initial(db_session, attempt, world)
+    before_n = db_session.scalar(
+        select(func.count()).select_from(models.EnvironmentCheckpoint)
+        .where(models.EnvironmentCheckpoint.attempt_id == attempt.id))
+
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt, world=_FakeWorld(world))
+
+    after_n = db_session.scalar(
+        select(func.count()).select_from(models.EnvironmentCheckpoint)
+        .where(models.EnvironmentCheckpoint.attempt_id == attempt.id))
+    assert after_n == before_n, "an unchanged world must not be checkpointed again"
+    assert made[-1].world_delta["changed"] is False
+    assert made[-1].after_checkpoint_id is None
+
+
+def test_a_delta_names_every_step_it_covers(db_session, attempt):
+    """Two actions folded in one batch share ONE observation. Attributing the
+    change to whichever was last would be a lie, so the span names both and only
+    the observed step carries the delta."""
+    base = _settled_base()
+    _seed_initial(db_session, attempt, _w())
+
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 20, BTN, nx=0.5, ny=0.5, clicks=1)
+    _ev(db_session, attempt, 3, "mouseDown", base + 40, BOX, nx=0.3, ny=0.3)
+    _ev(db_session, attempt, 4, "mouseUp", base + 60, BOX, nx=0.3, ny=0.3, clicks=1)
+    db_session.commit()
+
+    made = materialize.materialize(
+        db_session, attempt,
+        world=_FakeWorld(_w(orders={"O1": {"id": "O1", "status": "placed"}})))
+    assert len(made) == 2
+    ids = [str(s.id) for s in made]
+    for s in made:
+        assert s.delta_span["stepIds"] == ids
+        assert s.delta_span["observed"] == "window"
+    assert made[0].world_delta is None, "an unobserved step must not claim a delta"
+    assert made[-1].world_delta["changed"] is True
+
+
+def test_the_first_batch_diffs_against_the_seeded_world(db_session, attempt):
+    """Not against nothing — otherwise step 1 reports the entire world as added."""
+    base = _settled_base()
+    seeded = _w(orders={"OLD": {"id": "OLD", "status": "delivered"}})
+    _seed_initial(db_session, attempt, seeded)
+
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+    after = _w(orders={"OLD": {"id": "OLD", "status": "delivered"},
+                       "NEW": {"id": "NEW", "status": "placed"}})
+    made = materialize.materialize(db_session, attempt, world=_FakeWorld(after))
+
+    d = made[-1].world_delta
+    adds = [c for c in d["changes"] if c["op"] == "add"]
+    assert [c["id"] for c in adds] == ["NEW"], "the pre-existing order is not a change"
+
+
+def test_a_settled_click_folds_without_waiting_out_the_edit_window(db_session, attempt):
+    """A click is complete the moment it acks. Withholding it for SETTLE_MS was
+    what pushed several actions into one observation window."""
+    now = int(time.time() * 1000)
+    _ev(db_session, attempt, 1, "mouseDown", now - 50, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", now - 20, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt, now_ms=now)
+    assert [s.action_type for s in made] == ["click"]
+
+
+def test_a_trailing_unpaired_press_is_still_withheld(db_session, attempt):
+    """The guard on the above: folding a lone mouseDown makes it
+    `press_incomplete` and orphans its mouseUp in the next batch."""
+    now = int(time.time() * 1000)
+    _ev(db_session, attempt, 1, "mouseDown", now - 50, BTN, nx=0.5, ny=0.5)
+    db_session.commit()
+    assert materialize.materialize(db_session, attempt, now_ms=now) == []

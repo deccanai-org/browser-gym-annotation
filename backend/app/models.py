@@ -142,6 +142,10 @@ class ReviewSession(Base):
     final_checkpoint_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("environment_checkpoint.id", ondelete="SET NULL", use_alter=True,
                    name="fk_review_session_final_checkpoint"), nullable=True)
+    # What this whole attempt changed, initial → final (`world-delta/1`). The
+    # per-attempt DB diff a verifier validates against, computed from the two
+    # checkpoints above so it always describes the same worlds they name.
+    world_summary: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
     updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
 
@@ -207,6 +211,19 @@ class TrajectoryStep(Base):
     after_checkpoint_id: Mapped[UUID | None] = _fk("environment_checkpoint.id", nullable=True, ondelete="SET NULL")
     # Per-step world (previously only inside Trajectory.raw; branch steps had none).
     world_after: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    # What this step CHANGED, semantically — `world-delta/1` (see app/worlddiff.py).
+    # `world_after` is the whole world at one observation; this is the difference
+    # from the previous one, which is the thing an SFT target actually learns to
+    # produce ("submitting an order"), and the thing a DB-diff verifier reads.
+    #
+    # NULL means NOT OBSERVED, never "nothing changed" — the gym world can only be
+    # read once per fold batch, so a step sharing a batch with a later one has no
+    # delta of its own. `delta_span` names the window it belongs to, so the record
+    # never attributes a change to whichever action happened to be last.
+    # none_as_null=True for the same reason Trajectory.raw needs it: a plain JSON
+    # column stores None as the JSON value `null`, so `IS NOT NULL` would match.
+    world_delta: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    delta_span: Mapped[dict] = mapped_column(JSON, default=dict)  # {"stepIds":[…],"observed":"step"|"window"}
     marks_artifact_id: Mapped[UUID | None] = _fk("artifact.id", nullable=True, ondelete="SET NULL")
     # Provenance of intent — never synthesized after the fact.
     human_intent: Mapped[str] = mapped_column(Text, default="")      # the annotator's own "why"

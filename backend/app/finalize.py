@@ -56,12 +56,23 @@ def actions_of(db: Session, version: models.TrajectoryVersion) -> list[dict]:
     return out
 
 
+# Kinds that address no page element at all, so a missing locator is not a defect
+# in them. A tab switch names an APP, not a node — without it here, every
+# multi-app trajectory (the whole point of the cross-app breakers) would be
+# refused at the last gate for "this step has no semantic locator".
+#
+# Deliberately NARROWER than restore._LOCATOR_FREE: a fork REBUILD only needs the
+# action to run, but a SHIPPED trajectory must carry a locator for everything a
+# consumer could later inspect, so `scroll`/`wait` stay out of this set.
+_NO_LOCATOR = frozenset({"navigate", "press", "switch_tab", "open_tab", "close_tab"})
+
+
 def replayable(actions: list[dict]) -> tuple[bool, list[int]]:
-    """Which actions carry enough to be re-executed. `navigate` needs only a URL;
-    everything else needs a locator."""
+    """Which actions carry enough to be re-executed. `navigate` needs only a URL,
+    a tab switch only an app; everything else needs a locator."""
     missing = [
         i for i, a in enumerate(actions)
-        if a["kind"] not in ("navigate", "press") and not a["locator"]
+        if a["kind"] not in _NO_LOCATOR and not a["locator"]
     ]
     return (not missing), missing
 

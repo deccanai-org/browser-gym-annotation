@@ -35,7 +35,7 @@ from app import models
 _VOLATILE = {"flash_messages", "action_log"}
 
 
-def _normalize(value: Any) -> Any:
+def normalize_world(value: Any) -> Any:
     """Strip volatile keys and canonicalize numbers.
 
     The number rule is load-bearing, not cosmetic. A world stored in a JSON column
@@ -48,13 +48,20 @@ def _normalize(value: Any) -> Any:
     a changed amount changes the number, not just its type.
     """
     if isinstance(value, dict):
-        return {k: _normalize(v) for k, v in sorted(value.items()) if k not in _VOLATILE}
+        return {k: normalize_world(v) for k, v in sorted(value.items()) if k not in _VOLATILE}
     if isinstance(value, list):
-        return [_normalize(v) for v in value]
+        return [normalize_world(v) for v in value]
     # bool is a subclass of int; leave it alone or True would hash as 1.
     if isinstance(value, float) and not isinstance(value, bool) and value.is_integer():
         return int(value)
     return value
+
+
+# Public under both names: `worlddiff` normalizes through the SAME function the
+# hash uses, so "this step changed something" and "the world hash moved" can
+# never disagree. A second copy of the volatile-key rule is exactly how the two
+# would drift apart.
+_normalize = normalize_world
 
 
 def hash_world(world: dict | None) -> str:
@@ -62,7 +69,7 @@ def hash_world(world: dict | None) -> str:
     missing capture is never mistaken for a matching one."""
     if not world:
         return ""
-    payload = json.dumps(_normalize(world), sort_keys=True, separators=(",", ":"), default=str)
+    payload = json.dumps(normalize_world(world), sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

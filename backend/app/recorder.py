@@ -134,6 +134,18 @@ DRAG_PX = 0.012          # ~15px on a 1280-wide viewport, in normalized units
 SCROLL_COALESCE_MS = 600
 SCROLL_MIN_DY = 40       # below this a "scroll" is trackpad jitter
 
+# Scroll is viewport motion, not a state change. The trajectory records what the
+# annotator did to the WORLD, and a scroll changes nothing a verifier can read
+# and nothing an SFT target should learn to imitate — it also varies with screen
+# size and zoom, so it is not even reproducible across annotators. Every browser-
+# gym paper surveyed treats scrolling as a byproduct of navigation and none of
+# them verify against it.
+#
+# The RAW InteractionEvent rows are untouched by this: only the promotion to a
+# STEP is suppressed, so the audit trail survives and flipping this back plus
+# re-materializing from seq 0 on a fresh version restores the scroll steps.
+SCROLL_IS_A_STEP = False
+
 # Keys that only EDIT the value of the field being typed into, so they belong
 # inside a fill rather than splitting it. The final value comes from the page, so
 # their effect is already accounted for.
@@ -300,6 +312,13 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
             # One flick of a wheel is ~20 ticks and ONE human intent ("scroll down
             # to the reviews"); 20 steps would drown the trajectory.
             if abs(dy) < SCROLL_MIN_DY and abs(dx) < SCROLL_MIN_DY:
+                continue
+            if not SCROLL_IS_A_STEP:
+                # Consumed, not emitted. The events are still folded (so the
+                # watermark advances and they are never re-read) — they simply do
+                # not become a step. Gated HERE rather than in materialize because
+                # `coalesce` also backs GET /sessions/{id}/actions and the legacy
+                # commit path, so one gate covers every downstream reader.
                 continue
             last = group[-1]
             out.append({**last, "kind": "scroll",

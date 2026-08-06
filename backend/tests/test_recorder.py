@@ -30,7 +30,16 @@ def test_events_are_appended_with_a_monotonic_sequence(db_session, attempt):
         payload = {"dy": 300} if k == "scroll" else None
         recorder.record_event(db_session, attempt_id=attempt.id, kind=k, payload=payload)
     db_session.commit()
-    seqs = [e["seq"] for e in recorder.candidate_actions(db_session, attempt.id)]
+    # Raw events, not folded actions: scroll no longer becomes a step, but every
+    # interaction is still appended to the audit log in order.
+    from sqlalchemy import select as _select
+
+    from app import models as _m
+    seqs = [e.seq for e in db_session.scalars(
+        _select(_m.InteractionEvent)
+        .where(_m.InteractionEvent.attempt_id == attempt.id)
+        .order_by(_m.InteractionEvent.seq)
+    ).all()]
     assert seqs == sorted(seqs) and len(set(seqs)) == 3
 
 
@@ -137,14 +146,41 @@ def test_a_redacted_keystroke_stays_redacted_after_coalescing():
     assert out[0]["needsValue"] is True
 
 
-def test_automatic_scrolls_are_dropped_but_user_scrolls_are_kept():
-    """A page scrolling itself is not a human action; replaying it fights the page."""
+def test_a_scroll_never_becomes_a_step():
+    """Scroll is viewport motion, not a state change: it changes nothing a
+    verifier reads, and it varies with screen size and zoom, so it is not
+    reproducible across annotators. The raw events survive for audit (see
+    test_a_gated_scroll_still_advances_the_fold below); only the promotion to a
+    step is suppressed."""
     out = recorder.coalesce([
         {"seq": 1, "kind": "scroll", "payload": {"auto": True, "dy": 300}},
         {"seq": 2, "kind": "scroll", "payload": {"dy": 120}},
     ])
-    assert [a["kind"] for a in out] == ["scroll"]
-    assert out[0]["sources"] == [2]
+    assert out == []
+
+
+def test_a_gated_scroll_still_advances_the_fold(db_session, attempt):
+    """The scroll events must be CONSUMED, not skipped: if they were left
+    unfolded the materialize watermark would never pass them and every later
+    batch would re-read them forever."""
+    for i in range(3):
+        recorder.record_event(db_session, attempt_id=attempt.id, kind="scroll",
+                              payload={"dy": 300, "t": 1000 + i})
+    recorder.record_event(db_session, attempt_id=attempt.id, kind="navigate",
+                          payload={"url": "/cart"})
+    db_session.commit()
+    # every raw event is still in the append-only log...
+    from sqlalchemy import select as _select
+
+    from app import models as _m
+    raw = db_session.scalars(
+        _select(_m.InteractionEvent)
+        .where(_m.InteractionEvent.attempt_id == attempt.id)
+        .order_by(_m.InteractionEvent.seq)
+    ).all()
+    assert [e.kind for e in raw] == ["scroll", "scroll", "scroll", "navigate"]
+    # ...but only the navigate becomes an action
+    assert [a["kind"] for a in recorder.candidate_actions(db_session, attempt.id)] == ["navigate"]
 
 
 def test_navigation_survives_coalescing_untouched():
@@ -258,15 +294,18 @@ def test_a_double_click_is_one_action_not_two():
     assert out[0]["kind"] == "dblclick"
 
 
-def test_one_flick_of_the_wheel_is_one_scroll_and_jitter_is_dropped():
-    """20 wheel ticks are ONE human intent ('scroll to the reviews'); 20 steps
-    would drown the trajectory. Sub-threshold movement is trackpad noise."""
+def test_a_wheel_flick_is_consumed_and_the_next_action_still_folds():
+    """20 wheel ticks used to coalesce into one scroll step. They now produce no
+    step at all — but the click that follows must still fold normally, which is
+    what proves the gate consumes rather than derails."""
     t = {"targetKey": "list"}
     flick = [_k(i, "scroll", i * 20, t, dy=30, nx=0.5, ny=0.5) for i in range(1, 21)]
-    out = recorder.coalesce(flick)
-    assert len(out) == 1 and out[0]["payload"]["dy"] == 600
+    assert recorder.coalesce(flick) == []
     jitter = [_k(1, "scroll", 0, t, dy=5, nx=0.5, ny=0.5), _k(2, "scroll", 50, t, dy=-3, nx=0.5, ny=0.5)]
     assert recorder.coalesce(jitter) == []
+    after = flick + [_k(21, "mouseDown", 500, t, nx=0.5, ny=0.5),
+                     _k(22, "mouseUp", 530, t, nx=0.5, ny=0.5, clicks=1)]
+    assert [a["kind"] for a in recorder.coalesce(after)] == ["click"]
 
 
 def test_two_unnamed_targets_are_not_the_same_element():

@@ -33,7 +33,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import checkpoints, models, recorder, versions
+from app import checkpoints, models, recorder, versions, worlddiff
 
 # An event newer than this may still be part of an edit in progress. Comfortably
 # above the 1.5s keystroke-coalescing window, so a slow typist's word is not split
@@ -58,11 +58,25 @@ def _events(db: Session, attempt_id: UUID, after_seq: int) -> list[models.Intera
     ))
 
 
+# Kinds whose action may still be IN PROGRESS, so a fresh one at the tail must be
+# withheld. An edit is the real case: more keystrokes are probably coming, and
+# folding now would split one `fill` into two. A click, a navigation or a tab
+# switch is COMPLETE the moment it acks — waiting SETTLE_MS on those was what
+# forced several actions into one observation window and made a per-step state
+# delta unobservable. A trailing `mouseDown` still waits: fold it alone and it
+# becomes `press_incomplete` with its `mouseUp` orphaned in the next batch.
+_OPEN_TAIL = {"keyChar", "keyPress", "key", "paste", "type", "fill",
+              "mouseDown", "mousePressed"}
+
+
 def _settled(rows: list[models.InteractionEvent], now_ms: int) -> list[models.InteractionEvent]:
     """The prefix that is safe to fold — see "withhold the open tail" above."""
     cut = len(rows)
     while cut > 0:
-        t = int((rows[cut - 1].payload or {}).get("t") or 0)
+        row = rows[cut - 1]
+        if row.kind not in _OPEN_TAIL:
+            break
+        t = int((row.payload or {}).get("t") or 0)
         if t and now_ms - t < SETTLE_MS:
             cut -= 1
             continue
@@ -87,6 +101,11 @@ def _describe(action: dict) -> str:
         return f"fill {name} with {shown}".strip()
     if kind == "navigate":
         return f"navigate to {payload.get('url', '')}".strip()
+    if kind == "switch_tab":
+        # Without this a cross-app move renders as a bare "switch_tab", which is
+        # the one step where WHICH app matters most.
+        where = payload.get("app") or tgt.get("app") or payload.get("url") or "another app"
+        return f"switch to {where}"
     if kind == "scroll":
         dy = payload.get("dy", 0)
         return f"scroll {'down' if (dy or 0) > 0 else 'up'}" + (f" in {name}" if name else "")
@@ -108,20 +127,31 @@ def should_materialize(attempt: models.ReviewSession) -> bool:
     return getattr(attempt, "mode", "") == "human_do"
 
 
-def _chain_checkpoints(db: Session, attempt: models.ReviewSession,
+def _chain_and_observe(db: Session, attempt: models.ReviewSession,
                        version: models.TrajectoryVersion,
                        made: list[models.TrajectoryStep], world) -> None:
-    """Give the new steps a checkpoint chain, and the last one the world.
+    """Give the new steps a checkpoint chain, and record WHAT THEY CHANGED.
 
     `before` of each step is the `after` of the one before it, rooted at the
     attempt's seeded initial checkpoint. Without that chain a later fork on a
     human step has no state to restore to, and the replay gate silently degrades
     into "replay on top of whatever is in the browser right now".
 
-    Only ONE world is read per batch, and it is attached to the LAST step —
-    reading per step would put a gym round-trip between the annotator and every
-    click. Intermediate steps therefore carry no `after` checkpoint, which is the
-    honest thing to record: we did not observe one. Nothing fabricates a hash.
+    Only ONE world is read per batch — reading per step would put a gym
+    round-trip between the annotator and every click. So the observation belongs
+    to the batch, and `delta_span` says so: every step names the window, and only
+    the step the world was read after carries the delta. A step with
+    `world_delta = None` was not observed; that is different from "changed
+    nothing", and conflating the two would teach a model that half its actions
+    were no-ops.
+
+    The delta is computed against the world the batch STARTED from (the cursor
+    checkpoint), so the first batch of an attempt diffs against the seeded world
+    rather than reporting the entire world as newly added.
+
+    Hash-first: when the world did not move we record the unchanged delta and
+    capture NO checkpoint. That is a net reduction in write volume — every
+    exploration batch used to write a full world blob.
     """
     if not made:
         return
@@ -136,6 +166,13 @@ def _chain_checkpoints(db: Session, attempt: models.ReviewSession,
     for st in made:
         st.before_checkpoint_id = cursor
 
+    # Name the observation window on every step in the batch, whether or not the
+    # world can be read — the grouping is a fact about how they were folded.
+    span = {"stepIds": [str(s.id) for s in made],
+            "observed": "step" if len(made) == 1 else "window"}
+    for st in made:
+        st.delta_span = span
+
     if world is None:
         return
     try:
@@ -144,10 +181,20 @@ def _chain_checkpoints(db: Session, attempt: models.ReviewSession,
         w = None
     if not w:
         return
+
+    prev_hash, prev_world = worlddiff.previous_world(db, attempt, cursor)
+    if prev_hash and prev_hash == checkpoints.hash_world(w):
+        # Nothing moved. Record that positively — "your click did nothing" is
+        # useful to an annotator — but do not write another identical world.
+        made[-1].world_delta = worlddiff.diff_worlds(w, w)
+        db.flush()
+        return
+
     cp = checkpoints.capture(db, attempt_id=attempt.id, world=w,
                              step_clock=int(w.get("step") or 0) if isinstance(w, dict) else 0)
     made[-1].after_checkpoint_id = cp.id
     made[-1].world_after = w
+    made[-1].world_delta = worlddiff.diff_worlds(prev_world, w)
     db.flush()
 
 
@@ -232,7 +279,7 @@ def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | Non
                 ev.committed_step_id = st.id
         made.append(st)
 
-    _chain_checkpoints(db, attempt, version, made, world)
+    _chain_and_observe(db, attempt, version, made, world)
 
     # SAME transaction as the steps: that is the idempotency.
     version.materialized_through_seq = consumed
