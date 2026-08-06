@@ -2,7 +2,9 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { ACTION_COLOR, Button, Icon, t, tint, weight } from "../../ds";
 import {
   type ShipBlocker,
+  applyAutogenSuite,
   autogenVerifiers,
+  fetchCachedAutogenSuite,
   driveForwardGym,
   fetchGymStatus,
   fetchGymTasks,
@@ -21,8 +23,9 @@ import {
   fetchSessionHistory,
 } from "../../lib/api";
 import { continuingAfter, FORK_COPY, headOf, rejecting, type VersionNode } from "../../lib/versionsApi";
-import type {AutogenResult, HistoryRound} from "../../lib/api";
+import type { AutogenResult, CachedAutogenSuite, HistoryRound, VerifierPayload } from "../../lib/api";
 import type { ReviewData, TaskListItem, Verifier } from "../../lib/types";
+import type { VerifierLevel } from "../../ds";
 import {
   canSubmit,
   makeInitialState,
@@ -707,6 +710,42 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   const [driveError, setDriveError] = useState<string | null>(null);
   const [autogen, setAutogen] = useState<null | "queued" | "running">(null);
   const [autogenResult, setAutogenResult] = useState<AutogenResult | null>(null);
+  const [usingSuite, setUsingSuite] = useState(false);
+  // A suite somebody already generated for this task. Offered so nobody sits
+  // through the oracle loop again for a breaker it has already been run on.
+  const [cachedSuite, setCachedSuite] = useState<CachedAutogenSuite | null>(null);
+
+  useEffect(() => {
+    const id = data.task?.id;
+    if (!id) { setCachedSuite(null); return; }
+    let live = true;
+    fetchCachedAutogenSuite(id).then((r) => { if (live) setCachedSuite(r); });
+    return () => { live = false; };
+  }, [data.task?.id]);
+
+  /** Copy a generated suite onto this attempt. The server writes it as a real
+   *  suite version; this only brings the screen into line with what was
+   *  persisted. */
+  const useGeneratedSuite = async () => {
+    if (!sessionId) return;
+    setUsingSuite(true);
+    try {
+      const out = await applyAutogenSuite(sessionId);
+      dispatch({
+        t: "hydrateSuite",
+        verifiers: out.verifiers.map((v: VerifierPayload) => ({
+          id: v.id, level: v.level as VerifierLevel, assertion: v.assertion,
+          code: v.code, check: (v.check as Record<string, unknown>) ?? undefined,
+          failsUntilCorrected: false, placeholder: false, addedByHuman: false,
+        })),
+      });
+      setAutogenResult(null);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUsingSuite(false);
+    }
+  };
   const [editingState, setEditingState] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   // The LIVE resume context. Each drive-forward returns the world it ended in, and
@@ -1195,7 +1234,29 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
         </div>
       )}
 
-      {autogenResult && <AutogenPanel result={autogenResult} onClose={() => setAutogenResult(null)} />}
+      {/* A suite already generated for this task by someone else. Offering it
+          beats making this annotator sit through the whole oracle loop again. */}
+      {cachedSuite && sessionId && !autogenResult && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+                      padding: "9px 12px", borderRadius: t.radiusLg, background: tint(t.primary6, 7),
+                      fontSize: "0.78rem", color: t.n1 }}>
+          <span>
+            A {cachedSuite.oracle ? "validated" : "generated (not oracle-valid)"} suite of{" "}
+            {cachedSuite.checks.length} check{cachedSuite.checks.length === 1 ? "" : "s"} already exists for this task.
+          </span>
+          <Button variant="primary" disabled={usingSuite} onClick={() => void useGeneratedSuite()}>
+            {usingSuite ? "Adding…" : "Use it"}
+          </Button>
+        </div>
+      )}
+      {autogenResult && (
+        <AutogenPanel
+          result={autogenResult}
+          onClose={() => setAutogenResult(null)}
+          onUse={sessionId ? () => void useGeneratedSuite() : undefined}
+          using={usingSuite}
+        />
+      )}
       {showHistory && sessionId && <IterationHistory sessionId={sessionId} onClose={() => setShowHistory(false)} />}
       {editingState && data.source === "gym" && data.gymResume && (
         <StateEditor
@@ -1363,7 +1424,15 @@ function StateEditor({ world, onClose, onApply }: { world: Record<string, unknow
   );
 }
 
-function AutogenPanel({ result, onClose }: { result: AutogenResult; onClose: () => void }) {
+function AutogenPanel({ result, onClose, onUse, using }: {
+  result: AutogenResult;
+  onClose: () => void;
+  /** Copy this suite onto the attempt. Without it the loop's output was
+   *  displayed and discarded — reaching a reward from it meant retyping every
+   *  check by hand. */
+  onUse?: () => void;
+  using?: boolean;
+}) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalA11y(onClose, dialogRef);
   const ok = result.oracle;
@@ -1399,6 +1468,17 @@ function AutogenPanel({ result, onClose }: { result: AutogenResult; onClose: () 
             );
           })}
         </div>
+        {onUse && (
+          <div style={{ padding: "12px 20px", borderTop: `1px solid ${t.n7}`, display: "flex",
+                        alignItems: "center", gap: 10 }}>
+            <Button variant="primary" disabled={using} onClick={onUse}>
+              {using ? "Adding…" : "Use this suite"}
+            </Button>
+            <span style={{ fontSize: "0.74rem", color: t.n3 }}>
+              Added as this attempt&rsquo;s suite, marked as model-authored.
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

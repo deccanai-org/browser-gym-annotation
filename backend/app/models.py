@@ -246,6 +246,41 @@ class TrajectoryStep(Base):
     trajectory: Mapped[Trajectory] = relationship(back_populates="steps")
 
 
+class AutogenSuite(Base):
+    """A generated verifier suite, cached per (task, seed).
+
+    The oracle loop is expensive — it resets the gym, runs the oracle agent, then
+    iterates a reward model against the initial-vs-golden worlds until the suite
+    scores 0 on one and 1 on the other. It used to return that suite as JSON and
+    keep nothing, so every annotator on the same breaker paid for it again and
+    the result reached no attempt at all.
+
+    Keyed on (task, seed) rather than on an attempt because that is what it is a
+    property OF: the same task at the same seed has the same initial and golden
+    worlds, so the suite that discriminates them is the same suite. The second
+    annotator gets it for free.
+
+    Deliberately NOT stored in `Task.meta` — `seed.py` rewrites that column on
+    every catalog reseed, so a generated artifact parked there is silently lost.
+    """
+
+    __tablename__ = "autogen_suite"
+    __table_args__ = (UniqueConstraint("task_id", "seed", name="uq_autogen_suite_task_seed"),)
+    id: Mapped[UUID] = _pk()
+    task_id: Mapped[UUID] = _fk("task.id")
+    seed: Mapped[int] = mapped_column(default=0)
+    # Whether the suite PASSED the oracle gate (0 on initial, 1 on golden). A
+    # suite that failed it is still worth keeping — it is a starting point a human
+    # can fix — but it must never be presented as validated.
+    oracle: Mapped[bool] = mapped_column(default=False)
+    brief: Mapped[str] = mapped_column(Text, default="")
+    checks: Mapped[list | dict] = mapped_column(JSON, default=list)   # [{id, level, assertion, code, check}]
+    gate: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    iterations: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
+
+
 class VerifierSuite(Base):
     __tablename__ = "verifier_suite"
     # A suite version is immutable and unique per session — concurrent saves must

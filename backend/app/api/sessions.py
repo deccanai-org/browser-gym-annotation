@@ -757,49 +757,64 @@ def rerun_gym(session_id: UUID, body: RerunGymBody, current: Annotator = Depends
     return {"fromStep": body.fromStep, "mode": br.mode, "steps": body.steps}
 
 
+def write_suite(db: Session, session_id: UUID, verifiers: list) -> VerifierSuite:
+    """Persist a list of verifiers as the next immutable suite version.
+
+    Extracted so the autogen path writes suites the same way the annotator's own
+    save does — same version bump, same concurrency retry, same fields. A second
+    hand-rolled writer would drift, and the two would disagree about what a suite
+    version means.
+
+    `verifiers` items may be Pydantic models (the API body) or plain dicts (a
+    cached generated suite); both are read through the same accessor.
+    """
+    def g(v, name, default=None):
+        return getattr(v, name, None) if not isinstance(v, dict) else v.get(name, default)
+
+    ids = [str(g(v, "id") or "") for v in verifiers]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise HTTPException(status_code=422, detail=f"duplicate verifier ids: {dupes}")
+
+    for _attempt in range(5):
+        prev = _latest_suite(db, session_id)
+        version = (prev.version + 1) if prev else 1
+        try:
+            suite = VerifierSuite(session_id=session_id, version=version)
+            db.add(suite)
+            db.flush()
+            for v in verifiers:
+                db.add(Verifier(
+                    suite_id=suite.id,
+                    ext_id=str(g(v, "id") or ""),
+                    level=str(g(v, "level") or "process"),
+                    assertion=str(g(v, "assertion") or ""),
+                    code=str(g(v, "code") or ""),
+                    check_ir=g(v, "check") or {},
+                    fails_until_corrected=bool(g(v, "failsUntilCorrected", False)),
+                    placeholder=bool(g(v, "placeholder", False)),
+                    added_by_human=bool(g(v, "addedByHuman", False)),
+                    gym_result=str(g(v, "gymResult") or ""),
+                ))
+            db.flush()
+            return suite
+        except IntegrityError:
+            db.rollback()  # a concurrent save took this version — recompute and retry
+    raise HTTPException(status_code=409, detail="concurrent suite save — please retry")
+
+
 @router.put("/sessions/{session_id}/suite")
 def save_suite(session_id: UUID, body: SaveSuiteBody, current: Annotator = Depends(current_annotator), db: Session = Depends(get_db)) -> dict:
     """Persist the current verifier suite as a new immutable version."""
     s = _owned_session(db, session_id, current, lock=True)
     _assert_not_submitted(s)
-    # Reward results are keyed by the authoring id — a duplicate id would let one
-    # verifier's verdict overwrite another's, masking a failing/placeholder check.
-    ids = [v.id for v in body.verifiers]
-    dupes = sorted({i for i in ids if ids.count(i) > 1})
-    if dupes:
-        raise HTTPException(status_code=422, detail=f"duplicate verifier ids: {dupes}")
-    # A unique (session_id, version) means two concurrent saves can't collide on a
-    # version. The violation surfaces at flush() (the INSERT), so the whole attempt
-    # — recompute version, insert, commit — must sit inside the retry.
-    for _attempt in range(5):
-        prev = _latest_suite(db, s.id)
-        version = (prev.version + 1) if prev else 1
-        try:
-            suite = VerifierSuite(session_id=s.id, version=version)
-            db.add(suite)
-            db.flush()
-            for v in body.verifiers:
-                db.add(
-                    Verifier(
-                        suite_id=suite.id,
-                        ext_id=v.id,
-                        level=v.level,
-                        assertion=v.assertion,
-                        code=v.code,
-                        check_ir=v.check or {},  # persist the executable IR so reward is server-recomputable
-                        fails_until_corrected=v.failsUntilCorrected,
-                        placeholder=v.placeholder,
-                        added_by_human=v.addedByHuman,
-                        gym_result=v.gymResult or "",  # carry the real milestone verdict onto the exported sample
-                    )
-                )
-            _audit(db, "", "suite.save", str(suite.id), {"version": version, "count": len(body.verifiers)}, session_id=s.id)
-            db.commit()
-            break
-        except IntegrityError:
-            db.rollback()  # a concurrent save took this version — recompute and retry
-    else:
-        raise HTTPException(status_code=409, detail="concurrent suite save — please retry")
+    # One writer for both paths (see write_suite): the annotator's own save and
+    # the generated-suite import must produce the same rows, the same version
+    # bump and the same concurrency behaviour.
+    suite = write_suite(db, s.id, body.verifiers)
+    _audit(db, "", "suite.save", str(suite.id),
+           {"version": suite.version, "count": len(body.verifiers)}, session_id=s.id)
+    db.commit()
     return _snapshot(db, s)
 
 

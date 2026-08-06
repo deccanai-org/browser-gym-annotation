@@ -524,6 +524,40 @@ def _gate_policies(brief: str, golden_trace: list[dict], actions: list[dict]) ->
 
 
 @_gym_job
+def _write_autogen_suite(db: Session, task_id: str, seed: int, payload: dict) -> None:
+    """Upsert the generated suite for (task, seed).
+
+    Upsert rather than insert: regenerating is how a human improves a suite that
+    failed its gate, and a second row would leave two answers to "what is the
+    suite for this task" with nothing to choose between them.
+
+    Takes the session rather than opening one, so it is callable from a test the
+    same way it is from the job — the same reason `_persist_gym_review` does.
+    """
+    task = db.scalar(select(models.Task).where(models.Task.external_id == task_id))
+    if task is None:
+        return
+    row = db.scalar(
+        select(models.AutogenSuite)
+        .where(models.AutogenSuite.task_id == task.id, models.AutogenSuite.seed == seed)
+    )
+    if row is None:
+        row = models.AutogenSuite(task_id=task.id, seed=seed)
+        db.add(row)
+    row.oracle = bool(payload.get("oracle"))
+    row.brief = str(payload.get("brief") or "")
+    row.checks = payload.get("checks") or []
+    row.gate = payload.get("gate")
+    row.iterations = int(payload.get("iterations") or 0)
+    db.commit()
+
+
+def _cache_autogen_suite(task_id: str, seed: int, payload: dict) -> None:
+    """The job's entry point — opens its own session (it runs on a worker thread)."""
+    with SessionLocal() as db:
+        _write_autogen_suite(db, task_id, seed, payload)
+
+
 def _autogen_verifiers_job(task_id: str, seed: int, iterations: int) -> dict:
     """The autonomous ORACLE LOOP (Kashyap's reward-agent design) on our stack:
     capture the INITIAL world (reset) and the GOLDEN world (oracle run), then have
@@ -582,12 +616,27 @@ def _autogen_verifiers_job(task_id: str, seed: int, iterations: int) -> dict:
     actions = [{"action": s.get("action_kind"), "args": s.get("action_args")} for s in steps]
     policy_checks = _gate_policies(brief, golden_trace, actions)
     validated = [p for p in policy_checks if p["discriminates"]]
+    checks = (suite or []) + validated
+
+    # CACHE it. This loop costs an oracle run plus several model calls, and the
+    # suite is a property of (task, seed) — the same two worlds yield the same
+    # discriminating checks — so the next annotator on this breaker gets it for
+    # free instead of waiting through the whole thing again. Best-effort: a
+    # caching failure must not lose a suite the caller is about to receive.
+    if checks:
+        with contextlib.suppress(Exception):
+            _cache_autogen_suite(task_id, seed, {
+                "oracle": bool(gate and gate.get("oracle")),
+                "brief": brief, "checks": checks, "gate": gate,
+                "iterations": len(history),
+            })
+
     return {
         "oracle": bool(gate and gate.get("oracle")),
         "iterations": len(history),
         "brief": brief,
         # Only gate-passing state checks + discriminating policies go in the suite.
-        "suite": (suite or []) + validated,
+        "suite": checks,
         "stateChecks": len(suite or []),
         "policyChecks": len(validated),
         "policyProposed": len(policy_checks),
@@ -681,6 +730,31 @@ def gym_autogen_verifiers(body: AutogenBody) -> dict:
     calls) — runs as a job; poll GET /api/gym/jobs/{id}."""
     job = jobs.store.submit("autogen-verifiers", _autogen_verifiers_job, body.taskId, body.seed, body.iterations)
     return {"jobId": job.id, "status": job.status}
+
+
+@router.get("/tasks/{task_id:path}/verifier-suite")
+def gym_cached_verifier_suite(task_id: str, seed: int = 0, db: Session = Depends(get_db)) -> dict:
+    """The generated suite already validated for this (task, seed), if any.
+
+    Read on the review screen so an annotator is offered an existing suite
+    instead of being made to sit through the oracle loop again for a task
+    somebody else already generated one for.
+    """
+    task = db.scalar(select(models.Task).where(models.Task.external_id == task_id))
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    row = db.scalar(
+        select(models.AutogenSuite)
+        .where(models.AutogenSuite.task_id == task.id, models.AutogenSuite.seed == seed)
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no generated suite cached for this task yet")
+    return {
+        "taskId": task_id, "seed": row.seed, "oracle": row.oracle,
+        "brief": row.brief, "checks": row.checks or [],
+        "iterations": row.iterations,
+        "generatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 @router.post("/resume-run")

@@ -24,6 +24,7 @@ from app import (
 )
 from app import gym_review
 from app.api import live as live_api
+from app.api import sessions as sessions_api
 from app.api.sessions import _assert_not_submitted, _latest_suite, _owned_session
 from app.auth import current_annotator
 from app.config import settings
@@ -281,6 +282,56 @@ class GymScorer:
             passed = bool(verdict.get("success"))
             results = {v.ext_id: ("pass" if passed else "fail") for v in suite.verifiers}
         return (1 if verdict.get("success") else 0), results
+
+
+@router.post("/sessions/{session_id}/suite/from-autogen")
+def suite_from_autogen(
+    session_id: UUID,
+    current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db),
+) -> dict:
+    """Adopt the generated suite for this attempt's task.
+
+    The oracle loop produced a validated suite and handed it back as JSON, where
+    it stopped: nothing wrote it to an attempt, so reaching a reward from it meant
+    retyping every check by hand. This copies the cached one onto the attempt as a
+    real suite version.
+
+    Marked `addedByHuman=False`, so an exported sample says plainly which checks a
+    person wrote and which a model did — that provenance is the difference between
+    human-authored ground truth and a model grading itself.
+    """
+    s = _owned_session(db, session_id, current)
+    _assert_not_submitted(s)
+    task = db.get(models.Task, s.task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    row = db.scalar(
+        select(models.AutogenSuite)
+        .where(models.AutogenSuite.task_id == task.id, models.AutogenSuite.seed == s.seed)
+    )
+    if row is None or not (row.checks or []):
+        raise HTTPException(
+            status_code=409,
+            detail="no generated suite for this task yet — run “Auto-generate verifiers” first",
+        )
+
+    suite = sessions_api.write_suite(db, s.id, list(row.checks or []))
+    db.add(models.AuditLog(
+        session_id=s.id, actor=current.email, action="suite.from_autogen", target=str(suite.id),
+        meta={"version": suite.version, "count": len(row.checks or []), "oracle": row.oracle},
+    ))
+    db.commit()
+    return {
+        "suiteId": str(suite.id), "version": suite.version,
+        "oracle": row.oracle,
+        "verifiers": [
+            {"id": v.get("id"), "level": v.get("level"), "assertion": v.get("assertion"),
+             "code": v.get("code"), "check": v.get("check"),
+             "failsUntilCorrected": False, "placeholder": False, "addedByHuman": False}
+            for v in (row.checks or [])
+        ],
+    }
 
 
 @router.post("/sessions/{session_id}/prepare-ship")

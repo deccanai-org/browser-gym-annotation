@@ -415,6 +415,44 @@ export interface AutogenResult {
 
 /** Run the autonomous reward-agent oracle loop for a gym task (auto-generate +
  *  oracle-validate a verifier suite). Async job; polls to the result. */
+export interface CachedAutogenSuite {
+  taskId: string;
+  seed: number;
+  oracle: boolean;
+  brief: string;
+  checks: { id: string; level: string; assertion: string; code: string; check: unknown }[];
+  iterations: number;
+  generatedAt: string | null;
+}
+
+/** A suite already generated and validated for this task, if any.
+ *
+ *  Returns null for "none yet" — deliberately distinct from an empty suite,
+ *  because the screen offers different things for each: generate one, or use the
+ *  one that exists. The loop costs an oracle run plus several model calls, so
+ *  nobody should sit through it for a task somebody else already did. */
+export async function fetchCachedAutogenSuite(taskId: string, seed = 0): Promise<CachedAutogenSuite | null> {
+  try {
+    const res = await fetch(`/api/gym/tasks/${encodeURIComponent(taskId)}/verifier-suite?seed=${seed}`,
+                            { credentials: "include" });
+    if (!res.ok) return null;      // 404 = none cached, which is not an error
+    const body = (await res.json()) as CachedAutogenSuite;
+    // A response that carries no checks is not a suite, whatever its status.
+    return Array.isArray(body?.checks) && body.checks.length ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Copy the generated suite onto this attempt as a real, scoreable suite
+ *  version. Strict: the annotator is waiting on the answer, and a silent failure
+ *  here would leave them believing step 2 is done. */
+export async function applyAutogenSuite(sessionId: string): Promise<{
+  suiteId: string; version: number; oracle: boolean; verifiers: VerifierPayload[];
+}> {
+  return postStrict(`/api/sessions/${sessionId}/suite/from-autogen`, {});
+}
+
 export async function autogenVerifiers(
   taskId: string,
   seed = 0,

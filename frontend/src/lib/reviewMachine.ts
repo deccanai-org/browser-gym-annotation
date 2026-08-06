@@ -58,6 +58,7 @@ export type Action =
   | { t: "gymResumed"; reward: number }
   | { t: "setLevel"; level: VerifierLevel }
   | { t: "addVerifier"; verifier: Verifier }
+  | { t: "hydrateSuite"; verifiers: Verifier[] }
   | { t: "removeVerifier"; id: string }
   | { t: "editVerifier"; id: string; assertion: string; code: string }
   | { t: "override"; id: string }
@@ -154,6 +155,15 @@ export function reducer(s: ReviewState, a: Action): ReviewState {
       return { ...s, activeLevel: a.level };
     case "addVerifier":
       return { ...s, added: [...s.added, a.verifier], benchmarkRun: false, results: {}, submitted: false };
+    case "hydrateSuite":
+      // A generated suite adopted onto this attempt. It REPLACES `added` rather
+      // than appending: adopting twice must not double every check, and the
+      // server has already written these as the attempt's suite — this only
+      // brings the screen into line with what was persisted.
+      return {
+        ...s, added: a.verifiers, verifiersGenerated: true,
+        benchmarkRun: false, results: {}, submitted: false,
+      };
     case "removeVerifier":
       return { ...s, added: s.added.filter((v) => v.id !== a.id), benchmarkRun: false, results: {} };
     case "editVerifier": {
