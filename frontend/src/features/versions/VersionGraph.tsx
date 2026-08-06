@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Button, Icon, t, tint, weight, Pressable } from "../../ds";
+import { Icon, t, tint, weight, Pressable } from "../../ds";
 import {
   buildLineage,
   createFork,
-  ensureBaseline,
   fetchRuns,
   fetchVersionGraph,
   headOf,
@@ -221,7 +220,6 @@ export function VersionGraph({
   onSelectHead,
   onSetStatus,
   onDismissNotice,
-  onCreateBaseline,
 }: {
   graph: VersionGraphData | null;
   runs?: RunsData | null;
@@ -232,7 +230,6 @@ export function VersionGraph({
   onSelectHead: (v: VersionNode) => void;
   onSetStatus: (v: VersionNode, status: VersionStatus) => void;
   onDismissNotice: () => void;
-  onCreateBaseline?: () => void;
 }) {
   const rows = graph ? buildLineage(graph.versions) : [];
   const head = headOf(graph);
@@ -265,11 +262,6 @@ export function VersionGraph({
           <span style={{ fontSize: "0.75rem", color: t.n2, lineHeight: 1.5 }}>
             No lineage yet. v1 is the canonical agent run this attempt annotates; every correction hangs off it.
           </span>
-          {onCreateBaseline && (
-            <Button variant="secondary" onClick={onCreateBaseline}>
-              Create baseline v1
-            </Button>
-          )}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column" }}>
@@ -459,13 +451,6 @@ export function useVersionGraph(sessionId: string | null) {
     [sessionId, refresh],
   );
 
-  const baseline = useCallback(async () => {
-    if (!sessionId) return;
-    const res = await ensureBaseline(sessionId);
-    if (!res.ok) setNotice(res.message);
-    await refresh();
-  }, [sessionId, refresh]);
-
   return {
     graph,
     viewingId,
@@ -478,7 +463,6 @@ export function useVersionGraph(sessionId: string | null) {
     selectHead,
     setStatus,
     fork,
-    baseline,
     dismissNotice: () => setNotice(null),
   };
 }

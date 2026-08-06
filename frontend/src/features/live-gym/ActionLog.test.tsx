@@ -52,3 +52,19 @@ describe("the state change under a step", () => {
     expect(screen.getByText("mail")).toBeTruthy();
   });
 });
+
+
+describe("the dropped-interactions alert", () => {
+  it("is silent while nothing has been lost", () => {
+    renderLog([base]);
+    expect(screen.queryByText(/lost|dropped/i)).toBeNull();
+  });
+
+  it("says so when the recorder had to drop interactions", () => {
+    // From that point the trajectory is incomplete, and only the annotator can
+    // decide whether to redo the task. The alert existed but nothing passed the
+    // count, so it could never fire.
+    render(<ActionLog steps={[base]} dropped={3} />);
+    expect(screen.getByText(/3/)).toBeTruthy();
+  });
+});

@@ -77,6 +77,8 @@ export interface SessionSnapshot {
   status: SessionStatus;
   rerunFrom: number | null;
   reviewedThrough: number;
+  /** The annotator's rewording of the brief, persisted. */
+  promptOverride?: string;
   suite: { suiteId: string; version: number; verifiers: PersistedVerifier[] } | null;
   lastBenchmark: { reward: number; results: Record<string, unknown>; overridden?: string[]; at: string } | null;
   // The persisted correction branch, so the fork restores exactly on reload.
@@ -291,7 +293,7 @@ export async function downloadSampleBundle(sessionId: string): Promise<void> {
 
 export function patchSession(
   sid: string,
-  patch: { status?: SessionStatus; rerunFrom?: number; reviewedThrough?: number },
+  patch: { status?: SessionStatus; rerunFrom?: number; reviewedThrough?: number; promptOverride?: string },
 ): Promise<void> {
   return send(`/api/sessions/${sid}`, "PATCH", patch);
 }

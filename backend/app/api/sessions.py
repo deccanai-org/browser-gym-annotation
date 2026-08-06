@@ -81,6 +81,10 @@ class PatchSessionBody(_NulSafe):
     status: str | None = None
     rerunFrom: int | None = None
     reviewedThrough: int | None = None  # granular per-step review progress (persisted)
+    # The annotator's rewording of the task brief. The column has always existed
+    # and nothing wrote it, so an edit lived in local state and was lost on
+    # remount — while being real signal about an ambiguous instruction.
+    promptOverride: str | None = None
 
 
 class VerifierIn(_NulSafe):
@@ -456,6 +460,8 @@ def _snapshot(db: Session, s: ReviewSession) -> dict:
         "status": s.status,
         "rerunFrom": s.rerun_from,
         "reviewedThrough": s.reviewed_through,
+        # So a reworded brief survives a remount rather than living in local state.
+        "promptOverride": s.prompt_override or "",
         "suite": suite_out,
         "lastBenchmark": last_bench,
         "branch": branch_out,
@@ -676,6 +682,11 @@ def patch_session(session_id: UUID, body: PatchSessionBody, current: Annotator =
         if s.status != body.status:
             s.status = body.status
             _audit(db, "", "session.status", str(s.id), {"status": body.status}, session_id=s.id)
+    if body.promptOverride is not None:
+        text = body.promptOverride.strip()
+        if text != (s.prompt_override or ""):
+            s.prompt_override = text
+            _audit(db, "", "session.prompt_override", str(s.id), {"len": len(text)}, session_id=s.id)
     if body.rerunFrom is not None:
         # Gym sessions have no baked fixture (nsteps would be 0), and the correction
         # step is relative to a LIVE run — use a lenient bound, like reviewedThrough.

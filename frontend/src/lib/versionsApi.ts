@@ -163,12 +163,6 @@ export function fetchRuns(sessionId: string): Promise<ApiResult<RunsData>> {
   return request<RunsData>(`${at(sessionId)}/runs`);
 }
 
-/** Materialize v1 from the canonical recorded run. Idempotent, so the UI calls
- *  it on open rather than guessing whether a lineage exists yet. */
-export function ensureBaseline(sessionId: string): Promise<ApiResult<VersionNode>> {
-  return post<VersionNode>(`${at(sessionId)}/versions/baseline`, {});
-}
-
 // --------------------------------------------------------------------------- forking
 export interface ForkPoint {
   parentVersionId: string;

@@ -186,18 +186,22 @@ export function ReviewSurface({ session, attemptId, owner, versionId, opening, e
   error?: string | null;
   onRetry?: () => void;
 }) {
+  // Interactions the recorder had to drop. The alert for this already existed in
+  // the action log and could never fire, because nothing passed the count.
+  const [dropped, setDropped] = useState(0);
   if (!session) return <GymPlaceholder opening={opening} error={error} onRetry={onRetry} />;
   return (
     <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
       <div style={{ flex: 1, minWidth: 0, display: "flex" }}>
         <LiveBrowserPane
+          onDropped={setDropped}
           attemptId={attemptId}
           session={session}
           owner={owner}
           apps={session?.apps ?? null}
         />
       </div>
-      {attemptId && <LiveActionLog attemptId={attemptId} versionId={versionId ?? null} />}
+      {attemptId && <LiveActionLog attemptId={attemptId} versionId={versionId ?? null} dropped={dropped} />}
     </div>
   );
 }
@@ -239,7 +243,7 @@ function GymPlaceholder({ opening, error, onRetry }: { opening?: boolean; error?
 }
 
 /** Polls the head version's steps while the annotator works. */
-function LiveActionLog({ attemptId, versionId }: { attemptId: string; versionId: string | null }) {
+function LiveActionLog({ attemptId, versionId, dropped = 0 }: { attemptId: string; versionId: string | null; dropped?: number }) {
   const [steps, setSteps] = useState<LoggedStep[]>([]);
   const [certifying, setCertifying] = useState(false);
   const [head, setHead] = useState<string | null>(versionId);
@@ -277,6 +281,7 @@ function LiveActionLog({ attemptId, versionId }: { attemptId: string; versionId:
   return (
     <ActionLog
       steps={steps}
+      dropped={dropped}
       certifying={certifying}
       onCertify={async () => {
         setCertifying(true);
@@ -638,7 +643,7 @@ function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipp
 
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <div style={{ width: 1440, margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.n85, border: `1px solid ${t.n7}` }}>
+    <div style={{ maxWidth: 1440, width: "100%", margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.n85, border: `1px solid ${t.n7}` }}>
       {children}
     </div>
   );
@@ -742,12 +747,6 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   // the unmount cleanup below reads it after the last render, and it is also set
   // by the re-attach probe, which must not repaint the pane.
   const liveOpenRef = useRef(false);
-
-  useEffect(() => {
-    if (!state.playing) return;
-    const id = setInterval(() => dispatch({ t: "tick" }), 1100);
-    return () => clearInterval(id);
-  }, [state.playing]);
 
   // ---- M4 persistence: open/resume the session, then mirror each committed
   // transition to the backend so the annotator's work survives a refresh.
@@ -1081,7 +1080,12 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
             // Editing the brief no longer re-drives a model: the annotator does
             // the task themselves, so a prompt edit is just a prompt edit. It
             // used to throw away the attempt and run a fresh stochastic agent.
-            onSavePrompt={setPromptOverride}
+            onSavePrompt={(text) => {
+              setPromptOverride(text);
+              // Persisted, not just held: a reworded brief is real signal about an
+              // ambiguous instruction, and it used to vanish on remount.
+              if (sessionId) void patchSession(sessionId, { promptOverride: text });
+            }}
             rerunsOnSave={false}
           />
         </div>

@@ -415,3 +415,16 @@ def test_benchmark_requires_the_run_to_have_been_reviewed(client, monkeypatch):
     client.put(f"/api/sessions/{sid}/suite", json={"verifiers": vs})
     r = client.post(f"/api/sessions/{sid}/run", json={"corrected": False, "verifiers": vs, "overrides": []})
     assert r.status_code == 409 and "reviewed" in r.json()["detail"]
+
+
+def test_a_reworded_brief_is_persisted(client):
+    """`prompt_override` existed on the model and nothing ever wrote it, so an
+    annotator's rewording lived in local state and vanished on remount — while
+    being real signal about an instruction that was ambiguous."""
+    sid = client.post("/api/tasks/GYM-2041/sessions", json={"fresh": True}).json()["sessionId"]
+    r = client.patch(f"/api/sessions/{sid}", json={"promptOverride": "  cancel only the unshipped ones  "})
+    assert r.status_code == 200
+    assert r.json()["promptOverride"] == "cancel only the unshipped ones", "and it is trimmed"
+    # survives a reload
+    assert client.post("/api/tasks/GYM-2041/sessions", json={}).json()["promptOverride"] == \
+        "cancel only the unshipped ones"

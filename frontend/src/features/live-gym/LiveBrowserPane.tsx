@@ -55,7 +55,13 @@ export function LiveBrowserPane({
   control = true,
   onSession,
   apps,
+  onDropped,
 }: {
+  /** Interactions the recorder had to DROP. Not cosmetic: from that point the
+   *  trajectory is incomplete, and the annotator is the only one who can decide
+   *  whether to redo the task. The counter and its alert already existed; only
+   *  this wire was missing, so the alert could never fire. */
+  onDropped?: (n: number) => void;
   /** Review-session id — where recorded interactions land. Null disables
    *  recording (offline/fixture mode) but still lets the annotator drive. */
   attemptId: string | null;
@@ -129,7 +135,7 @@ export function LiveBrowserPane({
   // --- socket + recorder lifecycle -----------------------------------------
   useEffect(() => {
     if (!sid || !ticket) return;
-    const rec = attemptId ? new EventRecorder({ attemptId }) : null;
+    const rec = attemptId ? new EventRecorder({ attemptId, onDrop: (n) => onDropped?.(n) }) : null;
     recRef.current = rec;
     framesRef.current = attemptId ? new FrameRecorder({ attemptId }) : null;
     const sock = new LiveSocket({
