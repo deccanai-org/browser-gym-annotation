@@ -23,10 +23,10 @@ from app.db import get_db
 
 router = APIRouter(prefix="/api", tags=["my-tasks"])
 
-# The dataset the pilot draws from — the curated 85. Shown as the batch label so
-# an annotator can tell which set they are working, and quoted honestly rather
-# than as a made-up sprint name.
-BATCH = "sellable-breakers-v2"
+# The label shown when an annotator has no assignment rows yet and the board
+# falls back to the whole curated set (see `_assigned_tasks`). Real assignments
+# carry their own batch, so this is a fallback name, not the source of truth.
+FALLBACK_BATCH = "sellable-breakers-v2"
 
 # Display domains for the five realistic apps. Presentation only — the annotator
 # reaches them through the bridged gym, never these hostnames.
@@ -81,17 +81,41 @@ def _status_of(sess: models.ReviewSession | None, accepted: bool | None = None) 
     return "submitted" if accepted else "in_review"
 
 
-@router.get("/my-tasks")
-def my_tasks(current: models.Annotator = Depends(current_annotator),
-             db: Session = Depends(get_db)) -> dict:
-    # The 85 curated breakers, in a stable order (by id) so the board never
-    # reshuffles between reloads.
-    breakers = [
+def _assigned_tasks(db: Session, annotator: models.Annotator) -> tuple[list[models.Task], str]:
+    """This annotator's tasks, and the batch label to show.
+
+    Falls back to the whole curated set when they have no assignments. That is
+    deliberate rather than tidy: assignments are new, and an annotator whose rows
+    have not been written yet must not open the app to an empty board and assume
+    the work is gone. The label says which of the two they are looking at.
+
+    Ordered by external_id so the board never reshuffles between reloads.
+    """
+    rows = db.execute(
+        select(models.Task, models.TaskAssignment.batch)
+        .join(models.TaskAssignment, models.TaskAssignment.task_id == models.Task.id)
+        .where(models.TaskAssignment.annotator_id == annotator.id,
+               models.TaskAssignment.status == "assigned")
+        .order_by(models.Task.external_id)
+    ).all()
+    if rows:
+        batches = sorted({b for _t, b in rows if b})
+        label = batches[0] if len(batches) == 1 else (" + ".join(batches) if batches else FALLBACK_BATCH)
+        return [t for t, _b in rows], label
+
+    unassigned = [
         t for t in db.execute(
             select(models.Task).where(models.Task.source == "gym").order_by(models.Task.external_id)
         ).scalars()
         if (t.meta or {}).get("inEightyFive")
     ]
+    return unassigned, f"{FALLBACK_BATCH} (unassigned)"
+
+
+@router.get("/my-tasks")
+def my_tasks(current: models.Annotator = Depends(current_annotator),
+             db: Session = Depends(get_db)) -> dict:
+    breakers, batch = _assigned_tasks(db, current)
 
     # This annotator's latest session per task — one query, newest wins. `status`
     # and where they resume both come from here, so a shared batch shows each
@@ -177,7 +201,7 @@ def my_tasks(current: models.Annotator = Depends(current_annotator),
             "email": current.email,
             "role": current.role,
         },
-        "batch": BATCH,
+        "batch": batch,
         "assigned": counts["all"],
         # What the ANNOTATOR finished, which is what they control. Counting only
         # adjudicated samples made their number fall whenever a reviewer was

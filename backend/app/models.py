@@ -246,6 +246,35 @@ class TrajectoryStep(Base):
     trajectory: Mapped[Trajectory] = relationship(back_populates="steps")
 
 
+class TaskAssignment(Base):
+    """Who is meant to annotate which task.
+
+    Before this, "assigned" meant every gym task carrying `meta.inEightyFive` —
+    so every annotator saw the same 85 rows and every quota target was 85. With
+    several people on the batch nobody could tell what was theirs, and the
+    progress bar measured the cohort's work rather than the person's.
+
+    A table rather than a derived partition (e.g. hash(email+task) % N) because a
+    partition cannot express reassignment, and cannot express deliberate OVERLAP —
+    which is exactly what the QA agreement maths needs. Two annotators on one task
+    is a feature here, so the key is the pair, not the task.
+    """
+
+    __tablename__ = "task_assignment"
+    __table_args__ = (
+        UniqueConstraint("task_id", "annotator_id", name="uq_task_assignment_task_annotator"),
+    )
+    id: Mapped[UUID] = _pk()
+    task_id: Mapped[UUID] = _fk("task.id")
+    annotator_id: Mapped[UUID] = _fk("annotator.id")
+    # The batch label the board shows, carried per row so two batches can run at
+    # once and an annotator can be on both.
+    batch: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="assigned")   # assigned | released
+    assigned_by_id: Mapped[UUID | None] = _fk("annotator.id", nullable=True, ondelete="SET NULL")
+    assigned_at: Mapped[datetime] = mapped_column(default=func.now())
+
+
 class AutogenSuite(Base):
     """A generated verifier suite, cached per (task, seed).
 

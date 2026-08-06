@@ -76,3 +76,105 @@ def reset_sessions(
         "annotatorsKept": int(annotators),
         "tasksKept": int(db.scalar(select(func.count()).select_from(models.Task)) or 0),
     }
+
+
+class AssignBody(BaseModel):
+    """Hand a batch of tasks to a set of annotators.
+
+    `overlap` is how many people should get each task. It defaults to 1, but more
+    is a legitimate choice, not a mistake: the QA agreement number only means
+    something when several annotators have independently done the same task.
+    """
+
+    annotatorEmails: list[str] = []
+    batch: str = "sellable-breakers-v2"
+    taskIds: list[str] = []          # empty = the curated 85 (meta.inEightyFive)
+    overlap: int = 1
+
+
+@router.post("/assign")
+def assign_tasks(
+    body: AssignBody,
+    current: models.Annotator = Depends(current_annotator),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Round-robin a batch of tasks across annotators.
+
+    Not destructive, so no typed confirmation — but it decides what other people
+    see when they sign in, so it keeps the dev + privileged gates.
+
+    Idempotent: re-running with the same inputs adds nothing, because the
+    (task, annotator) pair is unique. That matters because the natural way to
+    grow a batch is to re-run the same command with one more name on it.
+    """
+    _require_dev()
+    _require_privileged(current)
+
+    if not body.annotatorEmails:
+        raise HTTPException(status_code=422, detail="name at least one annotator to assign to")
+    if body.overlap < 1:
+        raise HTTPException(status_code=422, detail="overlap must be at least 1")
+
+    people = db.scalars(
+        select(models.Annotator).where(models.Annotator.email.in_(body.annotatorEmails))
+    ).all()
+    missing = sorted(set(body.annotatorEmails) - {a.email for a in people})
+    if missing:
+        raise HTTPException(status_code=404, detail=f"no such annotator: {', '.join(missing)}")
+    if body.overlap > len(people):
+        raise HTTPException(
+            status_code=422,
+            detail=f"overlap {body.overlap} needs at least that many annotators (got {len(people)})",
+        )
+    people.sort(key=lambda a: a.email)      # deterministic round-robin
+
+    if body.taskIds:
+        tasks = db.scalars(
+            select(models.Task).where(models.Task.external_id.in_(body.taskIds))
+            .order_by(models.Task.external_id)
+        ).all()
+        unknown = sorted(set(body.taskIds) - {t.external_id for t in tasks})
+        if unknown:
+            raise HTTPException(status_code=404, detail=f"no such task: {', '.join(unknown)}")
+    else:
+        tasks = [
+            t for t in db.scalars(
+                select(models.Task).where(models.Task.source == "gym")
+                .order_by(models.Task.external_id)
+            )
+            if (t.meta or {}).get("inEightyFive")
+        ]
+
+    existing = {
+        (a.task_id, a.annotator_id)
+        for a in db.scalars(select(models.TaskAssignment))
+    }
+    created = 0
+    for i, task in enumerate(tasks):
+        for k in range(body.overlap):
+            who = people[(i + k) % len(people)]
+            if (task.id, who.id) in existing:
+                continue
+            db.add(models.TaskAssignment(
+                task_id=task.id, annotator_id=who.id, batch=body.batch,
+                status="assigned", assigned_by_id=current.id,
+            ))
+            existing.add((task.id, who.id))
+            created += 1
+    db.add(models.AuditLog(
+        actor=current.email, action="admin.assign", target=body.batch,
+        meta={"tasks": len(tasks), "annotators": len(people),
+              "overlap": body.overlap, "created": created},
+    ))
+    db.commit()
+
+    per_person = {
+        a.email: db.scalar(
+            select(func.count()).select_from(models.TaskAssignment)
+            .where(models.TaskAssignment.annotator_id == a.id,
+                   models.TaskAssignment.status == "assigned")
+        ) or 0
+        for a in people
+    }
+    return {"batch": body.batch, "tasks": len(tasks), "overlap": body.overlap,
+            "created": created, "assigned": per_person}
