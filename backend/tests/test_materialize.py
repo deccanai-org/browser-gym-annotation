@@ -427,3 +427,37 @@ def test_a_trailing_unpaired_press_is_still_withheld(db_session, attempt):
     _ev(db_session, attempt, 1, "mouseDown", now - 50, BTN, nx=0.5, ny=0.5)
     db_session.commit()
     assert materialize.materialize(db_session, attempt, now_ms=now) == []
+
+
+def test_a_confirm_read_that_fails_says_nothing_rather_than_no_change(db_session, attempt):
+    """The bug the confirm hop exists to remove, wearing a new hat.
+
+    `_read_world` returns None on ANY failure, and `gym_client._req` returns None
+    rather than raising on a timeout or a bad payload. So a single flaky read on
+    the SECOND hop asserted "your actions changed nothing" across the whole
+    window — the exact lie the confirm was added to stop. NULL already means NOT
+    OBSERVED everywhere downstream, and it is the only honest answer here.
+    """
+    base = _settled_base()
+    world = _w()
+    _seed_initial(db_session, attempt, world)
+
+    class _GoesDark(_FakeWorld):
+        """Answers the first read, then times out — the confirm hop's own race."""
+
+        def world(self):
+            self.reads += 1
+            return world if self.reads == 1 else None
+
+    w = _GoesDark(world)
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt, world=w)
+
+    assert made, "the steps are kept regardless — only the delta is in question"
+    assert w.reads >= 2, "it must actually have asked a second time"
+    for st in made:
+        assert st.world_delta is None, (
+            "an unreadable confirm is not evidence that nothing changed"
+        )

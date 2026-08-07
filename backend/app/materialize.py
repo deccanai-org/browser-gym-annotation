@@ -248,6 +248,11 @@ def _chain_and_observe(db: Session, attempt: models.ReviewSession,
         # concluding no-change; the alternative is recording "your click did
         # nothing" whenever we lose the race, which is worse than saying nothing.
         late = _confirm_unchanged(world, prev_hash, made)
+        if late is UNREADABLE:
+            # We asked and got nothing back. Leave every delta NULL — which the
+            # UI and the export both already read as NOT OBSERVED — instead of
+            # asserting the actions did nothing.
+            return
         if late is None:
             # Genuinely unchanged, and that is true of every step in the window:
             # the world is the same before and after all of them.
@@ -274,21 +279,37 @@ def _read_world(world) -> dict | None:
         return None
 
 
-def _confirm_unchanged(world, prev_hash: str, made: list[models.TrajectoryStep]) -> dict | None:
-    """Re-read the world once, and hand back the LATE one if it moved after all.
+#: The confirm read did not come back, so nothing is known. Deliberately NOT
+#: None — see `_confirm_unchanged`.
+UNREADABLE = object()
 
-    None means "asked twice, still unchanged" — the only answer that earns a
-    `{"changed": false}` on a step. A batch that could not have reached the engine
-    at all skips the wait: there is no race to lose.
+
+def _confirm_unchanged(world, prev_hash: str, made: list[models.TrajectoryStep]):
+    """Re-read the world once. THREE outcomes, and they have to stay three.
+
+    * a world dict — it moved after all; we had lost the race
+    * ``None``      — asked twice, still unchanged. The ONLY answer that earns a
+                      ``{"changed": false}`` on a step.
+    * ``UNREADABLE`` — the read did not come back, so we know nothing.
+
+    Collapsing the last two is the very bug this function was added to remove,
+    wearing a new hat. `_read_world` returns None on any failure, and
+    `gym_client._req` returns None rather than raising on a timeout or a bad
+    payload — so one flaky read on the confirm hop asserted "your actions changed
+    nothing" across the whole window. The FIRST read already gets this right and
+    says nothing; this one has to agree with it.
+
+    A batch that cannot have reached the engine at all skips the wait: there is
+    no race to lose.
     """
     if all(st.action_type in _BROWSER_ONLY for st in made):
         return None
     if CONFIRM_MS:
         time.sleep(CONFIRM_MS / 1000)
     late = _read_world(world)
-    if not late or checkpoints.hash_world(late) == prev_hash:
-        return None
-    return late
+    if not late:
+        return UNREADABLE
+    return None if checkpoints.hash_world(late) == prev_hash else late
 
 
 def _likely_cause(made: list[models.TrajectoryStep]) -> models.TrajectoryStep:

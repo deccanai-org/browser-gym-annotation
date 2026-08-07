@@ -669,6 +669,44 @@ describe("EventRecorder loss accounting", () => {
     expect(dropped, "two interactions vanished and the alert read zero").toEqual([2]);
   });
 
+  it("does not call a retry's duplicates a loss", async () => {
+    // The recorder re-queues a whole batch on any failure, INCLUDING a network
+    // drop after the server committed it — so a retry has to be a no-op, and the
+    // server answers {recorded: 0, duplicates: N} by design. Counting only
+    // `recorded` reported the entire batch as lost, which tells the annotator
+    // their trajectory has a hole and sends them to redo a task that was intact.
+    // Duplicates are the only way this endpoint can answer short of the batch,
+    // so ignoring them made the alert fire exclusively on the false positive.
+    const dropped: number[] = [];
+    const { impl } = fakeFetch(() => ({ ok: true, json: { recorded: 0, duplicates: 3 } }));
+    const clock = fakeTimers();
+    const rec = new EventRecorder({
+      attemptId: "s-1", fetchImpl: impl, timers: clock.timers, batchAt: 99,
+      onDrop: (n) => dropped.push(n),
+    });
+    for (const ch of "abc") rec.push({ kind: "keyChar", payload: { text: ch } });
+
+    await rec.flush();
+
+    expect(dropped, "a re-sent batch the server already had is not a loss").toEqual([]);
+  });
+
+  it("still counts a genuinely short reply", async () => {
+    // The guard above must not blind the alert to a real partial write.
+    const dropped: number[] = [];
+    const { impl } = fakeFetch(() => ({ ok: true, json: { recorded: 1, duplicates: 1 } }));
+    const clock = fakeTimers();
+    const rec = new EventRecorder({
+      attemptId: "s-1", fetchImpl: impl, timers: clock.timers, batchAt: 99,
+      onDrop: (n) => dropped.push(n),
+    });
+    for (const ch of "abc") rec.push({ kind: "keyChar", payload: { text: ch } });
+
+    await rec.flush();
+
+    expect(dropped, "one of the three is accounted for by neither").toEqual([1]);
+  });
+
   it("counts what a failed final flush stranded, instead of dropping it in dispose", async () => {
     // dispose() runs when the pane is torn down. A batch that came back from a
     // failed POST at that point is held by a recorder nobody references any

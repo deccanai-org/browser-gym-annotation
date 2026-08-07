@@ -939,13 +939,22 @@ export class EventRecorder {
           body: JSON.stringify(batch),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const out = (await res.json()) as { recorded?: number };
+        const out = (await res.json()) as { recorded?: number; duplicates?: number };
         const recorded = out?.recorded ?? batch.length;
-        // A 200 that recorded fewer events than it was sent is a partial write:
-        // the rest are gone, the batch cannot be retried without duplicating what
-        // did land, and nothing else in the pipeline notices. This used to return
-        // the server's number and let the caller assume the batch was whole.
-        this.drop(batch.length - recorded);
+        // A 200 that ACCOUNTED FOR fewer events than it was sent is a partial
+        // write: the rest are gone, the batch cannot be retried without
+        // duplicating what did land, and nothing else in the pipeline notices.
+        //
+        // `duplicates` has to count towards that. The server records nothing for
+        // an event id it has already seen — deliberately, because this recorder
+        // re-queues a whole batch on any failure, including a network drop AFTER
+        // the commit, so a retry has to be a no-op. A retry therefore answers
+        // {recorded: 0, duplicates: N}, and subtracting only `recorded` reported
+        // the whole batch as lost: the annotator is told their trajectory has a
+        // hole and redoes a task that was intact. Duplicates are in fact the only
+        // way this endpoint can answer short, so ignoring them made this branch
+        // fire exclusively on the false positive.
+        this.drop(batch.length - recorded - (out?.duplicates ?? 0));
         return recorded;
       } catch {
         this.queue = [...batch, ...this.queue];
