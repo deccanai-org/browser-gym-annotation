@@ -104,7 +104,7 @@ function mapPayload(p: ReviewPayload): ReviewData {
   return {
     task: {
       ...p.task,
-      allowedSites: p.task.allowedSites.map((s) => ({ host: s.host, color: APP_COLOR[s.app] ?? APP_COLOR.shop })),
+      allowedSites: p.task.allowedSites.map((s) => ({ host: s.host, app: s.app, color: APP_COLOR[s.app] ?? APP_COLOR.shop })),
     },
     tabs: p.tabs.map((tb) => ({ id: tb.id, title: tb.title, host: tb.host, color: APP_COLOR[tb.app] ?? APP_COLOR.shop })),
     steps: p.steps,

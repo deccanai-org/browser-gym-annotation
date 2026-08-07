@@ -76,6 +76,30 @@ describe("the review screen", () => {
     expect(html).toContain("Version lineage");
     expect(html).toContain("Steps in this version");
   });
+
+  it("leaves out the sections it has nothing to put in", () => {
+    // A gym task carries no constraints, and no run summary until something has
+    // run. Both headings used to render regardless, so the brief showed two bare
+    // labels and an empty grey box — which reads as "this failed to load", not
+    // as "there is nothing here".
+    expect(data.task.constraints).toHaveLength(0);
+    expect(data.task.runSummary).toHaveLength(0);
+    expect(html).not.toContain("Constraints");
+    expect(html).not.toContain("Run summary");
+  });
+
+  it("labels an allowed site even when the payload names apps, not hosts", () => {
+    // The gym task picker sends {app, title} while the brief reads `host`, so
+    // every chip rendered as a bare coloured dot with no text beside it.
+    const byApp: ReviewData = {
+      ...data,
+      task: { ...data.task, allowedSites: [{ host: "", app: "mail", color: t.primary6 }] },
+    };
+    const out = renderToStaticMarkup(
+      <ReviewScreen data={byApp} nav={nav} startFresh={false} onStartNew={() => {}} />,
+    );
+    expect(out).toContain("mail");
+  });
 });
 
 describe("the workspace surface", () => {

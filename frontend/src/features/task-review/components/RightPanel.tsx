@@ -88,31 +88,48 @@ export function RightPanel({ task, summary, onSavePrompt, rerunsOnSave }: { task
           </div>
         </div>
 
-        <div>
-          <Label>Constraints</Label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {task.constraints.map((c) => (<Tag key={c}>{c}</Tag>))}
+        {/* Each of these renders ONLY when it has something to say. They used to
+            render their heading unconditionally, so a gym task — which carries no
+            constraints and, until its first run, no summary — showed two bare
+            headings and an empty grey box. A heading with nothing under it reads
+            as "this failed to load", which is worse than not being there. */}
+        {task.constraints.length > 0 && (
+          <div>
+            <Label>Constraints</Label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {task.constraints.map((c) => (<Tag key={c}>{c}</Tag>))}
+            </div>
           </div>
-        </div>
+        )}
 
-        <div>
-          <Label>Allowed sites</Label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {task.allowedSites.map((sIt) => (<Tag key={sIt.host} dot={sIt.color}>{sIt.host}</Tag>))}
+        {task.allowedSites.length > 0 && (
+          <div>
+            <Label>Allowed sites</Label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {/* `host` can be missing when the payload came from the gym task
+                  picker, which names apps rather than hosts. Falling back to the
+                  app keeps a labelled chip instead of a bare coloured dot with no
+                  text beside it. */}
+              {task.allowedSites.map((sIt, i) => (
+                <Tag key={sIt.host || sIt.app || i} dot={sIt.color}>{sIt.host || sIt.app || "—"}</Tag>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
-        <div>
-          <Label>Run summary</Label>
-          <div style={{ background: t.n85, border: `1px solid ${t.n7}`, borderRadius: 10, padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 12, columnGap: 16 }}>
-            {summary.map((m) => (
-              <div key={m.label}>
-                <div style={{ fontFamily: t.fontMono, fontSize: "1.0625rem", fontWeight: weight.bold, lineHeight: 1, color: metricColor(m.tone) }}>{m.value}</div>
-                <div style={{ marginTop: 4, fontSize: "0.719rem", color: t.n3 }}>{m.label}</div>
-              </div>
-            ))}
+        {summary.length > 0 && (
+          <div>
+            <Label>Run summary</Label>
+            <div style={{ background: t.n85, border: `1px solid ${t.n7}`, borderRadius: 10, padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 12, columnGap: 16 }}>
+              {summary.map((m) => (
+                <div key={m.label}>
+                  <div style={{ fontFamily: t.fontMono, fontSize: "1.0625rem", fontWeight: weight.bold, lineHeight: 1, color: metricColor(m.tone) }}>{m.value}</div>
+                  <div style={{ marginTop: 4, fontSize: "0.719rem", color: t.n3 }}>{m.label}</div>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </aside>
   );

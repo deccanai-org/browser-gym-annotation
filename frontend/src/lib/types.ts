@@ -116,7 +116,9 @@ export interface Task {
   prompt: string;
   startState: { summary: string; url: string };
   constraints: string[];
-  allowedSites: { host: string; color: string }[];
+  // `app` rides along because the gym task picker names apps rather than
+  // hosts, and a chip with no label is just a coloured dot.
+  allowedSites: { host: string; app?: string; color: string }[];
   runSummary: Metric[];
 }
 export interface ReviewData {
