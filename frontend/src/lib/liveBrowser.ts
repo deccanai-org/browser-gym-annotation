@@ -237,6 +237,27 @@ export async function describeFocused(
   return out ?? {};
 }
 
+/** What the page looked like: url, title, viewport, scroll, visible text and the
+ *  inventory of interactive elements.
+ *
+ *  Every element is described by the same function that describes the target of
+ *  an action, so an element here and the action's own target share a `targetKey`
+ *  — which is what lets a consumer find the thing that was clicked inside the
+ *  observation, rather than inferring it from coordinates. `{}` when the page
+ *  could not be read; the caller records nothing rather than losing the step. */
+export async function observePage(
+  sessionId: string,
+  ticket: string,
+  opts?: RestOptions,
+): Promise<Record<string, unknown>> {
+  const out = await json<Record<string, unknown>>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/observe`,
+    { ticket },
+    opts,
+  );
+  return out ?? {};
+}
+
 export interface ActResult {
   ok: boolean;
   kind?: string;
@@ -702,24 +723,34 @@ export interface RecordedFrame {
   height: number;
 }
 
+/** What the page looked like, keyed to the interaction it belongs to. */
+export interface RecordedObservation {
+  clientEventId: string;
+  observation: Record<string, unknown>;
+}
+
 /**
- * Uploads screenshots on their OWN channel.
+ * Uploads bulky per-step evidence on its OWN channel.
  *
  * Deliberately not part of the event batch: a frame is ~60KB, and because the
- * event recorder re-queues a failed batch whole, one failed image would replay
- * the entire interaction stream. Frames are best-effort — losing a picture is
- * survivable, losing the interactions is not — so this drops rather than retries
- * forever.
+ * event recorder re-queues a failed batch whole, one failed upload would replay
+ * the entire interaction stream. These are best-effort — losing a picture or an
+ * observation is survivable, losing the interactions is not — so this drops
+ * rather than retrying forever.
  */
-export class FrameRecorder {
-  private queue: RecordedFrame[] = [];
+class SideChannel<T> {
+  private queue: T[] = [];
   private handle: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly cfg: { attemptId: string; base?: string; timers?: Timers }) {}
+  constructor(
+    private readonly cfg: { attemptId: string; base?: string; timers?: Timers },
+    private readonly path: string,
+    private readonly cap: number,
+  ) {}
 
-  push(f: RecordedFrame): void {
-    if (this.queue.length >= 24) this.queue.shift();   // keep the newest
-    this.queue.push(f);
+  push(item: T): void {
+    if (this.queue.length >= this.cap) this.queue.shift();   // keep the newest
+    this.queue.push(item);
     const timers = this.cfg.timers ?? REAL_TIMERS;
     if (this.handle) return;
     this.handle = timers.set(() => {
@@ -732,15 +763,38 @@ export class FrameRecorder {
     const batch = this.queue.splice(0, this.queue.length);
     if (!batch.length) return;
     try {
-      await fetch(`${this.cfg.base ?? ""}/api/sessions/${this.cfg.attemptId}/frames`, {
+      await fetch(`${this.cfg.base ?? ""}/api/sessions/${this.cfg.attemptId}/${this.path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "include",
         body: JSON.stringify(batch),
       });
     } catch {
-      /* a lost screenshot must never disturb the interaction stream */
+      /* a lost side-channel payload must never disturb the interaction stream */
     }
+  }
+}
+
+export class FrameRecorder extends SideChannel<RecordedFrame> {
+  constructor(cfg: { attemptId: string; base?: string; timers?: Timers }) {
+    super(cfg, "frames", 24);
+  }
+}
+
+/**
+ * The OBSERVATION half of a trajectory — url, title, viewport, scroll, visible
+ * text and the inventory of interactive elements.
+ *
+ * Without it a sample says what the annotator did and nothing about what they
+ * could see, and a policy cannot be trained on the action alone. Captured on the
+ * ack like a frame, so it is the page AFTER the action: step N's observation is
+ * step N+1's input, and the session's opening observation covers step 0.
+ *
+ * A smaller queue than frames because an observation is the bigger payload.
+ */
+export class ObservationRecorder extends SideChannel<RecordedObservation> {
+  constructor(cfg: { attemptId: string; base?: string; timers?: Timers }) {
+    super(cfg, "observations", 12);
   }
 }
 

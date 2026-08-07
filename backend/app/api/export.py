@@ -70,7 +70,10 @@ def _versioned_sample(
     ]
     return {
         "sample_id": str(s.id),
-        "schema": "golden-sample/3",
+        # /4 adds the OBSERVATION per step and turns `screenshot` from a dangling
+        # path into {path, sha256, bytes}. Both are breaking reads for a consumer
+        # of /3, so the version moves with them.
+        "schema": "golden-sample/4",
         "task": {
             "id": task.external_id if task else None,
             "revision": frozen.get("task_revision", 1),

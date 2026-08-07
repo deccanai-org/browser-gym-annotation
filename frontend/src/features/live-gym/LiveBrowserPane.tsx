@@ -9,11 +9,12 @@ import {
   idleLiveState,
   liveSessionInfo,
   normalizePoint,
+  observePage,
   openLiveSession,
   scaleDelta,
 } from "../../lib/liveBrowser";
 import type { LiveState, NormPoint, OpenedSession, Viewport } from "../../lib/liveBrowser";
-import { FrameRecorder } from "../../lib/liveBrowser";
+import { FrameRecorder, ObservationRecorder } from "../../lib/liveBrowser";
 import { AppTabs } from "./AppTabs";
 import type { LiveApp } from "./liveSessionApi";
 
@@ -95,9 +96,11 @@ export function LiveBrowserPane({
   // Newest frame, kept so a step can carry the pixels the annotator actually saw.
   const lastFrameRef = useRef<string>("");
   const framesRef = useRef<FrameRecorder | null>(null);
+  const obsRef = useRef<ObservationRecorder | null>(null);
   // Screenshots ride their own channel; see FrameRecorder. Throttled because a
   // frame per pointer-move would be pure waste.
   const lastShotRef = useRef(0);
+  const lastObsRef = useRef(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -138,6 +141,7 @@ export function LiveBrowserPane({
     const rec = attemptId ? new EventRecorder({ attemptId, onDrop: (n) => onDropped?.(n) }) : null;
     recRef.current = rec;
     framesRef.current = attemptId ? new FrameRecorder({ attemptId }) : null;
+    obsRef.current = attemptId ? new ObservationRecorder({ attemptId }) : null;
     const sock = new LiveSocket({
       sessionId: sid,
       ticket,
@@ -158,7 +162,7 @@ export function LiveBrowserPane({
         // The pixels at the moment of the action. Keyed to the event's own id, so
         // the backend can hang the screenshot on the step that event became —
         // whichever of the two arrives first.
-        if (id) captureFrame(id);
+        if (id) { captureFrame(id); captureObservation(id); }
       },
       onNotice: (n) => {
         // A popup or redirect the page did on its own — no ack carries it.
@@ -313,6 +317,32 @@ export function LiveBrowserPane({
     } catch {
       /* a lost screenshot never disturbs the interaction stream */
     }
+  };
+
+  /** Grab what the PAGE looked like for one event — the observation half.
+   *
+   *  A frame is what the annotator saw; this is what a model can read: url,
+   *  title, viewport, scroll, visible text and every interactive element with
+   *  its bbox and the same `targetKey` the action's own target carries. Without
+   *  it a sample records the click and nothing about the page it was on.
+   *
+   *  Taken on the ack, like the frame, so it is the page AFTER the action —
+   *  which is the input to the NEXT one. Throttled harder than frames because it
+   *  costs a real round trip to the service. */
+  const captureObservation = (clientEventId: string) => {
+    const obs = obsRef.current;
+    if (!obs || !sid || !ticket) return;
+    const now = Date.now();
+    if (now - lastObsRef.current < 700) return;
+    lastObsRef.current = now;
+    void (async () => {
+      try {
+        const payload = await observePage(sid, ticket);
+        if (payload && Object.keys(payload).length) obs.push({ clientEventId, observation: payload });
+      } catch {
+        /* an observation is never worth disturbing the interaction stream for */
+      }
+    })();
   };
 
   const onDoubleClick = () => { clickCountRef.current = 2; };

@@ -271,7 +271,13 @@ def test_the_exported_sample_ships_the_lineage_and_authorship(db_session, setup)
     db_session.commit()
 
     sample = build_sample(db_session, s)
-    assert sample["schema"] == "golden-sample/3"
+    assert sample["schema"] == "golden-sample/4"
+    # /4 pairs every action with what could be SEEN when it was taken. Both keys
+    # must be present on every step even where this fixture has no artifacts:
+    # a missing key is indistinguishable from "never captured", and a consumer
+    # reading the schema version has to be able to rely on the shape.
+    for st in sample["golden_trajectory"]:
+        assert "observation" in st and "screenshot" in st
     assert sample["task"]["revision"] == 3
     assert sample["trajectory_version"]["version_no"] == 2
     assert [v["versionNo"] for v in sample["trajectory_version"]["lineage"]] == [1, 2]

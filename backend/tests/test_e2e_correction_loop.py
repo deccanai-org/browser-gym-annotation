@@ -234,7 +234,7 @@ def test_an_annotator_corrects_a_breaker_and_the_exported_sample_is_the_correcti
 
     # --- 7. the exported sample IS the correction ----------------------------
     sample = build_sample(db_session, db_session.get(models.ReviewSession, UUID(sid)))
-    assert sample["schema"] == "golden-sample/3"
+    assert sample["schema"] == "golden-sample/4"
 
     golden = sample["golden_trajectory"]
     descriptions = [s["description"] for s in golden]

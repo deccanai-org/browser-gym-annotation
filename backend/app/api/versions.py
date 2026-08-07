@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -815,6 +816,68 @@ class FrameBody(BaseModel):
     jpegBase64: str
     width: int = 0
     height: int = 0
+
+
+class ObservationBody(BaseModel):
+    """What the page LOOKED like around one interaction.
+
+    The executor's `/observe` payload verbatim: url, title, viewport, scroll,
+    visible text and the inventory of interactive elements.
+    """
+    clientEventId: str
+    observation: dict
+
+
+@router.post("/sessions/{session_id}/observations")
+def record_observations(
+    session_id: UUID, body: list[ObservationBody],
+    current: models.Annotator = Depends(current_annotator), db: Session = Depends(get_db),
+) -> dict:
+    """Attach page observations to recorded interactions.
+
+    Nothing captured an observation before this, so a shipped trajectory carried
+    the action and no account of the page it was taken on — which is the half a
+    lab needs to train "given this page, click that".
+
+    Stored as an artifact rather than a column: an observation is tens of KB, it
+    is content-addressed so the many steps that share an unchanged page cost one
+    copy, and it ships in the export as a path plus digest like any other blob.
+    """
+    s = _owned_session(db, session_id, current)
+    _assert_not_submitted(s)
+    stored = 0
+    for o in body:
+        ev = db.scalar(
+            select(models.InteractionEvent).where(
+                models.InteractionEvent.attempt_id == s.id,
+                models.InteractionEvent.client_event_id == o.clientEventId,
+            )
+        )
+        if ev is None:
+            continue        # the observation outlived its event; nothing to hang it on
+        obs = o.observation or {}
+        if not obs:
+            continue
+        raw = json.dumps(obs, sort_keys=True, separators=(",", ":"), default=str).encode()
+        art = checkpoints.add_artifact(
+            db, kind="observation", uri=f"attempt/{s.id}/{o.clientEventId}.json", data=raw,
+            meta={"clientEventId": o.clientEventId, "url": obs.get("url", ""),
+                  "elements": len(obs.get("elements") or []),
+                  "truncated": bool(obs.get("truncated"))},
+        )
+        payload = dict(ev.payload or {})
+        payload["observationArtifactId"] = str(art.id)
+        ev.payload = payload
+        # If the event already became a step, hang the observation on the
+        # checkpoint that step produced — same both-sides rendezvous as frames.
+        if ev.committed_step_id:
+            st = db.get(models.TrajectoryStep, ev.committed_step_id)
+            cp = db.get(models.EnvironmentCheckpoint, st.after_checkpoint_id) if st and st.after_checkpoint_id else None
+            if cp is not None and cp.dom_artifact_id is None:
+                cp.dom_artifact_id = art.id
+        stored += 1
+    db.commit()
+    return {"stored": stored}
 
 
 @router.post("/sessions/{session_id}/frames")

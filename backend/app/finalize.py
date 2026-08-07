@@ -267,6 +267,25 @@ def _rejected_steps(db: Session, attempt_id: UUID, version: models.TrajectoryVer
     return [str(s.id) for s in versions.flatten(db, version) if str(s.id) in marked]
 
 
+def _observation_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
+    """The page this step was taken against, as a content reference.
+
+    Lives on the step's checkpoint (`dom_artifact_id`) because an observation
+    describes a WORLD, not an action, and many steps can share one unchanged
+    page — content addressing then costs a single copy. `elements` and `url` are
+    lifted out of the artifact's meta so a consumer can decide whether to fetch
+    the body at all.
+    """
+    cp = db.get(models.EnvironmentCheckpoint, s.after_checkpoint_id) if s.after_checkpoint_id else None
+    art = db.get(models.Artifact, cp.dom_artifact_id) if cp is not None and cp.dom_artifact_id else None
+    if art is None or not art.sha256:
+        return None
+    meta = art.meta or {}
+    return {"path": art.uri, "sha256": art.sha256, "bytes": art.bytes,
+            "url": meta.get("url", ""), "elements": meta.get("elements"),
+            "truncated": bool(meta.get("truncated"))}
+
+
 def _artifact_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
     """The step's screenshot as something a CLIENT can use.
 
@@ -336,6 +355,11 @@ def freeze(
             # check it against, so a client can tell a missing image from a
             # corrupted one. None when the step genuinely has no frame.
             "screenshot": _artifact_ref(db, s),
+            # What the page looked like. The other half of an SFT pair: without
+            # it the sample says what was done and nothing about what could be
+            # seen. Captured on the ack, so it is the page AFTER this action —
+            # i.e. the input the NEXT step was decided from.
+            "observation": _observation_ref(db, s),
             "reasoning": s.reasoning or "", "human_intent": s.human_intent or "",
             "guidance": s.guidance_text or "",
             "world_hash": after.world_hash if after else "",
