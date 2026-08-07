@@ -20,7 +20,9 @@ export type IconName =
   | "checkSquare"
   | "branch"
   | "alert"
-  | "swap";
+  | "swap"
+  | "expand"
+  | "collapse";
 
 const STROKE: Record<string, string> = {
   chevronLeft: "M15 6l-6 6 6 6",
@@ -33,6 +35,11 @@ const STROKE: Record<string, string> = {
   skipStart: "M7 6v12",
   skipEnd: "M17 6v12",
   swap: "M7 8h13M7 8l3-3M7 8l3 3M17 16H4M17 16l-3-3M17 16l-3 3",
+  // Give a panel's space to the work surface, and hand it back. Corner
+  // arrows rather than a chevron, because this widens what you are working
+  // ON — it is not navigation.
+  expand: "M9 4H4v5M4 4l6 6M15 20h5v-5M20 20l-6-6",
+  collapse: "M10 4v5H5M10 9L4 3M14 20v-5h5M14 15l6 6",
 };
 
 const FILL: Record<string, string> = {

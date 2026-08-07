@@ -237,6 +237,8 @@ export function VersionGraph({
   // the mount the app actually renders rather than only where a test passes it.
   const sourced = useAgentRuns(runs ? null : graph?.attemptId ?? null, graph?.versions.length);
   const budget = runBudget(runs ?? sourced);
+  // A budget is only worth saying out loud once it means something.
+  const spentARun = !!budget && (budget.left < budget.cap || budget.reserved > 0);
   // The payload carries the fork POINT but not the fork MODE, so a row can name
   // the version it branched from and must not claim which step it rejected.
   const numberOf = new Map((graph?.versions ?? []).map((v) => [v.id, v.versionNo]));
@@ -249,18 +251,30 @@ export function VersionGraph({
         </span>
         <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", color: t.n3 }}>
           {head ? `head v${head.versionNo}` : "no head yet"}
-          {budget ? ` · ${budget.left}/${budget.cap} runs` : ""}
+          {spentARun ? ` · ${budget!.left}/${budget!.cap} runs` : ""}
         </span>
       </div>
 
-      {budget && <RunBudgetPanel budget={budget} />}
+      {/* Only once a run has actually been spent, or one is in flight.
+          This is a human-do platform: the annotator performs the task and their
+          own actions are v1, and no surface can start an agent run at all. So a
+          fresh attempt opened on "3 of 3 agent runs left" — a budget for
+          something the annotator cannot do and has no use for. If branch runs are
+          ever wired to a control, this comes back the moment the first one lands. */}
+      {spentARun && <RunBudgetPanel budget={budget!} />}
 
       {notice && <MovedOnNotice notice={notice} onDismiss={onDismissNotice} />}
 
       {rows.length === 0 ? (
         <div style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
           <span style={{ fontSize: "0.75rem", color: t.n2, lineHeight: 1.5 }}>
-            No lineage yet. v1 is the canonical agent run this attempt annotates; every correction hangs off it.
+            {/* This said "v1 is the canonical agent run this attempt annotates".
+                It is a human-do platform: v1 is the annotator's OWN work, there
+                is no agent run, and every sentence of the old copy was false on
+                the screen it was shown on. */}
+            Nothing branched yet. v1 is what you are recording now; if you need to
+            undo a stretch of it, forking from a step starts v2 here and the
+            original stays intact.
           </span>
         </div>
       ) : (
@@ -360,7 +374,8 @@ export function VersionGraph({
 
       <div style={{ padding: "9px 16px", borderTop: `1px solid ${t.n8}`, background: t.n85 }}>
         <span style={{ fontSize: "0.6875rem", color: t.n3, lineHeight: 1.45 }}>
-          Opening a version only reads it. An agent run finishes as a candidate and never takes the head on its own.
+          Opening a version only reads it — a version becomes the attempt's answer
+          when you select it as HEAD, never on its own.
         </span>
       </div>
     </div>

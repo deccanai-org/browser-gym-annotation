@@ -641,9 +641,17 @@ function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipp
   );
 }
 
-function Frame({ children }: { children: ReactNode }) {
+/** `wide` is for the TASK screen, which is a tool rather than a document.
+ *
+ *  Everything here used to sit inside 1440px, which is right for the board — a
+ *  list wants a readable measure. But the task screen is three columns, two of
+ *  them fixed (the trajectory at 320, the brief at 360), so the live browser got
+ *  whatever was left: about 700px to render a 1280px viewport, i.e. 55%. The
+ *  annotator was doing the task through a more-than-half-scale window, which is
+ *  the one surface in the product that has to be legible. */
+function Frame({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
-    <div style={{ maxWidth: 1440, width: "100%", margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.n85, border: `1px solid ${t.n7}` }}>
+    <div style={{ maxWidth: wide ? 2200 : 1440, width: "100%", margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.n85, border: `1px solid ${t.n7}` }}>
       {children}
     </div>
   );
@@ -739,6 +747,10 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   const [resettingWorld, setResettingWorld] = useState(false);
   const [liveOpening, setLiveOpening] = useState(false);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
+  // Folds the task brief away so the live browser gets its 360px. Not
+  // persisted: it is a per-moment choice — you widen the browser to do the
+  // fiddly part, then want the prompt back.
+  const [focusMode, setFocusMode] = useState(false);
   // Why the gym would not start. Distinct from `liveNotice` (a transient toast):
   // this one REPLACES the workspace, because a live pane with no stream accepts
   // clicks and records none of them.
@@ -1027,7 +1039,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   };
 
   return (
-    <Frame>
+    <Frame wide>
       <Header {...nav} />
       {liveNotice && <Toast message={liveNotice} onDismiss={() => setLiveNotice(null)} bottom={24} />}
       <div style={{ padding: "16px 16px 8px" }}>
@@ -1042,6 +1054,18 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
                 resetting={resettingWorld}
               />
             )}
+            {/* The browser is the surface the annotator actually works on, and it
+                was rendering at roughly half scale: three columns inside a fixed
+                width, two of them fixed-size, so the pane got the remainder.
+                Folding the brief away hands those 360px straight to it. The
+                trajectory stays — watching steps appear is how you know the
+                recording is alive. */}
+            <span onClick={() => setFocusMode((v) => !v)}
+              title={focusMode ? "Show the task brief" : "Hide the brief and give the browser its width"}
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: t.radiusLg, border: `1px solid ${focusMode ? t.primary6 : t.n6}`, background: focusMode ? t.primary8 : t.n9, color: focusMode ? t.primary6 : t.n2, fontSize: "0.75rem", fontWeight: weight.semibold, cursor: "pointer", whiteSpace: "nowrap" }}>
+              <Icon name={focusMode ? "collapse" : "expand"} size={13} stroke={2.2} />
+              {focusMode ? "Show brief" : "Focus"}
+            </span>
             <SaveBadge sessionId={sessionId} status={status} />
             {/* Every control below writes (or replays) a legacy correction
                 branch, which no version can contain and finalize cannot ship.
@@ -1072,7 +1096,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
               onRetry={() => void showLive()}
             />
           </main>
-          <RightPanel
+          {!focusMode && <RightPanel
             task={promptOverride ? { ...data.task, prompt: promptOverride } : data.task}
             summary={runSummary(state)}
             // Gym: saving a new prompt re-drives the WHOLE run under it (then a
@@ -1087,7 +1111,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
               if (sessionId) void patchSession(sessionId, { promptOverride: text });
             }}
             rerunsOnSave={false}
-          />
+          />}
         </div>
         {/* The lineage of THIS run: v1, every correction hanging off it, and the
             per-step verdicts. It sits with the trace it describes rather than

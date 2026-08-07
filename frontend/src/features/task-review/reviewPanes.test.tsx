@@ -246,8 +246,19 @@ describe("the lineage panel", () => {
     // With no backend there is no lineage to draw, and an annotator staring at
     // a blank card cannot tell that from a broken one.
     const html = renderToStaticMarkup(<LineagePanel sessionId={null} isGym />);
-    expect(html).toContain("No lineage yet");
+    expect(html).toContain("Nothing branched yet");
     expect(html).toContain("This version has no steps yet.");
+  });
+
+  it("does not describe v1 as an agent run", () => {
+    // This is a human-do platform: the annotator performs the task and their own
+    // actions ARE v1. The panel used to open on "v1 is the canonical agent run
+    // this attempt annotates", "3 of 3 agent runs left", and "an agent run
+    // finishes as a candidate" — every one of them false on the screen it was
+    // shown on, and left over from when this reviewed recorded agent runs.
+    const html = renderToStaticMarkup(<LineagePanel sessionId={null} isGym />);
+    expect(html).not.toContain("agent run");
+    expect(html).not.toContain("agent runs left");
   });
 
   it("does not offer to create a baseline it cannot save", () => {
