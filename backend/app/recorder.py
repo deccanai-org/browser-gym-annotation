@@ -353,7 +353,13 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
                 act["payload"] = {"value": None, "redacted": False}
                 act["incomplete"] = True
             else:
-                act["payload"] = {"value": value, "redacted": False}
+                # `valueHtml` when the field is a rich editor. The trajectory's
+                # `value` stays plain text — that is what the sample is read for
+                # — and the markup rides beside it so a replay can reproduce the
+                # body the mock actually stored rather than a flattened one.
+                html = (last.get("payload") or {}).get("valueHtml")
+                act["payload"] = {"value": value, "redacted": False,
+                                  **({"valueHtml": html} if html else {})}
             out.append(act)
             i = j
             continue

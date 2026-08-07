@@ -471,3 +471,33 @@ def test_the_kinds_we_claim_the_executor_speaks_are_the_ones_it_speaks():
 
     missing = recorder.EXECUTOR_KINDS - handled
     assert not missing, f"we claim the executor speaks {sorted(missing)}, and it does not"
+
+
+def test_a_rich_editors_markup_rides_beside_its_text():
+    """The last differing leaf on a real M105 certify.
+
+    ShopMail stores the compose body as `bodyRef.current.innerHTML`, so a fill
+    that only knows the text replays it as flat divs: the same words, a different
+    body, and the world hash says diverged at the final step. `value` stays plain
+    text — that is what the sample is read for, and nobody training on this wants
+    a <span> in it — so the markup travels beside it.
+    """
+    events = [
+        {"seq": 1, "kind": "keyChar", "t": 1000, "target": {"targetKey": "body"},
+         "payload": {"text": "H", "value": "H", "valueHtml": "<div>H</div>"}},
+        {"seq": 2, "kind": "keyChar", "t": 1050, "target": {"targetKey": "body"},
+         "payload": {"text": "i", "value": "Hi", "valueHtml": "<div>Hi</div><span class=\'sig\'>--</span>"}},
+    ]
+    acts = recorder.coalesce(events)
+    fill = next(a for a in acts if a["kind"] == "fill")
+    assert fill["payload"]["value"] == "Hi", "the readable value stays plain text"
+    assert fill["payload"]["valueHtml"] == "<div>Hi</div><span class=\'sig\'>--</span>"
+
+
+def test_a_plain_input_carries_no_markup_key_at_all():
+    """Only a rich editor reports one, and an absent key is how the executor
+    knows to fill by text."""
+    events = [{"seq": 1, "kind": "keyChar", "t": 1000, "target": {"targetKey": "to"},
+               "payload": {"text": "a", "value": "a"}}]
+    fill = next(a for a in recorder.coalesce(events) if a["kind"] == "fill")
+    assert "valueHtml" not in fill["payload"]

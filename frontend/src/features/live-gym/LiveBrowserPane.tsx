@@ -477,7 +477,8 @@ export function LiveBrowserPane({
     const tgt = targetRef.current;
     sock.send({ type: "paste", text }, (st) => ({
       kind: "paste",
-      payload: { text, value: (st?.focus as Record<string, unknown> | undefined)?.value, t: Date.now() },
+      payload: { text, value: (st?.focus as Record<string, unknown> | undefined)?.value,
+                 valueHtml: (st?.focus as Record<string, unknown> | undefined)?.valueHtml, t: Date.now() },
       target: (st?.focus as Record<string, unknown> | undefined) ?? tgt,
       url: st?.url ?? pageUrl,
       tab: st?.tabId ?? "",
@@ -557,7 +558,10 @@ export function LiveBrowserPane({
           // from the page. It is what makes a fill correct: the client only knows
           // the characters it sent, so Backspace, autocomplete or a rejected key
           // made its own idea of the value wrong — "mug⌫s" used to commit as "s".
-          payload: { text: e.key, value: focus?.value, t: Date.now() },
+          // valueHtml rides along for a rich editor: the mock stores markup,
+          // so a replayed fill that only knows the text rebuilds the body as
+          // flat divs and the world hash says diverged.
+          payload: { text: e.key, value: focus?.value, valueHtml: focus?.valueHtml, t: Date.now() },
           target: focus ?? tgt,
           url: st?.url ?? pageUrl,
           tab: st?.tabId ?? "",
