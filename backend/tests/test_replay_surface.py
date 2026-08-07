@@ -49,8 +49,9 @@ def fake_bridge(monkeypatch):
     """A bridge that hands out a gym and records what was opened/closed."""
     calls = {"opened": [], "closed": []}
 
-    def _open(sid, task_ext, seed, sids):
-        calls["opened"].append({"sid": sid, "task": task_ext, "seed": seed, "sids": dict(sids)})
+    def _open(sid, task_ext, seed, sids, *, force=False):
+        calls["opened"].append({"sid": sid, "task": task_ext, "seed": seed,
+                                "sids": dict(sids), "force": force})
         return {"gym_url": "http://gym-scratch:8077", "reused": False}
 
     monkeypatch.setattr(replay_surface.bridge_client, "open_session", _open)
@@ -171,3 +172,28 @@ def test_a_scratch_surface_is_distinct_per_purpose(db_session, fake_bridge):
         pass
     opened = [c["sid"] for c in fake_bridge["opened"]]
     assert len(set(opened)) == 2, opened
+
+
+def test_a_scratch_world_is_reset_every_time_not_reattached(db_session, fake_bridge):
+    """The bug that made every check after the first one fail.
+
+    `open_session` is idempotent by design: re-opening a session already on this
+    task and seed ATTACHES to the world that is there, so an annotator
+    reconnecting cannot lose work. Right for their session, wrong for a scratch
+    one — `scratch_id` is derived from the attempt and purpose, so the second
+    check attached to the world the first check had already replayed, order
+    placed and all, and diverged the moment it re-ran the step that placed it.
+
+    Reproduced against the live stack: first certify on a clean pool verified all
+    11 steps; every certify after it failed at step 7 with 8 verified, on a
+    trajectory that was fine.
+    """
+    attempt = _bridged_attempt()
+    for _ in range(2):
+        with replay_surface.scratch_surface(db_session, attempt, _Task()):
+            pass
+
+    assert len(fake_bridge["opened"]) == 2
+    assert all(o["force"] is True for o in fake_bridge["opened"]), (
+        "a scratch world that is kept is not scratch"
+    )

@@ -107,7 +107,21 @@ def scratch_surface(db: Session, attempt: models.ReviewSession, task,
     sids = cua_hub.attempt_sids()      # throwaway; discarded with the session
     task_ext = task.external_id if task is not None else ""
     try:
-        out = bridge_client.open_session(scratch_id, task_ext, attempt.seed, sids)
+        # force=True: a scratch surface must be CLEAN, every time.
+        #
+        # `open_session` is idempotent by design — re-opening a session already on
+        # this task and seed attaches to the world that is there, so an annotator
+        # reconnecting cannot lose work in progress. Exactly right for their own
+        # session, and exactly wrong here: `scratch_id` is derived from the
+        # attempt and the purpose, so the SECOND check of an attempt attached to
+        # the world the FIRST check had already replayed — order placed and all —
+        # and the replay diverged the moment it re-ran the step that placed it.
+        #
+        # It reproduced perfectly: the first certify on a clean pool verified all
+        # 11 steps, and every certify after it failed at step 7 with 8 verified,
+        # for a trajectory that was fine. Resetting is the whole point of a
+        # scratch world; keeping one is what makes it not scratch.
+        out = bridge_client.open_session(scratch_id, task_ext, attempt.seed, sids, force=True)
     except bridge_client.BridgePoolExhausted as exc:
         raise HTTPException(
             status_code=503,
