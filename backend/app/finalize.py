@@ -31,13 +31,58 @@ from app.config import settings
 
 class NotApproved(RuntimeError):
     """QC has not approved this version. The post-submission `accepted` flag is
-    too late to serve as the gate — by then it has already shipped."""
+    too late to serve as the gate — by then it has already shipped.
+
+    Carries the per-check outcome when the refusal came from the SUITE. The
+    message alone said "this version does not pass its verifier suite", which
+    does not tell an annotator the one thing they need: whether a check ran and
+    said no, or never ran at all. Those have opposite fixes — redo the task
+    versus fix the check — and under the fail-closed rule an unprovable check
+    blocks a ship exactly as loudly as a failing one.
+    """
+
+    def __init__(self, message: str, *, results: dict | None = None,
+                 executed: list[str] | None = None, unproven: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.results = results or {}
+        self.executed = list(executed or [])
+        self.unproven = list(unproven or [])
 
 
 class Scorer(Protocol):
-    """Runs the bound verifier suite against the world the replay ended in."""
+    """Runs the bound verifier suite against the world the replay ended in, and
+    the TRACE it took to get there.
 
-    def score(self, suite: models.VerifierSuite, world: dict | None) -> tuple[int, dict]: ...
+    The trace is a parameter because leaving it out made an entire class of check
+    undeliverable. `trace_max_steps`, `trace_hosts_subset`, `trace_action_count`
+    and the LLM `trace_policy` checks all read `ctx["trace"]`, and the autogen
+    path appends policy checks to every suite it generates — so any adopted
+    autogen suite could never reach reward 1, forever, because the scorer had no
+    trace to run them against and recorded them unprovable. It was never actually
+    unavailable: finalize builds the action list and replays it immediately
+    before scoring.
+
+    Optional so an older scorer still satisfies the protocol; `finalize` passes
+    it whenever the callee accepts it.
+    """
+
+    def score(self, suite: models.VerifierSuite, world: dict | None,
+              trace: list[dict] | None = None) -> tuple[int, dict]: ...
+
+
+def trace_of(db: Session, version: models.TrajectoryVersion) -> list[dict]:
+    """The flattened trajectory in the shape the trace checks read.
+
+    Deliberately NOT `actions_of`: that is the replay IR (kind/locator/args) and
+    the checks want `type` and `tabId` — `trace_hosts_subset` asks which tabs the
+    run touched, `trace_action_count` counts a kind on a tab. Same rows, a
+    different projection.
+    """
+    return [
+        {"type": s.action_type, "tabId": s.tab_id, "stepId": str(s.id),
+         "actor": s.actor, "url": s.url_after, "description": s.description}
+        for s in versions.flatten(db, version)
+    ]
 
 
 def actions_of(db: Session, version: models.TrajectoryVersion) -> list[dict]:
@@ -210,16 +255,48 @@ def finalize(
     final_cp = checkpoints.capture(
         db, attempt_id=attempt.id, world=final_world, step_clock=len(actions),
     )
-    reward, results = scorer.score(suite, final_world)
+    # Hand over the trace as well as the world. Older scorers take two arguments,
+    # so this asks rather than assumes — a TypeError here would fail a ship for a
+    # reason that has nothing to do with the sample.
+    trace = trace_of(db, version)
+    try:
+        reward, results = scorer.score(suite, final_world, trace)
+    except TypeError:
+        reward, results = scorer.score(suite, final_world)
     # A run that does not pass its own suite is not shipped by accident. The
     # legacy path refused this outright unless a human took the override on the
     # record; keeping the gate means "the verifiers say no" cannot become a
     # dataset row through nothing more than clicking the last button.
     if reward != 1 and not accept_failing:
-        raise NotApproved(
-            "this version does not pass its verifier suite — ship it deliberately as a breaker "
-            "if that is what you mean, or fix the correction first"
-        )
+        # Say WHICH checks, and which of them never ran. "Does not pass its
+        # verifier suite" sent the annotator back to the task when the actual
+        # problem was often a check that could not be executed at all — opposite
+        # fixes, and under the fail-closed rule an unprovable check blocks a ship
+        # exactly as loudly as a failing one.
+        failed = sorted(k for k, r in (results or {}).items() if r == "fail")
+        unproven = sorted(k for k, r in (results or {}).items() if r not in ("pass", "fail"))
+        if unproven and not failed:
+            msg = ("this version cannot be scored: "
+                   + ", ".join(unproven)
+                   + (" could not be run" if len(unproven) == 1 else " could not be run")
+                   + ". Fix or remove those checks — a sample is only worth what its "
+                     "verifiers actually proved.")
+        elif failed:
+            msg = ("this version does not pass " + ", ".join(failed)
+                   + (" and " + ", ".join(unproven) + " could not be run" if unproven else "")
+                   + ". Fix the run, or ship it deliberately as a breaker if that is what you mean.")
+        elif not results:
+            msg = ("this version has no verifier that proves anything — an empty suite "
+                   "cannot earn a reward.")
+        else:
+            # Reward 0 while every check reads pass. Nothing here can explain
+            # that, so do not invent a reason; the general refusal is the honest
+            # one.
+            msg = ("this version does not pass its verifier suite — ship it deliberately as a "
+                   "breaker if that is what you mean, or fix the correction first")
+        raise NotApproved(msg, results=results,
+                          executed=sorted(k for k, r in (results or {}).items() if r in ("pass", "fail")),
+                          unproven=unproven)
     overridden: list[str] = []  # v2 has no override path yet; the rule is here so adding one cannot forget it
 
     # The sample's kind is DERIVED, never named by the caller. The legacy path

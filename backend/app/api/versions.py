@@ -275,16 +275,34 @@ UNKNOWN = "unknown"
 
 # The check kinds this scorer can genuinely execute against the world the replay
 # ended in. A WHITELIST rather than a blacklist, because the failure mode of
-# guessing is silent: `trace_max_steps` evaluated against the empty trace we have
-# here is trivially true, so a check that never ran would report a pass — and a
-# kind added to app/verify.py later would inherit whatever this happened to do.
-# dom_* (needs the captured snapshots) and trace_* / trace_policy (need the
-# action trace) are therefore left unproven rather than scored blind.
-_EXECUTABLE = frozenset({
+# guessing is silent: a kind added to app/verify.py later would otherwise inherit
+# whatever this happened to do.
+_STATE_KINDS = frozenset({
     "state_true", "state_false", "state_eq", "state_lte", "state_gte",
     "state_nonempty", "state_empty", "state_len_gte", "state_len_eq",
     "state_contains", "judge_state",
 })
+
+# These read `ctx["trace"]`, and they are only executable when we HAVE one.
+#
+# They used to be excluded outright, on the reasoning that `trace_max_steps`
+# against an empty trace is trivially true. That reasoning was right and the
+# conclusion was wrong: the answer is to supply the trace, not to refuse to
+# score. Excluding them made an existing feature undeliverable — the autogen path
+# appends `trace_policy` checks to every suite it generates, so any adopted
+# autogen suite could never reach reward 1, forever. `finalize` builds the action
+# list and replays it immediately before scoring; the trace was there all along.
+#
+# Still conditional: with no trace they go back to being unprovable, because a
+# check scored against nothing is exactly the silent pass this whitelist exists
+# to prevent.
+_TRACE_KINDS = frozenset({
+    "trace_max_steps", "trace_hosts_subset", "trace_action_count", "trace_policy",
+})
+
+# dom_* stays out under any conditions — it needs the captured DOM snapshots,
+# which a replay does not produce.
+_EXECUTABLE = _STATE_KINDS | _TRACE_KINDS
 
 
 class SuiteScorer:
@@ -313,7 +331,8 @@ class SuiteScorer:
         self.executed: list[str] = []
         self.unproven: list[str] = []
 
-    def score(self, suite: models.VerifierSuite, world: dict | None) -> tuple[int, dict]:
+    def score(self, suite: models.VerifierSuite, world: dict | None,
+              trace: list[dict] | None = None) -> tuple[int, dict]:
         verdict = self.gym.verify(0) or {}
         self.gym_success = bool(verdict.get("success")) if verdict else None
         milestones = list(verdict.get("all_milestones") or [])
@@ -335,10 +354,17 @@ class SuiteScorer:
         # the `m<digits>` shape and nothing else.
         by_ordinal = {f"m{j}": m for j, m in enumerate(milestones)}
         state = world or {}
+        # The tabs the run may touch, for `trace_hosts_subset`: the ones it
+        # actually did. A trace check asks whether the run stayed inside the
+        # task's apps, and every tab in the recording is one the annotator was
+        # given — so an empty allow-list would fail every run rather than
+        # catching a real excursion.
+        ctx = {"state": state, "trace": list(trace or []),
+               "allowed_tabs": {str(st.get("tabId")) for st in (trace or []) if st.get("tabId")}}
         results: dict[str, str] = {}
         for v in suite.verifiers:
             key = v.ext_id or str(v.id)
-            r = self._one(v, by_name, by_ordinal, state)
+            r = self._one(v, by_name, by_ordinal, ctx)
             results[key] = r
             (self.unproven if r == UNKNOWN else self.executed).append(key)
             # The result FROM THIS RUN. `gym_result` was written once when the
@@ -351,7 +377,7 @@ class SuiteScorer:
         reward = 1 if results and all(r == "pass" for r in results.values()) else 0
         return reward, results
 
-    def _one(self, v: models.Verifier, by_name: dict, by_ordinal: dict, state: dict) -> str:
+    def _one(self, v: models.Verifier, by_name: dict, by_ordinal: dict, ctx: dict) -> str:
         ir = v.check_ir or {}
         kind = str(ir.get("kind") or "")
         if kind == "gym_milestone" or not kind:
@@ -366,11 +392,22 @@ class SuiteScorer:
             return gym_review._milestone_result(m) if m is not None else UNKNOWN
         if kind not in _EXECUTABLE:
             return UNKNOWN
+        # A trace check with no trace is not a check, it is a coin flip weighted
+        # towards pass (`trace_max_steps` against an empty list is trivially
+        # true). Say unprovable instead.
+        if kind in _TRACE_KINDS and not ctx.get("trace"):
+            return UNKNOWN
         try:
             # The autogen suites' paths are world-rooted (api/gym.py generates and
             # gates them against `gym_client.world()`), which is exactly the world
             # the replay just produced.
-            ok = verify._eval_check(ir, {"state": state, "trace": [], "allowed_tabs": set()})
+            if kind == "trace_policy":
+                # The LLM trajectory judge. It carries a deterministic `fallback`
+                # for when no key is configured, which is why it can be scored at
+                # all here rather than left unproven.
+                ok = verify._policy_verdict(ir, ctx)
+            else:
+                ok = verify._eval_check(ir, ctx)
         except Exception:  # noqa: BLE001 — a malformed IR is unprovable, never a pass
             ok = False
         return "pass" if ok else "fail"
@@ -575,7 +612,15 @@ def finalize_attempt(
                 rewrite=surface.rewrite,
             )
         except finalize.NotApproved as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            # Structured when the refusal came from the SUITE, so the pane can
+            # show which checks ran, which failed, and which could not be run at
+            # all. A bare string sent the annotator back to redo a task whose
+            # real problem was a check that never executed.
+            detail: object = str(exc)
+            if getattr(exc, "results", None):
+                detail = {"error": str(exc), "results": exc.results,
+                          "executed": exc.executed, "unproven": exc.unproven}
+            raise HTTPException(status_code=409, detail=detail) from exc
         except replay.ReplayRejected as exc:
             raise HTTPException(status_code=422, detail={
                 "error": "the approved version does not replay cleanly", "at": exc.at, "reason": exc.reason,

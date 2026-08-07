@@ -360,3 +360,98 @@ def test_a_forbidden_tripwire_tripped_on_the_first_action_is_a_failure():
     )
     assert gym_review._milestone_result(
         _milestone("issued_refund", fired=-1, required=False, forbidden=True)) == "pass"
+
+
+# ------------------------------------------------------------------- the trace
+def test_a_trace_check_is_scored_against_the_run_that_was_replayed(db_session, attempt):
+    """The exclusion that made an existing feature undeliverable.
+
+    trace_* and trace_policy read ctx["trace"], and the autogen path appends a
+    policy check to every suite it generates — so with the trace withheld, any
+    adopted autogen suite scored `unknown` forever and could never reach reward
+    1. The trace was never unavailable: finalize builds the action list and
+    replays it immediately before scoring.
+    """
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("under_20_steps", {"kind": "trace_max_steps", "n": 20}, "")])
+    gym = FakeGym(success=True)
+    trace = [{"type": "click", "tabId": "shop"} for _ in range(3)]
+
+    reward, results = SuiteScorer(gym).score(suite, gym.world(), trace)
+    assert results == {"under_20_steps": "pass"}, "a short run passes a step cap"
+    assert reward == 1
+
+
+def test_a_trace_check_that_the_run_violates_fails(db_session, attempt):
+    """Scoring them has to mean scoring them, not waving them through."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("under_2_steps", {"kind": "trace_max_steps", "n": 2}, "")])
+    gym = FakeGym(success=True)
+    trace = [{"type": "click", "tabId": "shop"} for _ in range(9)]
+
+    reward, results = SuiteScorer(gym).score(suite, gym.world(), trace)
+    assert results == {"under_2_steps": "fail"} and reward == 0
+
+
+def test_a_trace_check_with_no_trace_is_unknown_not_a_pass(db_session, attempt):
+    """Why it was excluded in the first place, and the part that has to survive:
+    `trace_max_steps` against an empty list is trivially true, so a check that
+    never ran would report a pass. Supplying the trace is the fix; scoring
+    against nothing is still refused."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("under_20_steps", {"kind": "trace_max_steps", "n": 20}, "")])
+    gym = FakeGym(success=True)
+
+    reward, results = SuiteScorer(gym).score(suite, gym.world(), None)
+    assert results == {"under_20_steps": "unknown"} and reward == 0
+
+
+def test_the_tabs_a_run_touched_are_the_tabs_it_was_allowed(db_session, attempt):
+    """`trace_hosts_subset` asks whether the run stayed inside the task's apps.
+    Every tab in the recording is one the annotator was given, so an empty
+    allow-list would fail every run instead of catching a real excursion."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("stayed_in_apps", {"kind": "trace_hosts_subset"}, "")])
+    gym = FakeGym(success=True)
+    trace = [{"type": "click", "tabId": "shop"}, {"type": "click", "tabId": "mail"}]
+
+    _reward, results = SuiteScorer(gym).score(suite, gym.world(), trace)
+    assert results == {"stayed_in_apps": "pass"}
+
+
+# --------------------------------------------------------------- the refusal
+def test_a_refusal_says_which_checks_failed(db_session, attempt):
+    """"This version does not pass its verifier suite" sent the annotator back to
+    redo the task without saying what was wrong with it."""
+    from app import finalize
+
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("cart_empty", {"kind": "state_eq", "path": "shop.cart.total", "value": 0}, "")])
+    gym = FakeGym(world={"shop": {"cart": {"total": 41.98}}}, success=True)
+
+    with pytest.raises(finalize.NotApproved) as ei:
+        finalize.finalize(db_session, attempt=s, version=_v, suite=suite,
+                          executor=FakeExecutor(), gym=gym, scorer=SuiteScorer(gym),
+                          task_external_id=_task.external_id, require_replay=False)
+    assert "cart_empty" in str(ei.value), str(ei.value)
+    assert ei.value.results.get("cart_empty") == "fail"
+    assert ei.value.unproven == []
+
+
+def test_a_refusal_tells_a_check_that_could_not_run_apart_from_one_that_failed(db_session, attempt):
+    """The distinction the annotator needs: those have opposite fixes. Under the
+    fail-closed rule an unprovable check blocks a ship exactly as loudly as a
+    failing one, and the old message made them indistinguishable."""
+    from app import finalize
+
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("is_polite", {}, "")])     # free text, no IR
+    gym = FakeGym(success=True)
+
+    with pytest.raises(finalize.NotApproved) as ei:
+        finalize.finalize(db_session, attempt=s, version=_v, suite=suite,
+                          executor=FakeExecutor(), gym=gym, scorer=SuiteScorer(gym),
+                          task_external_id=_task.external_id, require_replay=False)
+    msg = str(ei.value)
+    assert "could not be run" in msg and "is_polite" in msg, msg
+    assert ei.value.unproven == ["is_polite"] and ei.value.executed == []
