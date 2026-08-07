@@ -1,209 +1,194 @@
 # Browser-Use Gym — Annotator Platform
 
-The internal annotation/review platform for Deccan AI's browser-use gym. An
-annotator picks a **breaker task**, watches the agent's recorded run step-by-step,
-**corrects a step** (a live agent re-runs forward from that state), builds and runs
-a multi-level **verifier suite**, and submits the reward-gated result to the dataset.
+The internal annotation platform for Deccan AI's browser-use gym. An annotator is
+assigned a **breaker task**, **does it by hand** in a live gym of five realistic
+web apps, and every interaction they take is recorded as a trajectory. They then
+build a verifier suite, ship the result, and a reviewer adjudicates it.
 
-It sits on top of the `ecommerce-browser-gym` (task schema, deterministic seeding,
-oracle solvers, end-state verifiers, real trajectories) and is skinned with the
-**Deccan Vault Design System**.
+The product is the **golden sample**: a task, the seeded world it starts from, a
+step-by-step trajectory that reaches a passing end state, the verifier suite that
+scores it, and the reward. That bundle is what a customer receives.
 
----
+It sits on top of the `ecommerce-browser-gym` repo (task schema, deterministic
+seeding, the five mock apps, end-state verifiers) and is skinned with the Deccan
+Vault design system.
 
-## What's shipped
-
-The full loop runs for real, on real tasks, persisted to Postgres:
-
-> pick a breaker → replay the recorded run → verify each step → correct a step →
-> **a live agent (gpt-5.1) re-runs forward from that state** → the five-level
-> verifier suite **executes** → the reward is **computed** → submit writes a
-> golden/breaker row → next task.
-
-| Area | State |
-|---|---|
-| **Task queue** | the **85 curated breakers** (`sellable_breakers_v2`) are the main queue; `Demos` toggle → the 3 hand-authored fixtures; `All gym tasks` → browse all 312 |
-| **Replay** | per-app browser tabs + captured DOM snapshots (fixtures) / per-step screenshots (gym), full-width tab-sized viewport |
-| **Review & correct** | verify steps; correct a step → **live gym drive-forward** (gpt-5.1) forks the trajectory with the real continuation; the branch persists + restores on reload; the new steps start unreviewed |
-| **Verifier suite** | 5 levels (ui · backend · semantic · process · safety) execute against captured DOM + ground-truth state + trace; LLM judge for semantic/safety |
-| **Reward** | server-recomputed from the persisted suite; empty/placeholder verifier scores **0, never 1**; reward = 1 requires **every** verifier to pass; per-check "override to submit" is stamped |
-| **Persistence** | normalized 11-table Postgres schema; every click (review progress, suite versions, corrections, overrides) survives a refresh; real submissions |
-| **Gym bridge** | run the agent in the **live gym** and read the true milestone verdict; correct → re-verify against the real world |
-| **QA review** | multi-annotator agreement + adjudication |
-| **Deploy** | Alembic migrations; Cloud-Run-ready containers (see `docs/DEPLOY.md`) |
+> **This used to be an agent-REVIEW platform** — the annotator watched a recorded
+> agent run and corrected a step. It is now **human-do**: the annotator performs
+> the task themselves and their actions are the trajectory. If you find docs
+> describing the old flow, they are stale.
 
 ---
 
-## Quick start (Docker — the whole stack, one command)
+## Quick start
 
-Requires **Docker Desktop** running.
+Requires **Docker Desktop**.
 
 ```bash
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-That brings up four containers. On first boot the backend **creates the schema and
-seeds the task catalog automatically** — no manual DB setup needed.
-
 | Service | URL | What it is |
 |---|---|---|
-| **frontend** | http://localhost:8080 | the Task Review app — open this |
+| **frontend** | http://localhost:8080 | the annotator app — open this |
 | **backend** | http://localhost:8090 | FastAPI platform API |
-| **postgres** | localhost:**5433** | the database (published on 5433 to avoid clashing with a native :5432) |
+| **postgres** | localhost:**5433** | the database (5433 to avoid a native :5432) |
 | **adminer** | http://localhost:8081 | web DB browser |
 
-Open **http://localhost:8080** and you land on **"Breaker 1 of 85"**.
+On first boot the backend creates the schema and seeds the task catalog. You land
+on **My tasks**, your assigned queue.
 
-> To review breakers you also need the **live gym** running — see
-> [Reviewing breakers](#reviewing-breakers-the-live-gym) below. The 3 `Demos`
-> fixtures work without it.
-
----
-
-## The databases
-
-**One Postgres database, `browser_gym_annotator`** (user `annotator` / password
-`annotator` in dev). Everything the annotator does is persisted here.
-
-**Auto-provisioned in dev.** On startup the backend runs `create_all` and seeds
-the catalog (`ENV=dev`, `auto_create_all=true`). No `createdb`/migrate step is
-needed for the Docker stack — the tables exist and the tasks are seeded the moment
-the backend is healthy.
-
-**Seeded catalog (315 tasks):** 3 hand-authored fixtures + 312 gym tasks (of which
-the 85 curated breakers are the default queue). Gym task briefs/trajectories are
-filled from the live gym on first review; the 85 breaker manifest lives at
-`backend/app/data/breakers.json`.
-
-**Schema — 11 FK-linked tables** (`backend/app/models.py`):
-
-```
-annotator ─┐
-task ──────┼─< review_session ─< trajectory ─< trajectory_step
-           │        ├─< verifier_suite ─< verifier
-           │        │            └─< benchmark_run
-           │        ├─< trajectory_branch     (correction forks — versioned)
-           │        └─< submission
-           └────────< audit_log
-```
-
-Deleting a `review_session` cascades to its suites/verifiers/runs/branches/
-submissions; annotators + audit rows are `SET NULL`.
-
-**Browse it** — Adminer at http://localhost:8081 (System `PostgreSQL`, Server
-`postgres`, User/Pass `annotator`, DB `browser_gym_annotator`), or any client:
-
-```bash
-PGPASSWORD=annotator psql -h localhost -p 5433 -U annotator -d browser_gym_annotator
-```
-
-**Reset to a clean slate** (dev-only, hard-gated to `ENV=dev` + `auto_create_all`)
-— wipes all sessions/suites/runs/submissions/branches but keeps the task catalog,
-so every task reopens fresh at 0-reviewed:
-
-```bash
-curl -X POST http://localhost:8090/api/admin/reset-sessions
-```
-
-**Production** uses Alembic instead of `create_all`: set `AUTO_CREATE_ALL=false`
-+ `RUN_MIGRATIONS=1` and the container runs `alembic upgrade head` before serving
-(6 revisions in `backend/migrations/`). See `docs/DEPLOY.md`.
+Doing a task also needs the **bridged gym stack** running on the host — see below.
+Without it the board still loads and every task refuses to open, with a reason.
 
 ---
 
-## Reviewing breakers (the live gym)
+## The bridged gym stack
 
-Breaker tasks are reviewed by running the agent in the **live gym** and loading the
-real trajectory. Start the gym from the `ecommerce-browser-gym` repo (a separate
-terminal), then the annotator reaches it at `GYM_URL`
-(`http://host.docker.internal:8000` from Docker):
+The annotator drives real mock apps, not the gym's own pages. Four things run on
+the host (the annotator backend is in Docker and reaches them via
+`host.docker.internal`):
+
+| Piece | Port | What it does |
+|---|---|---|
+| the five mock apps | 5201–5205 | ShopGym · ValueMart · ShopMail · GymCal · GymEats |
+| gym instances | 8077, 8078… | one world each — **one annotator needs one gym** |
+| the bridge | 8093 | routes a click in a mock app into the real gym engine |
+| the live browser | 8877 | the Chromium the annotator watches and drives |
+
+From the `ecommerce-browser-gym` repo:
 
 ```bash
-# in the ecommerce-browser-gym repo:
-python -m uvicorn server.main:app --port 8000
+./tools/run_bridged_stack.sh
 ```
 
-- **Opening a breaker** runs the **oracle** (deterministic, no API key) and loads
-  its trajectory + milestone verifiers.
-- **Correcting a step** drives a **live agent (`openai` / gpt-5.1)** forward from
-  the corrected state — this needs `OPENAI_API_KEY` set in the **gym's** `.env`
-  (the Anthropic `llm` agent is used elsewhere but is currently org-capped).
-- `GET /api/gym/status` → `{connected:true}` when the gym is reachable. If it
-  isn't, breaker review degrades cleanly (and the 3 `Demos` fixtures still work).
-
-The annotator's own optional **fixture** live re-run uses Anthropic — set
-`ANTHROPIC_API_KEY` in the (gitignored) `infra/.env`; without it, the fixture
-re-run falls back to the deterministic gold path.
+**Pool sizing is the thing that bites.** `GYM_URLS` is the pool, and a session
+holds its gym until it is closed. Closing the browser tab never calls close, so an
+abandoned session used to hold its gym for the full 90-minute TTL — two closed tabs
+and a two-gym pool is dead for everyone. An idle session now yields its gym to a
+newcomer after a grace period (`BRIDGE_GRACE_MIN`, default 12), and an *active*
+session is never evicted. Still: **run at least one gym per concurrent annotator,
+plus one** — shipping a sample replays the trajectory in a scratch world of its own.
 
 ```bash
-# optional keys, passed at runtime, never baked into the image:
-cat > infra/.env <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...        # optional — fixture re-run + semantic judge
-GYM_HARNESS_TOKEN=dev-annotator-token
-EOF
-docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build backend
+curl -s localhost:8093/bridge/sessions   # who holds what, and how idle they are
 ```
 
 ---
 
 ## The annotator workflow
 
-1. **Pick a task** — `Breaker N of 85` (prev/next/skip), or `Demos` for fixtures.
-2. **Review & correct (Section 1)** — step through the run; **Verify** each step or
-   **Correct** one. Correcting drives the agent forward from that state and forks
-   the trajectory with the real continuation (marked *"Re-ran from step N · via
-   live agent"*); the new steps start unreviewed, so walk them, then **Approve**.
-3. **Build the verifier suite (Section 2)** — generate multi-level verifiers, edit/
-   add them, **Run** the benchmark. Reward = 1 requires every verifier to pass;
-   override a failing check (stamped) if warranted.
-4. **Submit** — writes a golden (reward 1) or breaker (reward 0) row.
-5. **QA review** — a second annotator adjudicates agreement.
+1. **My tasks** — your assigned queue, each row tagged with where *you* left off
+   (to do / in progress / returned / in review / submitted). Assignments are real
+   rows; two annotators on one task is deliberate, because that is what the QA
+   agreement number measures.
+2. **Do the task** — the live pane opens on the task's primary app with the tab
+   strip for the rest. Work through it. Every click, fill and app switch is
+   recorded; scrolls and things the page did on its own are not.
+3. **Check** — run the verifier suite against the world you actually produced.
+4. **Ship** — `prepare-ship` lists every unmet gate in plain language rather than
+   refusing one at a time. Finalize replays the trajectory from a clean reset in a
+   scratch world and refuses if it does not reproduce.
+5. **QA** — a reviewer accepts it, or returns it with a note; a returned task
+   comes back to the top of your board as a new attempt.
 
-Everything persists per action; a refresh restores exactly where you left off.
-
----
-
-## Local dev (without Docker)
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm run dev      # http://localhost:5180
-npm run build    # tsc + vite build
-npm run test     # vitest — the review state machine
-```
-
-**Backend (needs a local Postgres on 5432, or point DATABASE_URL at the Docker one on 5433):**
-```bash
-cd backend
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-createdb browser_gym_annotator          # once (skip if using the Docker postgres)
-uvicorn app.main:app --port 8090 --reload
-python -m pytest                        # executor · agent · registry · sessions · gym
-```
+Everything persists per action; a refresh restores where you left off.
 
 ---
 
-## Project structure
+## What a shipped sample contains
+
+`GET /api/export/samples/{id}`, or the whole dataset as JSONL at
+`GET /api/export/dataset.jsonl`. Per step:
+
+| | |
+|---|---|
+| **action** | kind, semantic locator, arguments, the actor (human or agent) |
+| **observation** | url, title, viewport, scroll, visible text, and every interactive element with its bbox — content-addressed, referenced by path + sha256 |
+| **screenshot** | the frame the annotator saw, same treatment |
+| **state change** | the semantic world delta this step produced, diffed by entity id |
+| **provenance** | which version authored it, and whether the replay verified it |
+
+Per sample: the task, the seed it was **recorded** under, the initial world, the
+verifier suite with per-check results, the reward, and the lineage of corrections.
+
+Artifact bytes live under `ARTIFACT_ROOT` (a named Docker volume). **A submitted
+sample references its screenshots forever — that volume is not disposable.**
+
+---
+
+## The database
+
+One Postgres database, `browser_gym_annotator` (`annotator`/`annotator` in dev).
+
+Roughly: `task` and `annotator` are the catalog; `task_assignment` joins them;
+`review_session` is one annotator's attempt at one task; an attempt owns a
+`trajectory_version` graph over `trajectory_step`s, the raw `interaction_event`
+log those were folded from, `environment_checkpoint`s, a `verifier_suite`, a
+`benchmark_run`, and finally a `submission` carrying a frozen snapshot. Full shape
+in `backend/app/models.py`; every parent/child edge is FK-backed with a deliberate
+`ondelete`.
+
+```bash
+PGPASSWORD=annotator psql -h localhost -p 5433 -U annotator -d browser_gym_annotator
 ```
-frontend/     Vite + React + TS SPA (the Task Review screen)
-  src/ds/           re-implemented Deccan Vault DS primitives + tokens (ADR 0001)
-  src/features/     the Task Review feature (replay pane, action trace, verifier suite)
-  src/lib/          types, the review state machine (+ .test.ts), API client
-backend/      FastAPI platform API
-  app/api/          tasks · sessions (persistence/run/rerun/rerun-gym) · gym · qa · export · admin
-  app/verify.py     the verifier execution engine (check IR → real evaluation)
-  app/agent.py      live agent + LLM judge (Anthropic; key from env)
-  app/gym_client.py + gym_review.py   the live-gym bridge + trajectory→review mapping
-  app/data/         breakers.json (the 85 curated breaker queue)
-  app/seed.py       catalog seeding (fixtures + 312 gym tasks)
-  app/models.py     the 11-table ORM schema
-  migrations/       Alembic (prod schema)
-  tests/            pytest (68 tests)
-infra/        docker-compose (postgres · backend · frontend · adminer)
-docs/         build plan, design spec, DS notes, DEPLOY.md, ADRs
+
+Dev bootstraps with `create_all`. **`create_all` cannot ALTER an existing table**,
+so after adding a column run the migration explicitly:
+
+```bash
+docker compose -f infra/docker-compose.yml exec -T backend alembic upgrade head
+```
+
+Production uses Alembic only (`AUTO_CREATE_ALL=false`, `RUN_MIGRATIONS=1`);
+migrations live in `backend/migrations/versions/`. See `docs/DEPLOY.md`.
+
+Reset to a clean slate (dev-only, keeps the task catalog):
+
+```bash
+curl -X POST http://localhost:8090/api/admin/reset-sessions
+```
+
+---
+
+## Local dev
+
+```bash
+cd frontend && npm install
+npm run dev          # http://localhost:5180
+npx tsc --noEmit && npx vitest run
+```
+
+```bash
+cd backend && python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/uvicorn app.main:app --port 8090 --reload
+.venv/bin/python -m pytest tests/ -q
+```
+
+---
+
+## Layout
+
+```
+frontend/
+  src/ds/                design-system primitives + tokens
+  src/features/
+    live-gym/            the live pane, the app tab strip, the event recorder
+    task-review/         the task screen: brief, trajectory, verifiers, ship
+    qa/                  the reviewer's adjudication screen
+  src/lib/               API client, types, the live-browser wire
+backend/app/
+  api/                   the HTTP surface (routers)
+  recorder.py            raw events -> candidate actions
+  materialize.py         actions -> trajectory steps + world deltas
+  worlddiff.py           the semantic world diff
+  checkpoints.py         capture / restore / the divergence guard
+  blobstore.py           where artifact bytes actually live
+  versions.py            the trajectory version graph
+  finalize.py            the ship gates + the frozen snapshot
+  replay_surface.py      which world a replay runs in (never the annotator's)
+  cua_hub.py             sid minting for the five mock apps
+infra/                   docker-compose
 ```
 
 ## Environment variables (backend)
@@ -211,19 +196,17 @@ docs/         build plan, design spec, DS notes, DEPLOY.md, ADRs
 | Var | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | local Postgres | Postgres connection (psycopg3) |
-| `ENV` | `dev` | `dev` enables auto-create + the admin reset; set `prod` in production |
-| `AUTO_CREATE_ALL` | `true` | dev bootstraps the schema; prod sets `false` + `RUN_MIGRATIONS=1` |
-| `GYM_URL` | `http://host.docker.internal:8000` | the live gym harness |
+| `ENV` | `dev` | `dev` enables auto-create and the admin reset |
+| `AUTO_CREATE_ALL` | `true` | prod sets `false` + `RUN_MIGRATIONS=1` |
+| `ARTIFACT_ROOT` | `/var/lib/browser-gym-annotator/artifacts` | artifact bytes — **must be durable** |
+| `GYM_URL` | `http://host.docker.internal:8000` | the gym harness |
+| `LIVE_BROWSER_URL` | `http://host.docker.internal:8877` | the live browser (on the host) |
+| `GYM_HOST_FOR_BROWSER` | `localhost` | how the *browser* reaches the gym |
 | `GYM_HARNESS_TOKEN` | — | gym auth token |
-| `ANTHROPIC_API_KEY` | — | optional: fixture re-run + semantic/safety judge |
-| `AGENT_MODEL` | `claude-haiku-4-5-20251001` | annotator-side model |
+| `ANTHROPIC_API_KEY` | — | optional: the semantic/safety judge |
 | `CORS_ORIGINS` | `["http://localhost:8080"]` | allowed origins |
 
-## Deploy
-
-Cloud-Run-ready. `docs/DEPLOY.md` covers the GCP path (Cloud SQL + two Cloud Run
-services, Alembic migrations, templated nginx). Deploy is owner-run and billable.
-
 ## Prerequisites
-Docker Desktop (for the full stack) · Node 20+ · Python 3.12 · Postgres 17
-(native, or via the Docker stack) · a running `ecommerce-browser-gym` for breaker review.
+
+Docker Desktop · Node 20+ · Python 3.12 · a running `ecommerce-browser-gym`
+bridged stack.
