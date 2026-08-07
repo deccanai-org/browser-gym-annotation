@@ -173,15 +173,32 @@ def replay(
                 out.steps[-1]["worldHash"] = digest
                 out.final_world = world
             if want and digest != want:
+                # Mark the RECORD too, not just the result. The step was appended
+                # as ok before the comparison ran, and certify reads the records:
+                # a diverged step came back labelled `verified` while the overall
+                # answer said the trajectory failed at it. Every step green and
+                # the gate red is the worst of both — it reads as a gate bug, so
+                # the actual failure gets looked past.
+                out.steps[-1]["ok"] = False
+                out.steps[-1]["diverged"] = True
                 return _fail(out, i, "the world diverged from what this action produced when it was recorded", strict, detail=kind)
     return out
 
 
-#: How long to keep asking, and how often. Short: this is a push that has already
-#: been sent, not a job being waited on. A replay of sixty steps must not pay a
-#: second per step, so the loop exits the moment the world agrees.
-_SETTLE_TRIES = 6
-_SETTLE_MS = 120
+#: How long to keep asking, and how often.
+#:
+#: Sized against the SLOWEST way a mock reaches the engine, not the fastest. Some
+#: mutations ride the mock's own ~2.5s re-poll rather than an immediate push, so
+#: a 720ms window (the first guess) could not see them at all: replaying M105
+#: filled the compose form correctly, clicked a Send that really was the Send
+#: button, and read a world with no sent mail in it — indistinguishable from a
+#: click that did nothing, and it failed the trajectory at its last step.
+#:
+#: The cost is bounded by the fact that this only runs on a MISMATCH and returns
+#: the moment the world agrees. A replay where nothing diverges never waits at
+#: all; one that genuinely diverges pays this once and then stops.
+_SETTLE_TRIES = 25
+_SETTLE_MS = 200
 
 
 def _settled_world(executor: Executor, want: str) -> dict | None:

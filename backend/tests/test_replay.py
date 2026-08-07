@@ -311,3 +311,28 @@ def test_a_world_that_never_agrees_still_fails():
                         strict=False)
     assert not out.ok and out.rejected_at == 0
     assert "diverged" in out.reason
+
+
+def test_a_diverged_step_is_marked_diverged_in_its_own_record():
+    """Every step green beside a red gate reads as a gate bug.
+
+    The record is appended as ok BEFORE the hash comparison runs, and certify
+    reports from the records — so a run that failed at step 2 came back with
+    `certified: 3`, three `verified` steps, and `firstFailureAt: 2`. The step
+    that actually broke is the one thing the annotator needs pointed at.
+    """
+    class Walker:
+        """Answers every action and walks a fixed sequence of worlds."""
+        def __init__(self, worlds): self.worlds, self.i = worlds, -1
+        def act(self, kind, locator, args): self.i += 1; return {"ok": True}
+        def world(self): return self.worlds[min(self.i, len(self.worlds) - 1)]
+
+    ex = Walker([{"n": 0}, {"n": 1}, {"n": 9}])
+    want = [checkpoints.hash_world({"n": 0}), checkpoints.hash_world({"n": 1}),
+            checkpoints.hash_world({"n": 2})]
+
+    out = replay.replay([{"kind": "click"}] * 3, ex, expected_hashes=want, strict=False)
+
+    assert out.ok is False and out.rejected_at == 2
+    assert [s["ok"] for s in out.steps] == [True, True, False]
+    assert out.steps[-1]["diverged"] is True

@@ -124,6 +124,32 @@ def test_a_recorded_navigate_is_retargeted_at_the_scratch_world(db_session, fake
         assert out["kind"] == "navigate"
 
 
+def test_a_recorded_navigate_is_also_retargeted_at_the_scratch_SESSION(db_session, fake_bridge):
+    """The half that was missing, and the one that decided where writes landed.
+
+    A bridged tab reports its mutations to the bridge under its `?session=`. The
+    sids were swapped and that was not, so a scratch tab looked like a scratch
+    tab and wrote to the ANNOTATOR's world. Certifying M105 replayed all thirteen
+    steps, closed the compose modal on a genuine send, and then read a scratch
+    world with no sent mail in it — reported as a divergence at the last step,
+    while the annotator's own world had quietly gained the email.
+    """
+    attempt = _bridged_attempt()
+    with replay_surface.scratch_surface(db_session, attempt, _Task()) as surface:
+        action = {"kind": "navigate", "locator": {}, "args": {
+            "url": (f"http://localhost:5203/?sid={ATTEMPT_SIDS['mail']}"
+                    f"&bridge=http%3A%2F%2Flocalhost%3A8093&session={attempt.id}#/inbox")}}
+
+        out = surface.rewrite(action)["args"]["url"]
+
+        # Parsed, not substring-matched: the scratch id is the attempt id plus a
+        # suffix, so `"session=<attempt>" in url` is true of the correct URL too.
+        from urllib.parse import parse_qs, urlparse
+        session = parse_qs(urlparse(out).query).get("session", [""])[0]
+        assert session != str(attempt.id), "a replay must not write to the annotator's world"
+        assert session == surface.scratch_session
+
+
 def test_an_action_with_no_url_is_returned_unchanged(db_session, fake_bridge):
     """A semantic locator is surface-independent by construction — that is the
     whole reason we record one — so a click must pass through untouched."""

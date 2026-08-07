@@ -45,29 +45,43 @@ class ScratchSurface:
     start_url: str                     # browser-visible; where to open the tab
     apps: list[dict] = field(default_factory=list)
     sid_map: dict[str, str] = field(default_factory=dict)   # attempt sid -> scratch sid
+    #: The `?session=` a recorded URL carries, and the one THIS surface answers
+    #: to. A bridged tab reports its mutations to the bridge under that id.
+    attempt_session: str = ""
+    scratch_session: str = ""
     bridged: bool = False
 
     def rewrite(self, action: dict) -> dict:
         """Retarget one recorded action at THIS surface.
 
-        A recorded `navigate` carries the attempt's own sid in its URL. Replayed
-        verbatim it would drive the scratch browser back into the annotator's
-        world — the one thing a scratch run must never touch — so the sids are
-        swapped. Everything else replays unchanged: a semantic locator is
-        surface-independent by construction, which is the point of recording one.
+        A recorded `navigate` carries the attempt's own sid AND its `?session=`
+        in the URL. Replayed verbatim it would drive the scratch browser back
+        into the annotator's world — the one thing a scratch run must never touch
+        — so both are swapped. Everything else replays unchanged: a semantic
+        locator is surface-independent by construction, which is the point of
+        recording one.
+
+        The `?session=` half was missing, and it is what a bridged tab reports
+        its mutations under. So the sids were swapped, the tab looked like a
+        scratch tab, and every write went to the ANNOTATOR's world instead:
+        certifying M105 replayed all thirteen steps, closed the compose modal on
+        a real send, and read a scratch world with no sent mail in it. Reported
+        as a divergence at the last step, and the annotator's own world had
+        quietly gained the email.
         """
-        if not self.sid_map:
-            return action
         args = action.get("args") or {}
         url = args.get("url")
         if not isinstance(url, str) or not url:
             return action
+        out = url
         for attempt_sid, scratch_sid in self.sid_map.items():
-            if attempt_sid and attempt_sid in url:
-                url = url.replace(attempt_sid, scratch_sid)
-        if url == args.get("url"):
+            if attempt_sid and attempt_sid in out:
+                out = out.replace(attempt_sid, scratch_sid)
+        if self.attempt_session and self.scratch_session:
+            out = out.replace(f"session={self.attempt_session}", f"session={self.scratch_session}")
+        if out == url:
             return action
-        return {**action, "args": {**args, "url": url}}
+        return {**action, "args": {**args, "url": out}}
 
 
 def _primary_key(task) -> str:
@@ -162,6 +176,8 @@ def scratch_surface(db: Session, attempt: models.ReviewSession, task,
             start_url=(primary or {}).get("url") or live_api.browser_visible_gym_url(gym_url),
             apps=apps,
             sid_map=sid_map,
+            attempt_session=str(attempt.id),
+            scratch_session=scratch_id,
             bridged=True,
         )
     finally:
