@@ -125,8 +125,10 @@ class BridgedWorld:
 class UnleasedWorld:
     """A bridged attempt whose gym is NOT currently leased — it has no world.
 
-    Closing the pane releases the pooled gym (so somebody else can work), which
-    clears `bridge_session_id`. Without this port, `world_for` then fell through
+    Two ways to get here: closing the pane releases the pooled gym (so somebody
+    else can work), which clears `bridge_session_id`; and the bridge reaps an
+    idle session on its own TTL, which clears nothing here but hands the gym to
+    the next annotator all the same. Without this port, `world_for` fell through
     to `WorkspaceWorld(GymEndpoint(settings.gym_url))` — the SHARED gym — and
     finalize / certify / reset-world proceeded to read and *mutate* it. With one
     annotator that was invisible; with several it is the cross-contamination
@@ -195,6 +197,33 @@ def is_bridged(session) -> bool:
     return bool(getattr(session, "bridge_session_id", "") and bridged_gym_url(session))
 
 
+def current_lease_url(session) -> str:
+    """The gym this attempt holds RIGHT NOW, per the bridge's own lease table.
+
+    `bridge_session_id` only records that we leased a gym once. The bridge reaps
+    an idle session on its TTL and hands that gym to whoever opens next, and
+    nothing tells us — so an attempt whose annotator walked away still resolved
+    to it, and finalize / certify checkpointed a stranger's world as this
+    attempt's final state, reset wiped their work in progress, and verify scored
+    them instead. The lease is the authority; no lease means no world.
+
+    A bridge we cannot reach is NOT evidence the lease is gone — nobody can lease
+    anything while it is down — so that case keeps the URL we persisted rather
+    than turning a blip into a refused finalize.
+    """
+    persisted = bridged_gym_url(session)
+    try:
+        leases = (bridge_client.pool_status() or {}).get("sessions") or {}
+    except bridge_client.BridgeError:
+        return persisted
+    lease = leases.get(str(getattr(session, "bridge_session_id", "") or ""))
+    if not isinstance(lease, dict):
+        return ""
+    # The bridge's answer wins over ours: if this session sits on a different
+    # instance than the one we recorded, the recorded one is somebody else's now.
+    return str(lease.get("gym") or "") or persisted
+
+
 def owns_bridged_world(session) -> bool:
     """Does this attempt's world live in the bridged gym pool at all?
 
@@ -214,14 +243,21 @@ def world_for(db: Session, session) -> WorldPort:
 
     Three cases, in order:
       * bridged and leased  → the gym the bridge leased for it
-      * bridged, not leased → no world at all (the pane is closed; the gym went
+      * bridged, not leased → no world at all (the pane is closed, or the bridge
+                              reaped an idle session; either way the gym went
                               back to the pool and now belongs to someone else)
       * everything else     → the existing workspace behaviour (its own lease,
                               else the shared gym, which is correct for a
                               non-bridged attempt)
+
+    "Leased" is what the BRIDGE says, not what our row remembers — see
+    `current_lease_url`.
     """
     if is_bridged(session):
-        return BridgedWorld(bridged_gym_url(session), str(session.bridge_session_id))
+        gym_url = current_lease_url(session)
+        if gym_url:
+            return BridgedWorld(gym_url, str(session.bridge_session_id))
+        return UnleasedWorld()
     if owns_bridged_world(session):
         return UnleasedWorld()
     attempt_id: UUID | None = getattr(session, "id", None)

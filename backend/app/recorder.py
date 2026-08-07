@@ -157,6 +157,28 @@ SCROLL_IS_A_STEP = False
 # annotator can do.
 ENVIRONMENT_KINDS = frozenset({"popup", "notice", "redirect", "backend_effect"})
 
+# The executor's ENTIRE vocabulary — `act()` in live_browser/service.py. Anything
+# else comes back {"ok": false, "error": "unsupported action …"}, which certify
+# writes down as `diverged`, so a step outside this set can never ship however
+# faithful it is. Two rules follow, and both are applied below:
+#
+# * where a recorded gesture HAS an executor kind, emit that kind (`keyPress` ->
+#   `press`) — pressing Enter to submit a search is one of the commonest browser
+#   actions there is, and it used to produce a step nothing could replay;
+# * where it has NONE, give it its own name rather than the name of a different
+#   action. A right-click recorded as `click` replays as a LEFT click — `act()`
+#   takes no button argument at all — and certify then stamps it verified.
+EXECUTOR_KINDS = frozenset({
+    "click", "submit", "fill", "type", "select", "select_option", "check",
+    "press", "navigate", "open_tab", "switch_tab", "close_tab", "scroll", "wait",
+})
+
+# A pointer button the executor cannot press. The kinds named here — like
+# `dblclick`, `drag` and `long_press` — are deliberately outside EXECUTOR_KINDS:
+# they fail loudly at certify, and are marked when they are folded (see
+# materialize), rather than replaying as a different action.
+_BUTTON_KINDS = {"right": "right_click", "middle": "middle_click"}
+
 # Keys that only EDIT the value of the field being typed into, so they belong
 # inside a fill rather than splitting it. The final value comes from the page, so
 # their effect is already accounted for.
@@ -196,6 +218,15 @@ def _same_target(a: dict | None, b: dict | None) -> bool:
     return False
 
 
+def _click_kind(button: str, clicks: int) -> str:
+    """What a completed press/release actually was.
+
+    The button decides first: a right-click is a right-click whether it landed
+    once or twice, and it is the fact the executor cannot honour.
+    """
+    return _BUTTON_KINDS.get(button) or ("dblclick" if clicks >= 2 else "click")
+
+
 def _dist(a: dict, b: dict) -> float:
     pa, pb = a.get("payload") or {}, b.get("payload") or {}
     try:
@@ -209,11 +240,17 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
     """Fold a raw event stream into candidate ACTIONS.
 
     * ``mousePressed`` + ``mouseReleased`` on the same target within CLICK_PAIR_MS
-      become one ``click``
+      become one ``click`` — or ``right_click``/``middle_click``, which the
+      executor has no way to perform and must therefore not be called ``click``
     * consecutive ``key`` events on one field become a single ``fill`` carrying the
       final value (a trajectory should say "type the answer", not replay 12 keys)
+    * a ``keyPress`` that is not part of an edit becomes ``press``, the executor's
+      own name for it
     * scrolls marked ``auto`` are dropped: a page scrolling itself is not a human
       action, and replaying it would fight the page
+
+    The kinds that come out are the executor's (EXECUTOR_KINDS) wherever one
+    exists; the rest are named for the gesture they were.
     """
     raw = [e if isinstance(e, dict) else _as_dict(e) for e in events]
     out: list[dict] = []
@@ -255,7 +292,7 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
                 elif dt > CLICK_PAIR_MS:
                     act = {**e, "kind": "long_press"}
                 else:
-                    act = {**e, "kind": "dblclick" if clicks >= 2 else "click",
+                    act = {**e, "kind": _click_kind(button, clicks),
                            "payload": {**(e.get("payload") or {}), "button": button,
                                        "clicks": clicks},
                            "url": up.get("url") or e.get("url")}
@@ -312,6 +349,27 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
                 act["payload"] = {"value": value, "redacted": False}
             out.append(act)
             i = j
+            continue
+
+        # --- a key that is not part of an edit ---------------------------------
+        if kind == "keyPress":
+            # `press` is the executor's name for this, and the ONLY name it
+            # answers to. Emitting the client's `keyPress` meant Enter-to-submit
+            # — the commonest browser action there is, and the one that ends most
+            # search steps — produced a step certify could only ever call
+            # diverged, which blocks the whole trajectory from shipping.
+            #
+            # Modifiers ride in the key itself: `act()` passes only `args.key` to
+            # the browser, which parses "Meta+v" — so a copy/paste or a select-all
+            # replays intact rather than as a bare "v" typed into the field.
+            payload = e.get("payload") or {}
+            key = str(payload.get("key") or "")
+            mods = [str(m) for m in (payload.get("modifiers") or []) if m]
+            # A press with no key is NOT translated: `act()` defaults a missing
+            # key to Enter, so it would submit whatever form was open.
+            out.append({**e, "kind": "press" if key else kind, "sources": [e.get("seq")],
+                        "payload": {**payload, "key": "+".join([*mods, key]) if mods else key}})
+            i += 1
             continue
 
         # --- scroll ------------------------------------------------------------

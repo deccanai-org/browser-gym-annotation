@@ -55,9 +55,13 @@ UI_CHANGE_CAP = 8
 # Dotted paths whose dicts are {entity_id: entity}. Keyset diffs on these give
 # added/removed entities for free; without the registry a new order would report
 # as twenty separate scalar `set`s and read as noise.
+# Checked against the gym's own `to_json` (the compact verifier view) and
+# `dataclasses.asdict` (world_full): the shop keeps addresses and payment methods
+# on the USER, not on the store, so the old `shop.addresses` / `shop.payments`
+# entries named paths that do not exist in either view.
 ENTITY_COLLECTIONS = frozenset({
-    "shop.orders", "shop.returns", "shop.subscriptions", "shop.addresses",
-    "shop.payments", "shop.products",
+    "shop.orders", "shop.returns", "shop.subscriptions", "shop.products",
+    "shop.current_user.addresses", "shop.current_user.payment_methods",
     "mail.inbox", "mail.sent", "mail.drafts",
     "market.orders", "market.coupons", "market.addresses", "market.payments",
     "market.products",
@@ -65,12 +69,20 @@ ENTITY_COLLECTIONS = frozenset({
     "calendar.events",
 })
 
-# Lists whose members carry their own identity. Diffing these by index would
-# report a removal as "every later position changed".
+# Lists whose members carry their own identity, most specific key first. Diffing
+# these by index would report a removal as "every later position changed".
+#
+# The keys are the dataclasses' real fields: `FoodCartItem` has `dish_id` (the
+# old `item_id` matched nothing, so every GymEats cart edit fell back to a
+# positional diff), `MarketCartItem` has only `product_id`, and a shop `CartItem`
+# has a per-line `id` — the same product may legally sit on two lines, so
+# `product_id` does not identify one. `product_id` stays as a second choice for
+# shop because a line id is the gym's internal handle: a world captured from a
+# projection that only carries product ids still diffs by identity.
 LIST_KEYS = {
-    "shop.cart.items": "product_id",
-    "market.cart.items": "product_id",
-    "food.cart.items": "item_id",
+    "shop.cart.items": ("id", "product_id"),
+    "market.cart.items": ("product_id",),
+    "food.cart.items": ("dish_id",),
 }
 
 # Keys worth keeping when an entity is summarized. Deliberately excludes body,
@@ -146,6 +158,23 @@ def _is_entity_collection(path: str, before: Any, after: Any) -> bool:
     return False
 
 
+def _by_identity(path: str, before: list, after: list) -> tuple[dict, dict] | None:
+    """The two sides of an identified list keyed by their members' own id, or
+    None when no registered key identifies every member on both sides.
+
+    Falls through rather than half-applying a key: keying a cart on a field some
+    lines lack would silently drop those lines from the diff, which reads as
+    "nothing happened" — worse than the positional diff we degrade to.
+    """
+    for key in LIST_KEYS.get(path) or ():
+        bmap = {str(m.get(key)): m for m in before if isinstance(m, dict) and m.get(key) is not None}
+        amap = {str(m.get(key)): m for m in after if isinstance(m, dict) and m.get(key) is not None}
+        if len(bmap) == len([m for m in before if isinstance(m, dict)]) and \
+           len(amap) == len([m for m in after if isinstance(m, dict)]):
+            return bmap, amap
+    return None
+
+
 def _walk(path: str, app: str, before: Any, after: Any,
           out: list[dict], counts: dict[str, int], depth: int, id_: str = "") -> None:
     if before == after:
@@ -157,12 +186,10 @@ def _walk(path: str, app: str, before: Any, after: Any,
         return
 
     # identified list (cart items) — diff by the member's own id
-    key = LIST_KEYS.get(path)
-    if key and isinstance(before, list) and isinstance(after, list):
-        bmap = {str(m.get(key)): m for m in before if isinstance(m, dict) and m.get(key) is not None}
-        amap = {str(m.get(key)): m for m in after if isinstance(m, dict) and m.get(key) is not None}
-        if len(bmap) == len([m for m in before if isinstance(m, dict)]) and \
-           len(amap) == len([m for m in after if isinstance(m, dict)]):
+    if isinstance(before, list) and isinstance(after, list):
+        maps = _by_identity(path, before, after)
+        if maps is not None:
+            bmap, amap = maps
             size = [len(before), len(after)]
             for k in sorted(set(bmap) - set(amap)):
                 counts["remove"] += 1
@@ -194,15 +221,30 @@ def _walk(path: str, app: str, before: Any, after: Any,
         return
 
     if isinstance(before, list) and isinstance(after, list):
+        size = [len(before), len(after)]
         # append-only (the cross-app event log, a queue) — the common case
         if len(after) > len(before) and after[:len(before)] == before:
             for m in after[len(before):]:
                 counts["add"] += 1
-                out.append(_change(app, path, "add", "", None, _digest(m), [len(before), len(after)]))
+                out.append(_change(app, path, "add", "", None, _digest(m), size))
             return
-        counts["set"] += 1
-        out.append(_change(app, path, "set", id_, _digest(before), _digest(after),
-                           [len(before), len(after)]))
+        # Positional, per element. This used to emit ONE `set` digesting the whole
+        # list on each side, and `_digest` of a list samples only its first and
+        # last member by their label keys — so `events[0].delivered` flipping
+        # False->True produced a change whose `from` and `to` were byte-identical
+        # and read as nothing happening. delivered is the one signal that tells an
+        # environment bug (the confirmation email was never produced) apart from a
+        # real agent failure (it was produced and the agent never read it), so
+        # that transition is the last one allowed to be invisible.
+        n = min(len(before), len(after))
+        for i in range(n):
+            _walk(f"{path}.{i}", app, before[i], after[i], out, counts, depth + 1, str(i))
+        for i in range(n, len(before)):
+            counts["remove"] += 1
+            out.append(_change(app, path, "remove", str(i), _digest(before[i]), None, size))
+        for i in range(n, len(after)):
+            counts["add"] += 1
+            out.append(_change(app, path, "add", str(i), None, _digest(after[i]), size))
         return
 
     counts["set"] += 1

@@ -23,11 +23,60 @@ def test_export_sample_is_a_complete_golden_bundle(client, reviewer_client, monk
     assert b["sample_id"] == sid
     assert b["task"]["id"] == "GYM-2041"
     assert b["reward"] == 1
-    assert b["initial_state"] is not None                      # the eval triplet's initial setup
+    # GYM-2041 is a fixture with no captured seed world, so the eval triplet has
+    # no first leg — and the bundle has to SAY so. It used to substitute the
+    # non-world keys of seed_state ({"startState": …} here, {"initial_url",
+    # "category", "difficulty"} for a gym task), which reads as a real world.
+    assert b["initial_state"] is None
+    assert b["initial_state_provenance"]["source"] is None
+    assert b["initial_state_provenance"]["missing_reason"]
     assert b["correction"] and b["correction"]["from_step"] == 12
     assert len(b["golden_trajectory"]) > 0                      # the SFT trajectory
     assert len(b["verifiers"]) == 14                           # the verifier suite travels with it
     assert b["submission"]["reward"] == 1 and b["submission"]["kind"] == "golden"
+
+
+def test_a_captured_seed_world_ships_as_the_initial_state(client, reviewer_client, db_session, monkeypatch):
+    """The other half of the rule above: when a world HAS been captured it is the
+    initial_state verbatim, and the bundle names where it came from. Without the
+    source a consumer cannot tell a real world from the metadata stub the old
+    fallback produced."""
+    from sqlalchemy import select
+
+    from app.models import Task
+
+    monkeypatch.setattr("app.agent.settings.anthropic_api_key", "")
+    task = db_session.scalar(select(Task).where(Task.external_id == "GYM-2041"))
+    task.seed_state = {"initial_url": "/shop", "world": {"shop": {"cart": []}}}
+    db_session.commit()
+
+    sid = _golden(client)
+    b = reviewer_client.get(f"/api/export/samples/{sid}").json()
+    assert b["initial_state"] == {"shop": {"cart": []}}
+    assert b["initial_state_provenance"]["source"] == "task.seed_state.world"
+    assert b["initial_state_provenance"]["missing_reason"] is None
+    # the non-world metadata is still shipped, just not in the slot a client
+    # resets from
+    assert b["initial_state_provenance"]["metadata"]["initial_url"] == "/shop"
+
+
+def test_the_exported_seed_is_the_one_the_annotation_ran_under(client, reviewer_client, db_session, monkeypatch):
+    """The bundle used to ship `task.seed` — a mutable column a later capture or
+    reseed rewrites. A client resetting at it would get a world the golden was
+    never recorded in, so the seed has to come from the ATTEMPT."""
+    from sqlalchemy import select
+
+    from app.models import ReviewSession, Task
+
+    monkeypatch.setattr("app.agent.settings.anthropic_api_key", "")
+    sid = _golden(client)
+    attempt = db_session.get(ReviewSession, __import__("uuid").UUID(sid))
+    recorded_seed = attempt.seed
+    db_session.scalar(select(Task).where(Task.external_id == "GYM-2041")).seed = recorded_seed + 41
+    db_session.commit()
+
+    b = reviewer_client.get(f"/api/export/samples/{sid}").json()
+    assert b["task"]["seed"] == recorded_seed
 
 
 def test_export_dataset_jsonl(client, reviewer_client, monkeypatch):
@@ -40,6 +89,53 @@ def test_export_dataset_jsonl(client, reviewer_client, monkeypatch):
     assert len(lines) >= 1
     rec = json.loads(lines[0])
     assert {"task", "initial_state", "golden_trajectory", "verifiers", "reward"} <= set(rec)
+
+
+def test_every_dataset_line_names_its_own_schema(client, reviewer_client, db_session, monkeypatch):
+    """The JSONL interleaves two incompatible bundle shapes and only the
+    version-bound one carried a `schema` key, so a loader either crashed on the
+    keys a legacy row does not have or read a thin row as a full one. Every line
+    must be self-describing."""
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from app.models import ReviewSession, Submission, Task
+
+    monkeypatch.setattr("app.agent.settings.anthropic_api_key", "")
+    _golden(client)                                   # the legacy shape
+    # …and a version-bound submission alongside it, which is how the two shapes
+    # end up interleaved on one file.
+    task = db_session.scalar(select(Task).where(Task.external_id == "GYM-2041"))
+    versioned = ReviewSession(task_id=task.id, source="gym")
+    db_session.add(versioned)
+    db_session.flush()
+    db_session.add(Submission(session_id=versioned.id, reward=1, kind="golden", snapshot={
+        "trajectory_version": {"id": str(uuid4()), "versionNo": 1, "kind": "agent_run", "lineage": []},
+        "verifiers": [], "golden_trajectory": [], "reward": 1,
+    }))
+    db_session.commit()
+
+    lines = [json.loads(ln) for ln in reviewer_client.get("/api/export/dataset.jsonl").text.strip().split("\n") if ln]
+    assert len(lines) >= 2
+    assert all(rec.get("schema") for rec in lines)
+    # and the discriminator actually discriminates: the versioned shape's keys
+    # are absent from the legacy one, which is why guessing by key failed.
+    for rec in lines:
+        assert ("trajectory_version" in rec) == (rec["schema"].startswith("golden-sample/"))
+
+
+def test_the_per_verifier_results_ship_with_the_reward(client, reviewer_client, monkeypatch):
+    """A bare 0/1 does not say WHICH assertion a breaker broke — the only part of
+    a failing sample a buyer can act on. The outcomes were frozen at submit and
+    then dropped on the floor by export."""
+    monkeypatch.setattr("app.agent.settings.anthropic_api_key", "")
+    sid = _golden(client)
+    b = reviewer_client.get(f"/api/export/samples/{sid}").json()
+    assert b["verifier_results"], "the frozen per-check outcomes must ship"
+    assert set(b["verifier_results"].values()) <= {"pass", "fail"}
+    assert all(v["id"] for v in b["verifiers"]), "a result is unattributable without the check id"
+    assert {v["id"]: v["result"] for v in b["verifiers"]} == b["verifier_results"]
 
 
 def test_list_samples_and_accepted_filter(client, reviewer_client, monkeypatch):

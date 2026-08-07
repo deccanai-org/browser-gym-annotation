@@ -34,8 +34,25 @@ from app import blobstore, models
 # action_log under each app (shop.action_log), and those churn just as much.
 _VOLATILE = {"flash_messages", "action_log"}
 
+# The deterministic STEP CLOCK, by dotted path from the world root. These are
+# counters the harness advances at every action boundary, not things the
+# annotator did: the bridge ticks `/_harness/tick` after every mock-UI click
+# (schedule.now = the step) and `/_harness/verify` assigns `shop.step` (surfaced
+# again as the world's top-level `step`). Hashing them meant the world hash moved
+# on every single action of every bridged attempt, so every step reported
+# `changed: true` and the per-step delta — the platform's headline signal — said
+# nothing. It also forced `replay.advance_clock` to tick only for tasks that have
+# something scheduled, because an unconditional tick corrupted every hash
+# comparison (47/60 steps to 5/60, measured) while delivering no event.
+#
+# Path-scoped, not name-scoped like `_VOLATILE`: `events[].step` is the step a
+# cross-app effect fired at and `schedule.queue[].fired_at_step` is when a
+# scheduled email landed — both are real task state that happens to share the
+# word "step".
+_VOLATILE_PATHS = frozenset({"step", "shop.step", "schedule.now"})
 
-def normalize_world(value: Any) -> Any:
+
+def normalize_world(value: Any, _path: str = "") -> Any:
     """Strip volatile keys and canonicalize numbers.
 
     The number rule is load-bearing, not cosmetic. A world stored in a JSON column
@@ -48,9 +65,19 @@ def normalize_world(value: Any) -> Any:
     a changed amount changes the number, not just its type.
     """
     if isinstance(value, dict):
-        return {k: normalize_world(v) for k, v in sorted(value.items()) if k not in _VOLATILE}
+        out: dict[str, Any] = {}
+        for k, v in sorted(value.items()):
+            if k in _VOLATILE:
+                continue
+            child = f"{_path}.{k}" if _path else k
+            if child in _VOLATILE_PATHS:
+                continue
+            out[k] = normalize_world(v, child)
+        return out
     if isinstance(value, list):
-        return [normalize_world(v) for v in value]
+        # Members keep the LIST's path, so a member's own `step` reads as
+        # `events.step` and can never collide with the `shop.step` clock.
+        return [normalize_world(v, _path) for v in value]
     # bool is a subclass of int; leave it alone or True would hash as 1.
     if isinstance(value, float) and not isinstance(value, bool) and value.is_integer():
         return int(value)
@@ -83,9 +110,13 @@ def _clock_of(world: dict | None, given: int) -> int:
     """The deterministic clock at this checkpoint.
 
     The world's own `step` wins whenever it has one: `restore()` passes this value
-    to load_state, which sets the restored world's step from it, so any other
-    number guarantees the restored world will not match the recorded hash.
+    to load_state, which sets the restored world's step from it, so a restore
+    that used any other number would resume the episode at the wrong tick.
     `given` is only a fallback for a world that carries no clock at all.
+
+    Deriving it from the world is now the ONLY thing keeping the clock right: the
+    step counter is no longer hashed (see `_VOLATILE_PATHS`), so `assert_matches`
+    would not catch a caller that made one up.
     """
     if isinstance(world, dict) and isinstance(world.get("step"), int):
         return int(world["step"])

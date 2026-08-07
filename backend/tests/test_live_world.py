@@ -33,10 +33,20 @@ def _apps():
     return [{"app": "shop", "attempt_sid": str(uuid4()), "url": "http://localhost:5201/"}]
 
 
+def _pool(monkeypatch, sessions):
+    """Make the bridge's lease table say `sessions` (None = bridge unreachable)."""
+    def status():
+        if sessions is None:
+            raise live_world.bridge_client.BridgeUnreachable("bridge is down")
+        return {"pool": [], "capacity": 0, "sessions": sessions}
+    monkeypatch.setattr(live_world.bridge_client, "pool_status", status)
+
+
 # --------------------------------------------------------------------------- leased
 
 
-def test_a_bridged_attempt_resolves_to_the_gym_the_bridge_leased_it(db_session):
+def test_a_bridged_attempt_resolves_to_the_gym_the_bridge_leased_it(db_session, monkeypatch):
+    _pool(monkeypatch, {"sess-1": {"gym": "http://127.0.0.1:8077", "task_id": "M46"}})
     a = _Attempt(bridge_session_id="sess-1", bridge_gym_url="http://127.0.0.1:8077", cua_apps=_apps())
     world = live_world.world_for(db_session, a)
     assert world.kind == "bridged"
@@ -63,6 +73,41 @@ def test_a_released_bridged_attempt_has_NO_world_rather_than_the_shared_one(db_s
     assert world.verify() is None
     # And it must not be mistakable for a real endpoint.
     assert world.kind != "workspace"
+
+
+def test_a_lease_the_bridge_no_longer_holds_is_no_world_at_all(db_session, monkeypatch):
+    """The stale-handle half of the same bug.
+
+    An annotator who walks away never closes the pane, so `bridge_session_id`
+    stays on the row — but the bridge reaps the idle session on its TTL and hands
+    that gym to whoever opens next. Trusting our own row then let a finalize
+    checkpoint the NEW annotator's world as this attempt's final state, a reset
+    wipe their work, and a verify score them.
+    """
+    _pool(monkeypatch, {"someone-else": {"gym": "http://127.0.0.1:8077"}})
+    a = _Attempt(bridge_session_id="sess-1", bridge_gym_url="http://127.0.0.1:8077", cua_apps=_apps())
+
+    assert live_world.world_for(db_session, a).kind == "unleased"
+
+
+def test_the_bridges_answer_wins_over_the_url_we_recorded(db_session, monkeypatch):
+    """The lease is the authority for WHICH gym too — the instance we recorded
+    belongs to whoever holds it now."""
+    _pool(monkeypatch, {"sess-1": {"gym": "http://127.0.0.1:8079"}})
+    a = _Attempt(bridge_session_id="sess-1", bridge_gym_url="http://127.0.0.1:8077", cua_apps=_apps())
+
+    assert "8079" in live_world.world_for(db_session, a).gym.base_url
+
+
+def test_an_unreachable_bridge_does_not_revoke_a_lease(db_session, monkeypatch):
+    """Nobody can lease anything while the bridge is down, so a blip is not
+    evidence the gym changed hands. Refusing here would turn one failed HTTP call
+    into a refused finalize on work that is perfectly fine."""
+    _pool(monkeypatch, None)
+    a = _Attempt(bridge_session_id="sess-1", bridge_gym_url="http://127.0.0.1:8077", cua_apps=_apps())
+
+    world = live_world.world_for(db_session, a)
+    assert world.kind == "bridged" and "8077" in world.gym.base_url
 
 
 def test_the_release_is_keyed_on_a_durable_fact_not_an_env_flag(db_session):

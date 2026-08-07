@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app import (
     agent_runs, blobstore, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs,
-    live_world, materialize, models, recorder, replay, replay_surface, versions, workspace,
+    live_world, materialize, models, recorder, replay, replay_surface, verify, versions, workspace,
 )
 from app import gym_review
 from app.api import live as live_api
@@ -268,21 +268,96 @@ def ensure_baseline(
 
 
 # --------------------------------------------------------------------------- finalization
-class GymScorer:
-    """Scores the bound suite from the gym's REAL milestone verdict, read against
-    the world the replay ended in — not from a re-derived guess."""
+# A verifier that cannot be run is UNKNOWN, not a fail: both block a reward of 1,
+# but only this says which checks the sample was actually proven by.
+UNKNOWN = "unknown"
+
+# The check kinds this scorer can genuinely execute against the world the replay
+# ended in. A WHITELIST rather than a blacklist, because the failure mode of
+# guessing is silent: `trace_max_steps` evaluated against the empty trace we have
+# here is trivially true, so a check that never ran would report a pass — and a
+# kind added to app/verify.py later would inherit whatever this happened to do.
+# dom_* (needs the captured snapshots) and trace_* / trace_policy (need the
+# action trace) are therefore left unproven rather than scored blind.
+_EXECUTABLE = frozenset({
+    "state_true", "state_false", "state_eq", "state_lte", "state_gte",
+    "state_nonempty", "state_empty", "state_len_gte", "state_len_eq",
+    "state_contains", "judge_state",
+})
+
+
+class SuiteScorer:
+    """Runs the BOUND suite against the world the replay ended in.
+
+    It used to take the reward wholly from the gym's aggregate `success` flag and
+    never execute the suite at all, so the human assertions (or an adopted
+    autogen suite with real executable IR) that were frozen into the shipped
+    sample contributed nothing to the number printed beside them — reward hacking
+    inside our own platform.
+
+    It also read `milestones` / `passed`, keys the gym has never emitted: the
+    verdict is `all_milestones`, and each entry reports `fired_at_step` +
+    `forbidden`, not a verdict string (server/verifiers.py TaskSuite.evaluate).
+    That lookup always missed, so every per-verifier result fell back to a copy of
+    the aggregate flag — on a passing run an optional milestone that never fired
+    and a forbidden tripwire were both recorded as passing.
+
+    The aggregate is still worth reporting, so it is kept as `gym_success` — a
+    separate, labelled field — rather than as the reward.
+    """
 
     def __init__(self, gym) -> None:
         self.gym = gym
+        self.gym_success: bool | None = None   # the gym's own aggregate, NOT the reward
+        self.executed: list[str] = []
+        self.unproven: list[str] = []
 
     def score(self, suite: models.VerifierSuite, world: dict | None) -> tuple[int, dict]:
         verdict = self.gym.verify(0) or {}
-        results = {m.get("id"): ("pass" if m.get("passed") else "fail")
-                   for m in (verdict.get("milestones") or []) if m.get("id")}
-        if not results:  # no milestone detail — fall back to the suite's own ids
-            passed = bool(verdict.get("success"))
-            results = {v.ext_id: ("pass" if passed else "fail") for v in suite.verifiers}
-        return (1 if verdict.get("success") else 0), results
+        self.gym_success = bool(verdict.get("success")) if verdict else None
+        by_name = {
+            str(m.get("name") or m.get("id")): m
+            for m in (verdict.get("all_milestones") or [])
+            if m.get("name") or m.get("id")
+        }
+        state = world or {}
+        results: dict[str, str] = {}
+        for v in suite.verifiers:
+            key = v.ext_id or str(v.id)
+            r = self._one(v, by_name, state)
+            results[key] = r
+            (self.unproven if r == UNKNOWN else self.executed).append(key)
+            # The result FROM THIS RUN. `gym_result` was written once when the
+            # suite was created and never refreshed, so a sample could ship
+            # reward=1 beside verifiers that all still said fail.
+            v.gym_result = r
+        # Every check must have been run AND passed. An unproven check cannot
+        # coexist with a reward of 1 — same rule the legacy benchmark path applies
+        # (api/sessions.py) — and an empty suite proves nothing at all.
+        reward = 1 if results and all(r == "pass" for r in results.values()) else 0
+        return reward, results
+
+    def _one(self, v: models.Verifier, by_name: dict, state: dict) -> str:
+        ir = v.check_ir or {}
+        kind = str(ir.get("kind") or "")
+        if kind == "gym_milestone" or not kind:
+            # `gym_milestone` names the milestone in the IR; a suite written
+            # straight off the gym's milestone list carries no IR at all, but its
+            # ext_id IS the milestone name, so it is still executable.
+            m = by_name.get(str(ir.get("id") or "") or (v.ext_id or ""))
+            # The gym reports firing, not a verdict — and a FORBIDDEN milestone
+            # passes by NOT firing.
+            return gym_review._milestone_result(m) if m is not None else UNKNOWN
+        if kind not in _EXECUTABLE:
+            return UNKNOWN
+        try:
+            # The autogen suites' paths are world-rooted (api/gym.py generates and
+            # gates them against `gym_client.world()`), which is exactly the world
+            # the replay just produced.
+            ok = verify._eval_check(ir, {"state": state, "trace": [], "allowed_tabs": set()})
+        except Exception:  # noqa: BLE001 — a malformed IR is unprovable, never a pass
+            ok = False
+        return "pass" if ok else "fail"
 
 
 @router.post("/sessions/{session_id}/suite/from-autogen")
@@ -364,9 +439,9 @@ def prepare_ship(
     v = versions.head(db, s)
     suite = _latest_suite(db, s.id)
 
-    # No suite, or an empty one: derive it from the gym's own milestones. That is
-    # already what the reward is computed from, so this makes explicit the suite
-    # the attempt was going to be scored against anyway rather than inventing one.
+    # No suite, or an empty one: derive it from the gym's own milestones. They are
+    # the checks this task already has, so binding them is what gives the attempt
+    # something a reward can actually be computed FROM rather than inventing one.
     created_suite = False
     if v is not None and (suite is None or not (suite.verifiers or [])):
         milestones = []
@@ -391,14 +466,18 @@ def prepare_ship(
                     level=gym_review._level(m),
                     assertion=str(m.get("description") or m.get("name") or ""),
                     code="",
-                    # Named, not executable: the gym owns this verdict, and
-                    # pretending we can re-run it here would be a second, weaker
-                    # copy of the check.
+                    # NAMED rather than reimplemented: the gym owns this predicate,
+                    # and a second copy of it here would be a weaker one. The name
+                    # is how SuiteScorer resolves it back to the milestone in the
+                    # verdict at score time, so it is still executed, not asserted.
                     check_ir={"kind": "gym_milestone", "id": m.get("id") or m.get("name")},
                     added_by_human=False,
-                    # The gym reports firing, not a verdict string — and a
-                    # FORBIDDEN milestone passes by NOT firing, so this cannot be
-                    # read off `fired_at_step` naively.
+                    # Where the suite stands RIGHT NOW, so the annotator can see
+                    # what still has to happen; finalization overwrites it with the
+                    # result of the run that produced the reward. The gym reports
+                    # firing, not a verdict string — and a FORBIDDEN milestone
+                    # passes by NOT firing, so this cannot be read off
+                    # `fired_at_step` naively.
                     gym_result=gym_review._milestone_result(m),
                 ))
             created_suite = True
@@ -470,10 +549,11 @@ def finalize_attempt(
         live = gym_client.LiveBrowserClient(
             base_url=settings.live_browser_url, session_id=live_sid, ticket=live_ticket, gym=endpoint,
         )
+        scorer = SuiteScorer(endpoint)
         try:
             out = finalize.finalize(
                 db, attempt=s, version=v, suite=suite, executor=live, gym=endpoint,
-                scorer=GymScorer(endpoint), annotator_id=current.id,
+                scorer=scorer, annotator_id=current.id,
                 accept_failing=body.acceptFailing,
                 task_external_id=task.external_id if task else "",
                 rewrite=surface.rewrite,
@@ -501,9 +581,18 @@ def finalize_attempt(
                 with contextlib.suppress(Exception):
                     workspace.clear_seed_mark(db, workspace.active_lease(db, s.id))
 
+    # Which checks actually PROVED this reward, and the gym's own aggregate kept
+    # beside it rather than as it. A client that cannot tell an executed check
+    # from an unproven one cannot tell a scored sample from an asserted one.
+    out["executed"] = scorer.executed
+    out["unproven"] = scorer.unproven
+    out["gymSuccess"] = scorer.gym_success
+
     db.add(models.AuditLog(
         session_id=s.id, actor=current.email, action="attempt.finalize", target=out["submissionId"],
-        meta={"versionId": out["versionId"], "reward": out["reward"], "steps": out["steps"]},
+        meta={"versionId": out["versionId"], "reward": out["reward"], "steps": out["steps"],
+              "executed": len(scorer.executed), "unproven": scorer.unproven,
+              "gymSuccess": scorer.gym_success},
     ))
     s.status = "submitted"
     db.commit()

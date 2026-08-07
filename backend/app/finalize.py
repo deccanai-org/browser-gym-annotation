@@ -25,7 +25,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import checkpoints, models, replay, versions, worlddiff
+from app import checkpoints, disposition, models, replay, versions, worlddiff
+from app.config import settings
 
 
 class NotApproved(RuntimeError):
@@ -302,6 +303,55 @@ def _artifact_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
             "width": (art.meta or {}).get("width"), "height": (art.meta or {}).get("height")}
 
 
+def _environment_digest(db: Session, attempt: models.ReviewSession,
+                        version: models.TrajectoryVersion) -> tuple[str, str]:
+    """Which environment BUILD this trajectory was recorded against, and how we know.
+
+    The version's own column is authoritative but is routinely "" — nothing stamps
+    it unless the attempt ran in a provisioned workspace — and the export shipped
+    that empty string in the one field that pins the build, so every bundle claimed
+    the same (blank) environment. Fall back to the attempt's other stamped
+    evidence, then to the image this deployment is configured to run, and only
+    then admit we do not know. The SOURCE ships with it, because "the digest this
+    process happens to be configured with" is a much weaker claim than "the digest
+    stamped on the version" and a consumer has to be able to tell them apart.
+    """
+    if version.environment_image_digest:
+        return version.environment_image_digest, "trajectory_version"
+    digest = disposition.environment_digest(db, attempt)
+    if digest:
+        return digest, "attempt"
+    if settings.gym_image_digest:
+        return settings.gym_image_digest, "settings.gym_image_digest"
+    return "", ""
+
+
+def _task_block(db: Session, attempt: models.ReviewSession) -> dict:
+    """The task AS ANNOTATED.
+
+    Export used to rebuild this from the live `task` row at download time, so a
+    catalog reseed — which rewrites prompt/category/meta wholesale — could restate
+    what a shipped sample says the annotator was asked to do. `seed` is the
+    ATTEMPT's seed, not the task's current one: the golden was recorded and scored
+    under it, and a client resetting at a later task.seed gets a different world.
+    """
+    task = db.get(models.Task, attempt.task_id)
+    if task is None:
+        return {}
+    meta = task.meta or {}
+    return {
+        "id": task.external_id,
+        "revision": attempt.task_revision,
+        "prompt": task.prompt,
+        "category": task.category,
+        "difficulty": task.difficulty,
+        "constraints": meta.get("constraints", []),
+        "allowed_sites": meta.get("allowedSites", []),
+        "seed": attempt.seed,
+        "start_url": task.start_url,
+    }
+
+
 def _kind_for(suite: models.VerifierSuite, reward: int, overridden: list[str]) -> str:
     """golden | breaker | flagged, on the same rule the legacy path uses.
 
@@ -373,17 +423,31 @@ def freeze(
             "coordinate_fallback": s.coordinate_fallback or {},
             "replay_state": s.replay_state,
         })
+    # The run UNDER REVIEW, frozen alongside the golden. Export rebuilt it live
+    # from the trajectory rows even on this path, so a later re-capture of the
+    # canonical run rewrote the "recorded" half of a sample that had shipped —
+    # while the docstring above promised it could not drift.
+    from app.api.export import _base_trajectory, _steps_of  # local: avoid an import cycle
+
+    digest, digest_source = _environment_digest(db, attempt, version)
     return {
         "task_revision": attempt.task_revision,
+        "task": _task_block(db, attempt),
         "trajectory_version": {
             "id": str(version.id), "versionNo": version.version_no, "kind": version.kind,
-            "environment_image_digest": version.environment_image_digest,
+            "environment_image_digest": digest,
+            "environment_image_digest_source": digest_source,
             "lineage": lineage,
         },
+        "recorded_trajectory": _steps_of(_base_trajectory(db, attempt)),
         "golden_trajectory": steps,
         "verifiers": verifiers,
         "suite_version": suite.version,
         "reward": run.reward,
+        # The per-check outcomes behind that 0/1. Without them the bundle says a
+        # run failed and nothing about WHICH assertion it failed, which is the
+        # only part a buyer of a breaker sample can act on.
+        "results": dict(run.results or {}),
         "overridden": run.overridden or [],
         "final_world_hash": final_checkpoint.world_hash,
         "final_checkpoint_id": str(final_checkpoint.id),

@@ -184,3 +184,96 @@ def test_summary_reads_as_a_sentence():
     b["mail"]["unread_count"] = 1
     s = summarize(diff_worlds(a, b))
     assert "ORD_7" in s and "unread_count" in s
+
+
+def test_the_step_clock_is_not_a_state_change():
+    """The bridge ticks the gym's clock after EVERY mock-UI click and /verify
+    assigns the step, so `schedule.now` and `shop.step` move on every action of
+    every bridged attempt. While they were hashed, every step reported
+    `changed: true` and the per-step delta said nothing at all."""
+    a = _world(schedule={"now": 4, "queue": [], "pending": 0})
+    a["step"] = 4
+    a["shop"]["step"] = 4
+    b = _world(schedule={"now": 5, "queue": [], "pending": 0})
+    b["step"] = 5
+    b["shop"]["step"] = 5
+    assert diff_worlds(a, b)["changed"] is False
+
+    b["shop"]["orders"] = {"ORD_7": {"id": "ORD_7", "status": "placed"}}
+    d = diff_worlds(a, b)
+    assert d["changed"] is True
+    assert [c["path"] for c in d["changes"]] == ["shop.orders"], "the clock must not ride along"
+
+
+def test_a_scheduled_event_firing_is_still_a_change():
+    """`schedule.now` is the clock, but the queue is task state: the async
+    price-drop email arriving is exactly the thing those 18 tasks turn on."""
+    queued = [{"id": "s1", "emit_type": "PriceDrop", "fired": False, "fired_at_step": -1}]
+    fired = [{"id": "s1", "emit_type": "PriceDrop", "fired": True, "fired_at_step": 3}]
+    a = _world(schedule={"now": 2, "queue": queued, "pending": 1})
+    b = _world(schedule={"now": 3, "queue": fired, "pending": 0})
+    d = diff_worlds(a, b)
+    assert d["changed"] is True
+    paths = {c["path"] for c in d["changes"]}
+    assert "schedule.queue.0.fired" in paths and "schedule.now" not in paths
+
+
+def test_a_delivered_flip_reports_its_real_before_and_after():
+    """`events[].delivered` separates an environment bug (the confirmation mail
+    was never produced) from a real agent failure (it was, and the agent never
+    read it). The whole list used to be digested into one `set` whose `from` and
+    `to` were byte-identical, so the flip read as no change."""
+    a = _world()
+    a["events"] = [{"id": "evt_1", "type": "ShopOrderPlaced", "delivered": False}]
+    b = _world()
+    b["events"] = [{"id": "evt_1", "type": "ShopOrderPlaced", "delivered": True}]
+    d = diff_worlds(a, b)
+    assert [c["path"] for c in d["changes"]] == ["events.0.delivered"]
+    assert d["changes"][0]["from"] is False and d["changes"][0]["to"] is True
+
+
+def test_an_unchanged_list_member_says_nothing():
+    """A positional list diff that reports every member on any change buries the
+    one that moved."""
+    a = _world()
+    a["events"] = [{"id": "e1", "delivered": True}, {"id": "e2", "delivered": False}]
+    b = _world()
+    b["events"] = [{"id": "e1", "delivered": True}, {"id": "e2", "delivered": True}]
+    d = diff_worlds(a, b)
+    assert [c["path"] for c in d["changes"]] == ["events.1.delivered"]
+
+
+def test_a_shortened_list_reports_the_dropped_members():
+    a = _world()
+    a["events"] = [{"id": "e1"}, {"id": "e2"}]
+    b = _world()
+    b["events"] = [{"id": "e1"}]
+    d = diff_worlds(a, b)
+    assert [(c["op"], c["id"]) for c in d["changes"]] == [("remove", "1")]
+
+
+def test_food_cart_items_diff_by_dish_id():
+    """FoodCartItem has no `item_id` — the registry named a field that does not
+    exist, so every GymEats cart edit fell back to a positional diff and removing
+    the first dish read as 'the whole cart changed'."""
+    items = [{"dish_id": "d_salmon", "quantity": 1, "unit_price": 12.5},
+             {"dish_id": "d_tuna", "quantity": 2, "unit_price": 14.0}]
+    a = _world(food={"cart": {"items": items}, "cart_count": 3})
+    b = _world(food={"cart": {"items": items[1:]}, "cart_count": 2})
+    d = diff_worlds(a, b)
+    rems = [c for c in d["changes"] if c["path"] == "food.cart.items"]
+    assert [(c["op"], c["id"]) for c in rems] == [("remove", "d_salmon")]
+
+
+def test_two_shop_cart_lines_of_the_same_product_diff_by_line_id():
+    """A shop CartItem carries a per-line `id` and the same product may legally
+    sit on two lines (different gift wrap, different ship-to). Keyed on
+    product_id those two lines collide, the uniqueness guard fails and the diff
+    degrades to positions — on the split-shipping tasks, which are entirely
+    about per-line state."""
+    lines = [{"id": "ln_a", "product_id": "p1", "quantity": 1, "gift_wrap": True},
+             {"id": "ln_b", "product_id": "p1", "quantity": 1, "gift_wrap": False}]
+    a = _world(shop={"cart": {"items": lines, "applied_promo": None}, "orders": {}})
+    b = _world(shop={"cart": {"items": lines[1:], "applied_promo": None}, "orders": {}})
+    d = diff_worlds(a, b)
+    assert [(c["op"], c["id"]) for c in d["changes"]] == [("remove", "ln_a")]

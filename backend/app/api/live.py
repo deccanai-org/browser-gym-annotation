@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from app import (
     bridge_client, checkpoints, cua_hub, gym_client, live_world, models, restore, versions, workspace,
+    worlddiff,
 )
 from app.api.sessions import _owned_session
 from app.auth import current_annotator
@@ -412,6 +413,15 @@ def _cua_start_paths(task) -> dict[str, str]:
     return {app: (cfg or {}).get("start_path") or "/" for app, cfg in apps_meta.items()}
 
 
+def _primary_app(task, apps: list) -> dict | None:
+    """The app whose tab the pane lands on: the task's own primary, else the first."""
+    if not apps:
+        return None
+    key = ((task.meta or {}).get("primaryApp") if isinstance(task.meta, dict) else None) \
+        or cua_hub.primary_app(task.start_url)
+    return next((a for a in apps if a.get("app") == key), apps[0])
+
+
 def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
     """Open the live browser on the task's realistic UI, BRIDGED to the real gym.
 
@@ -427,8 +437,6 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
     to a plain per-app clone when no bridge is configured.
     """
     start_paths = _cua_start_paths(task)
-    primary_key = ((task.meta or {}).get("primaryApp") if isinstance(task.meta, dict) else None) \
-        or cua_hub.primary_app(task.start_url)
     bridge_session = str(s.id)          # stable across re-attach; the bridge keys on it
     gym_url = ""
     resumed: dict | None = None         # set when a saved world was put back
@@ -482,7 +490,7 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
             a["url"] = cua_hub.mock_url(a["app"], sid=a["attempt_sid"], start_path=a["start_path"])
         bridge_session = ""
 
-    primary = next((a for a in apps if a["app"] == primary_key), apps[0])
+    primary = _primary_app(task, apps) or apps[0]
     # The browser resolves URLs in its OWN namespace, which is not this process's
     # when the backend is containerised and the browser is not.
     for a in apps:
@@ -742,14 +750,20 @@ def close_live_session(
     s = _owned_session(db, session_id, current)
     with _attempt_lock(str(s.id)):
         entry = _ATTACHED.pop(str(s.id), None)
-    if entry is None:
+    # Nothing attached AND no lease is the genuinely redundant close. Returning on
+    # `entry is None` alone left the bridge lease behind whenever the attachment
+    # had already been dropped — a backend restart, or the pane discovering its
+    # browser had died — so the row went on naming a gym the bridge later re-leased
+    # to somebody else, and this attempt's events kept landing in their world.
+    if entry is None and not s.bridge_session_id:
         return {"closed": True}
 
     # Forget it whether or not the service answers. Holding the attachment open
     # because the close call failed strands the attempt on a browser nobody can
     # reach, with no way to open a working one.
-    with contextlib.suppress(HTTPException):
-        _live_request("POST", f"/live/sessions/{entry.live_session_id}/close", {}, timeout=10)
+    if entry is not None:
+        with contextlib.suppress(HTTPException):
+            _live_request("POST", f"/live/sessions/{entry.live_session_id}/close", {}, timeout=10)
 
     # Closing is a SUSPEND, so snapshot the world before letting go of it.
     # `materialize` checkpoints after each batch of events, but the seconds
@@ -773,8 +787,13 @@ def close_live_session(
             s.final_checkpoint_id = cp.id
             # What this attempt changed overall, seeded start vs end state — the
             # per-attempt DB diff. Recomputed on each close because closing is a
-            # suspend, not a finish.
-            s.world_summary = worlddiff.attempt_summary(db, s, final_world=world)
+            # suspend, not a finish. Only when there IS one: `attempt_summary`
+            # returns None when the attempt has no initial checkpoint to diff
+            # against, and writing that over an earlier summary would empty the
+            # exported sample's state_trajectory rather than leave it alone.
+            summary = worlddiff.attempt_summary(db, s, final_world=world)
+            if summary is not None:
+                s.world_summary = summary
 
     # Release the pooled gym. Closing only the Chromium leaked the bridge lease —
     # every task an annotator opened held one of the (few) gym instances forever,
@@ -787,10 +806,45 @@ def close_live_session(
         s.bridge_session_id = ""
         s.bridge_gym_url = ""
     db.add(models.AuditLog(
-        session_id=s.id, actor=current.email, action="live.close", target=entry.live_session_id, meta={},
+        session_id=s.id, actor=current.email, action="live.close",
+        target=entry.live_session_id if entry is not None else "", meta={},
     ))
     db.commit()
     return {"closed": True}
+
+
+def _reseed_bridged(s, task) -> dict | None:
+    """Put a bridged attempt back on the task seed THROUGH the bridge.
+
+    `endpoint.reset` goes straight at the gym, so it reseeded the ENGINE and left
+    the five mocks holding the world the annotator had just asked to throw away:
+    the storefront still showed the old cart, and its buttons acted on a world
+    that no longer existed. `/bridge/{sid}/open` with `force` is the same call the
+    normal open makes — it resets the leased gym AND re-baselines every app — so
+    "start over" now produces the world the annotator can actually see.
+    """
+    sids = {a["app"]: a["attempt_sid"] for a in (s.cua_apps or [])
+            if a.get("app") and a.get("attempt_sid")}
+    try:
+        return bridge_client.open_session(
+            str(s.bridge_session_id), task.external_id, s.seed, sids, force=True,
+        )
+    except bridge_client.BridgeError as exc:
+        log.warning("bridged reset failed for attempt %s (%s)", s.id, exc)
+        return None
+
+
+def _bridged_start_url(entry: _Attached, s, task) -> str:
+    """Where a bridged pane belongs after a reset: back in the realistic UI.
+
+    The workspace path navigates to `endpoint.base_url` + the task's start path,
+    which for a bridged attempt is the raw gym — resetting dropped the annotator
+    out of ShopGym onto the engine's own page, which is not the product they are
+    annotating. The persisted app URLs are already browser-visible (rewritten at
+    open), so the primary app's tab is the right destination.
+    """
+    primary = _primary_app(task, list(entry.cua_apps or s.cua_apps or []))
+    return str((primary or {}).get("url") or "") or entry.url
 
 
 def _touch_workspace(db: Session, attempt_id: UUID) -> None:
@@ -843,7 +897,8 @@ def reset_live_world(
         # a world that was half torn down.
         workspace.clear_seed_mark(db, lease)
 
-        result = endpoint.reset(task.external_id, s.seed)
+        bridged = getattr(endpoint, "kind", "") == "bridged"
+        result = _reseed_bridged(s, task) if bridged else endpoint.reset(task.external_id, s.seed)
         if result is None:
             raise HTTPException(
                 status_code=409,
@@ -860,7 +915,8 @@ def reset_live_world(
         entry = _ATTACHED.get(str(s.id))
         report = restore.RestoreReport()
         if entry is not None:
-            start_url = _browser_visible(_task_start_url(endpoint.base_url, task.start_url or ""))
+            start_url = (_bridged_start_url(entry, s, task) if bridged
+                         else _browser_visible(_task_start_url(endpoint.base_url, task.start_url or "")))
             with contextlib.suppress(HTTPException):
                 _live_request(
                     "POST", f"/live/sessions/{entry.live_session_id}/act",

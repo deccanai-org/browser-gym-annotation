@@ -56,11 +56,18 @@ interface Call {
 
 /** Records every request and answers from `reply`, mirroring the fake in
  *  liveBrowser.test.ts. The pane's describe/info calls have to be answered or a
- *  pointer click never reaches the socket at all. */
-function stubFetch(reply: (url: string) => unknown): Call[] {
+ *  pointer click never reaches the socket at all.
+ *
+ *  `hold` keeps a chosen call in flight. The pane dispatches a press only once
+ *  describe() answers, so the gap between the two is where a fast click's
+ *  ordering can go wrong — and it is unreachable with a fetch that resolves at
+ *  once. */
+function stubFetch(reply: (url: string) => unknown, hold?: (url: string) => Promise<void> | undefined): Call[] {
   const calls: Call[] = [];
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     calls.push({ url: String(url), body: init?.body === undefined ? undefined : (JSON.parse(String(init.body)) as unknown) });
+    const wait = hold?.(String(url));
+    if (wait) await wait;
     return { ok: true, status: 200, json: async () => reply(String(url)) } as Response;
   });
   return calls;
@@ -75,10 +82,13 @@ const SESSION: OpenedSession = {
   viewport: { width: 1280, height: 800 },
 };
 
-async function mountPane(over: Partial<ComponentProps<typeof LiveBrowserPane>> = {}) {
+async function mountPane(
+  over: Partial<ComponentProps<typeof LiveBrowserPane>> = {},
+  hold?: (url: string) => Promise<void> | undefined,
+) {
   FakeSocket.opened = [];
   vi.stubGlobal("WebSocket", FakeSocket);
-  const calls = stubFetch(REPLY);
+  const calls = stubFetch(REPLY, hold);
   let commits = 0;
 
   render(
@@ -368,5 +378,105 @@ describe("a click on the surface", () => {
     expect(events.map((e) => e.kind)).toEqual(["mouseDown", "mouseUp"]);
     expect(events[0].target.testId, "a pixel is not a locator").toBe("add-to-cart");
     expect(events[1].url, "the URL comes from the ack, not from what we believed").toBe("https://shop.gym.local/");
+  });
+});
+
+// --------------------------------------------------------------------------- ordering
+
+describe("a click faster than the describe round trip", () => {
+  it("reaches the service as press-then-release, not the other way round", async () => {
+    // The press is only dispatched once describe() has named the element under
+    // it. A release arriving inside that round trip used to go out FIRST: the
+    // service saw a release with no press, the backend folded no click out of
+    // the pair, and the whole interaction left no step, no dropped count and no
+    // alert — the annotator's click simply never happened.
+    let answer = () => {};
+    const describing = new Promise<void>((r) => { answer = r; });
+    const h = await mountPane({}, (url) => (url.endsWith("/describe") ? describing : undefined));
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await act(async () => {
+      fireEvent(h.surface, new MouseEvent("pointerdown", { bubbles: true, clientX: 225, clientY: 338 }));
+      fireEvent(h.surface, new MouseEvent("pointerup", { bubbles: true, clientX: 225, clientY: 338 }));
+    });
+    expect(h.sock().messages, "nothing may go out while the press is still being named").toHaveLength(0);
+
+    await act(async () => { answer(); await describing; });
+
+    const mouse = h.sock().messages.filter((m) => m.type === "mouse");
+    expect(mouse.map((m) => m.phase)).toEqual(["down", "up"]);
+    expect(mouse.map((m) => m.id), "and the ids the service judges staleness by follow the same order")
+      .toEqual([1, 2]);
+  });
+
+  it("still tells a drag from a click", async () => {
+    // The guard on the fix above: the release is paired with the press's OWN
+    // point and target, which is the only thing that lets the backend fold a
+    // click rather than commit a drag as one. Waiting on the press must not cost
+    // that pairing.
+    const h = await mountPane();
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await act(async () => {
+      fireEvent(h.surface, new MouseEvent("pointerdown", { bubbles: true, clientX: 90, clientY: 56 }));
+    });
+    await act(async () => {
+      fireEvent(h.surface, new MouseEvent("pointerup", { bubbles: true, clientX: 450, clientY: 400 }));
+    });
+    for (const m of h.sock().messages.filter((m) => typeof m.id === "number")) {
+      await h.server({ type: "ack", id: m.id, applied: true, state: { url: "https://shop.gym.local/", tabId: "t1" } });
+    }
+    await act(async () => cleanup());
+
+    const posted = h.calls.find((c) => c.url === "/api/sessions/A-1/events");
+    const events = (posted?.body ?? []) as { kind: string; payload: Record<string, number> }[];
+    const up = events.find((e) => e.kind === "mouseUp");
+    expect(up?.payload.fromNx, "a release with no origin is a click, whatever the annotator did").toBeCloseTo(0.1, 6);
+    expect(up?.payload.nx).toBeCloseTo(0.5, 6);
+  });
+});
+
+// --------------------------------------------------------------------------- recording loss
+
+describe("interactions that can never be recorded", () => {
+  it("are reported to the annotator, not left as an unacked counter", async () => {
+    // A dispatched input may well have moved the world; only its ack could have
+    // turned it into a step. "unacked 1" is a number in a status bar — it does
+    // not say the trajectory now has a hole in it, and the alert that does say
+    // so could never fire because nothing passed it a count.
+    const dropped: number[] = [];
+    const h = await mountPane({ onDropped: (n) => dropped.push(n) });
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+    await h.pointerAt(225, 338);
+
+    await h.drop(1006);
+
+    expect(screen.getByText("unacked 1")).toBeDefined();
+    expect(dropped[dropped.length - 1], "the world moved and the trajectory cannot say why").toBe(1);
+  });
+
+  it("are flushed with a beacon when the annotator closes the tab", async () => {
+    // A fetch started during unload dies with the document, so a fill still
+    // inside the 1.2s batch window — plus the click that terminated it — used to
+    // go with it. sendBeacon is the only transport that survives.
+    const h = await mountPane();
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "m" }); });
+    for (const m of h.sock().messages.filter((m) => typeof m.id === "number")) {
+      await h.server({ type: "ack", id: m.id, applied: true, state: { url: "https://shop.gym.local/", focus: { value: "m" } } });
+    }
+    // Keystrokes deliberately do not flush on a boundary, so the fill is still
+    // held in memory at this point — which is the whole exposure.
+    expect(h.calls.some((c) => c.url === "/api/sessions/A-1/events")).toBe(false);
+
+    const beacons: string[] = [];
+    vi.stubGlobal("navigator", { sendBeacon: (url: string) => { beacons.push(String(url)); return true; } });
+    await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+
+    expect(beacons).toEqual(["/api/sessions/A-1/events"]);
   });
 });

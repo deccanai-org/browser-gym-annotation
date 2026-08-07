@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EVENT_QUEUE_CAP,
   EventRecorder,
@@ -20,6 +20,10 @@ import type { LiveSocketConfig, LiveState, Timers } from "../../lib/liveBrowser"
 class FakeSocket {
   sent: string[] = [];
   closed = false;
+  /** OPEN. Mirrors the real thing because a socket in CLOSING/CLOSED accepts
+   *  send() and silently discards the payload — the exact behaviour that made
+   *  input into a dying socket look delivered. */
+  readyState = 1;
   onmessage: ((ev: { data: string }) => void) | null = null;
   onclose: ((ev: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -31,6 +35,7 @@ class FakeSocket {
 
   close(): void {
     this.closed = true;
+    this.readyState = 3;
   }
 
   /** server → client */
@@ -41,6 +46,7 @@ class FakeSocket {
   /** the socket dies underneath us (1006 = abnormal, i.e. not a service refusal) */
   drop(code = 1006): void {
     this.closed = true;
+    this.readyState = 3;
     this.onclose?.({ code });
   }
 
@@ -372,6 +378,68 @@ describe("LiveSocket", () => {
     expect(h.socket.snapshot.detail).toContain("read-only viewer");
   });
 
+  it("refuses input dispatched into a socket that is already closing", () => {
+    // A WebSocket in CLOSING/CLOSED does not throw from send(); per spec it
+    // discards the payload. `status` is still "live" until the close event
+    // lands, so those inputs used to look delivered, sit in `pending`, and be
+    // swept into "unacked" — recording nothing and refusing nothing.
+    const h = harness();
+    h.live();
+    h.last().readyState = 2;
+
+    expect(h.socket.click({ nx: 0.5, ny: 0.5 })).toBe(false);
+
+    expect(h.last().messages, "a discarded payload must not burn an input id").toHaveLength(0);
+    expect(h.socket.snapshot.droppedInputs).toBe(1);
+    expect(h.socket.snapshot.detail).toContain("NOT delivered");
+  });
+
+  it("reports the interactions that can never be recorded when the stream dies under them", () => {
+    // The ack is the ONLY place an interaction becomes a step. An input that was
+    // dispatched and never acked may still have moved the world, which leaves a
+    // recorded world that moved with no step explaining why — the corruption a
+    // buyer rejects. "unacked 2" in a counter bar is a number, not a warning that
+    // the trajectory now has a hole.
+    const lost: number[] = [];
+    const h = harness({ onRecordLoss: (n) => lost.push(n) });
+    h.live();
+    h.socket.send({ type: "mouse", phase: "down" }, () => ({ kind: "mouseDown" }));
+    h.socket.send({ type: "mouse", phase: "up" }, () => ({ kind: "mouseUp" }));
+
+    h.last().drop();
+
+    expect(lost).toEqual([2]);
+  });
+
+  it("does not report an interaction that was already recorded as lost", () => {
+    // The guard on the above: reporting a hole that is not there would have the
+    // annotator redo a task whose trajectory is whole.
+    const lost: number[] = [];
+    const recorded: string[] = [];
+    const h = harness({ onRecordLoss: (n) => lost.push(n), onRecord: (ev) => recorded.push(ev.kind) });
+    h.live();
+    h.socket.send({ type: "mouse", phase: "up" }, () => ({ kind: "mouseUp" }));
+    h.last().emit({ type: "ack", id: 1, applied: true, state: { url: "http://shop/x" } });
+
+    h.last().drop();
+
+    expect(recorded).toEqual(["mouseUp"]);
+    expect(lost).toEqual([]);
+  });
+
+  it("reports a record still in flight at an intentional teardown, not just at a crash", () => {
+    // The pane disconnects on unmount, and an ack in flight at that moment is as
+    // lost as one killed by a network drop.
+    const lost: number[] = [];
+    const h = harness({ onRecordLoss: (n) => lost.push(n) });
+    h.live();
+    h.socket.send({ type: "mouse", phase: "up" }, () => ({ kind: "mouseUp" }));
+
+    h.socket.disconnect();
+
+    expect(lost).toEqual([1]);
+  });
+
   it("sends a ping without an input id, so a viewer's keepalive is not judged stale", () => {
     const h = harness({ pingMs: 5000 });
     h.live();
@@ -576,6 +644,121 @@ describe("describeFocused", () => {
     expect(clicked.type).toBe("email");
     expect(reallyFocused.type).toBe("password");
     expect(calls.map((c) => c.url.split("/").pop())).toEqual(["describe", "focused"]);
+  });
+});
+
+describe("EventRecorder loss accounting", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("counts the events a partial write did not keep", async () => {
+    // A 200 that recorded fewer events than it was sent is a partial write: the
+    // rest are gone, and the batch cannot be replayed without duplicating what
+    // did land. This used to return the server's number and let every caller
+    // assume the batch had gone in whole.
+    const dropped: number[] = [];
+    const { impl } = fakeFetch(() => ({ ok: true, json: { recorded: 1 } }));
+    const clock = fakeTimers();
+    const rec = new EventRecorder({
+      attemptId: "s-1", fetchImpl: impl, timers: clock.timers, batchAt: 99,
+      onDrop: (n) => dropped.push(n),
+    });
+    for (const ch of "abc") rec.push({ kind: "keyChar", payload: { text: ch } });
+
+    expect(await rec.flush()).toBe(1);
+
+    expect(dropped, "two interactions vanished and the alert read zero").toEqual([2]);
+  });
+
+  it("counts what a failed final flush stranded, instead of dropping it in dispose", async () => {
+    // dispose() runs when the pane is torn down. A batch that came back from a
+    // failed POST at that point is held by a recorder nobody references any
+    // more — those interactions are never going anywhere.
+    const dropped: number[] = [];
+    const { impl } = fakeFetch(() => ({ ok: false }));
+    const clock = fakeTimers();
+    const rec = new EventRecorder({
+      attemptId: "s-1", fetchImpl: impl, timers: clock.timers, batchAt: 99,
+      onDrop: (n) => dropped.push(n),
+    });
+    rec.push({ kind: "mouseDown", payload: {} });
+    rec.push({ kind: "mouseUp", payload: {} });
+    await rec.flush();
+    expect(rec.queued).toBe(2);
+
+    rec.dispose();
+
+    expect(rec.queued).toBe(0);
+    expect(dropped).toEqual([2]);
+  });
+
+  it("hands the queue to sendBeacon when the page goes away", () => {
+    // A fetch started during unload is cancelled with the document, so closing
+    // the tab threw away everything inside the 1.2s flush window — easily a
+    // whole fill plus the click that terminated it, with nothing saying the
+    // trajectory now stops mid-action.
+    const beacons: { url: string; type: string }[] = [];
+    vi.stubGlobal("navigator", {
+      sendBeacon: (url: string, body: Blob) => {
+        beacons.push({ url: String(url), type: body.type });
+        return true;
+      },
+    });
+    const { impl, calls } = fakeFetch();
+    const clock = fakeTimers();
+    const rec = new EventRecorder({ attemptId: "s-1", fetchImpl: impl, timers: clock.timers, batchAt: 99 });
+    const listeners: Record<string, (() => void) | undefined> = {};
+    const stop = rec.installUnloadFlush({
+      addEventListener: (t, fn) => { listeners[t] = fn; },
+      removeEventListener: (t) => { listeners[t] = undefined; },
+    });
+    for (const ch of "mug") rec.push({ kind: "keyChar", payload: { text: ch } });
+    expect(calls, "still inside the flush window — this is exactly what used to be lost").toHaveLength(0);
+
+    listeners.pagehide?.();
+
+    expect(beacons).toHaveLength(1);
+    expect(beacons[0].url).toBe("/api/sessions/s-1/events");
+    expect(beacons[0].type, "a bare string is labelled text/plain and the endpoint parses by content type")
+      .toBe("application/json");
+    expect(rec.queued).toBe(0);
+
+    stop();
+    expect(listeners.pagehide, "a pane that unmounts must not keep flushing on unload").toBeUndefined();
+  });
+
+  it("also listens for beforeunload, which is the one a plain tab close fires", () => {
+    vi.stubGlobal("navigator", { sendBeacon: () => true });
+    const { impl } = fakeFetch();
+    const rec = new EventRecorder({ attemptId: "s-1", fetchImpl: impl, timers: fakeTimers().timers, batchAt: 99 });
+    const listeners: Record<string, (() => void) | undefined> = {};
+    rec.installUnloadFlush({
+      addEventListener: (t, fn) => { listeners[t] = fn; },
+      removeEventListener: (t) => { listeners[t] = undefined; },
+    });
+    rec.push({ kind: "keyChar", payload: { text: "a" } });
+
+    listeners.beforeunload?.();
+
+    expect(rec.queued).toBe(0);
+  });
+
+  it("counts the batch as lost when the beacon is refused, rather than assuming it went", () => {
+    // sendBeacon returns false when the browser will not take the payload (over
+    // quota, or no beacon support at all). Believing it is what turns a lost
+    // batch into a sample that looks complete.
+    const dropped: number[] = [];
+    vi.stubGlobal("navigator", { sendBeacon: () => false });
+    const { impl } = fakeFetch();
+    const rec = new EventRecorder({
+      attemptId: "s-1", fetchImpl: impl, timers: fakeTimers().timers, batchAt: 99,
+      onDrop: (n) => dropped.push(n),
+    });
+    rec.push({ kind: "keyChar", payload: { text: "a" } });
+    rec.push({ kind: "keyChar", payload: { text: "b" } });
+
+    expect(rec.flushBeacon()).toBe(false);
+
+    expect(dropped).toEqual([2]);
   });
 });
 

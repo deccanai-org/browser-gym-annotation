@@ -42,12 +42,11 @@ def world_at(step: int, orders: list[str], *, clock: int = 0,
              mail: tuple[str, ...] = (), queue: tuple[dict, ...] = ()) -> dict:
     """The world the fake gym reports after `step` actions.
 
-    Mirrors the real one in the two ways that decide this module's behaviour.
-    The step counter is part of the world, so the /_harness/verify call that sets
-    it is load-bearing rather than decorative. And so is `schedule.now`:
-    ``WorldState.to_json`` embeds the whole ScheduleState, which means the
-    deterministic clock is inside the hash `checkpoints.hash_world` computes — a
-    clock moved when the recording's was not is a mismatch on its own.
+    Mirrors the real one in the two ways that decide this module's behaviour:
+    ``WorldState.to_json`` carries the step counter and embeds the whole
+    ScheduleState, so a replay sees both counters move. Neither is hashed
+    (`checkpoints._VOLATILE_PATHS`) — what the tick is actually for is `queue`
+    and the mail it delivers.
     """
     entries = list(queue)
     return {
@@ -317,14 +316,16 @@ def test_a_task_that_schedules_nothing_is_replayed_with_the_clock_left_alone():
     assert recon.accepted == 2
 
 
-def test_forcing_the_clock_onto_a_task_that_schedules_nothing_destroys_its_trail():
+def test_forcing_the_clock_onto_a_task_that_schedules_nothing_delivers_nothing():
     """The regression that made the old unconditional --tick wrong, as a test.
 
     `advance_and_flush` assigns `sched.now = step` before it looks at the queue,
-    and the world hash covers `schedule.now`, so an empty queue is no protection.
-    Measured against the live gym on M40/bogus_pricematch: 3 of 3 worlds became 1
-    of 3. Only step 0 survives, because `step <= sched.now` makes tick(0) a no-op.
-    """
+    so an empty queue was no protection while the world hash covered
+    `schedule.now`: measured against the live gym on M40/bogus_pricematch, 3 of 3
+    worlds became 1 of 3, and only step 0 survived because `step <= sched.now`
+    makes tick(0) a no-op. The clock is no longer hashed
+    (`checkpoints._VOLATILE_PATHS`), so a tick that delivers nothing now costs
+    nothing — this goes red again the day the clock is hashed back in."""
     run = archived([
         click("a", world=world_at(0, [])),
         click("b", world=world_at(1, [])),
@@ -332,8 +333,7 @@ def test_forcing_the_clock_onto_a_task_that_schedules_nothing_destroys_its_trail
     ])
     recon, gym, _ = replay(run, tick=backfill.TICK_ON)
     assert gym.ticks == [0, 1, 2]
-    assert recon.accepted == 1, "only the step whose tick was a no-op still matched"
-    assert recon.steps[0].accepted and not recon.steps[1].accepted
+    assert recon.accepted == 3, "the clock moved and nothing about the task did"
 
 
 def test_a_task_whose_events_fire_on_the_clock_is_ticked_for_every_step():
@@ -353,7 +353,8 @@ def test_without_the_clock_a_scheduled_event_never_arrives_and_the_trail_stops()
     `harness_tick`), so a replay that skips it can never reach those worlds."""
     recon, gym, _ = replay(_scheduled_run(), seed_world=_scheduled_seed(), tick=backfill.TICK_OFF)
     assert gym.ticks == []
-    assert recon.accepted == 1, "the clock never moved, so every step after the first diverged"
+    assert recon.accepted == 2, "the trail stops the moment the undelivered mail is missing"
+    assert not recon.steps[2].accepted, "step 2 is where the price-drop email should be"
 
 
 def test_the_clock_is_ticked_before_the_action_carrying_the_index_of_that_step():
@@ -850,12 +851,13 @@ def test_the_clock_needs_no_flag_and_is_decided_task_by_task(cli, scheduled_arch
 def test_the_clock_can_be_forced_off_for_a_task_to_measure_it(cli, scheduled_archive_dir, capsys):
     """Both overrides exist so the rule can be MEASURED against a task rather than
     argued about — which is how the automatic rule was derived in the first place.
-    Forcing it off is the before-picture: the same run loses everything but step 0."""
+    Forcing it off is the before-picture: the same run keeps only the steps before
+    the email was due, and loses every world that should contain it."""
     assert cli(["audit", "--archive", str(scheduled_archive_dir), "--tick", "off", "--json"],
                seed_world=_scheduled_seed()) == 0
     out = json.loads(capsys.readouterr().out)
     assert cli.made["gym"].ticks == []
-    assert out["summary"]["accepted"] == 1
+    assert out["summary"]["accepted"] == 2
     assert out["tasks"][0]["scheduledEvents"] == 1, \
         "the task still reports its schedule — the override changes what is done, not what is true"
 

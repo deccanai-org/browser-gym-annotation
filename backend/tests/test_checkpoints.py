@@ -249,6 +249,28 @@ def test_volatile_keys_are_stripped_at_every_level_not_just_the_top():
     assert checkpoints.hash_world(quiet) == checkpoints.hash_world(noisy)
 
 
+def test_the_step_clock_does_not_move_the_hash():
+    """The bridge ticks `/_harness/tick` after every mock-UI click and `/verify`
+    assigns `shop.step`, so both counters advance on every action of a bridged
+    attempt while nothing about the task moves. Hashing them made every step
+    diverge, and every per-step delta report `changed: true`."""
+    at_5 = {"step": 5, "shop": {"step": 5, "cart": {"items": []}},
+            "schedule": {"now": 5, "queue": [], "pending": 0}}
+    at_6 = {"step": 6, "shop": {"step": 6, "cart": {"items": []}},
+            "schedule": {"now": 6, "queue": [], "pending": 0}}
+    assert checkpoints.hash_world(at_5) == checkpoints.hash_world(at_6)
+
+
+def test_a_step_recorded_inside_an_entity_is_still_hashed():
+    """The clock rule is by PATH, not by key name the way `_VOLATILE` is:
+    `events[].step` is the step a cross-app effect fired at, and a name-based
+    rule would strip it — hiding a confirmation email that arrived somewhere
+    else in the episode."""
+    a = {"events": [{"id": "evt_1", "type": "ShopOrderPlaced", "step": 2}]}
+    b = {"events": [{"id": "evt_1", "type": "ShopOrderPlaced", "step": 5}]}
+    assert checkpoints.hash_world(a) != checkpoints.hash_world(b)
+
+
 # --------------------------------------------------------------------------- the clock
 def test_the_step_clock_is_taken_from_the_world_not_the_caller():
     """THE bug that made every checkpoint unrestorable. Callers passed a loop

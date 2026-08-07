@@ -569,6 +569,136 @@ def test_a_failed_reset_leaves_the_world_alone(client, attempt, live_service, mo
     assert "left as it was" in r.json()["detail"]
 
 
+# --------------------------------------------------------------------------- bridged attempts
+def _bridged(monkeypatch, db_session, attempt: str, *, apps=None) -> models.ReviewSession:
+    """An attempt holding a gym out of the bridge pool, with its mock tabs.
+
+    The bridge's lease table is what `world_for` believes, so it has to say this
+    session still holds that gym."""
+    apps = apps if apps is not None else [
+        {"app": "shop", "attempt_sid": "sid-shop", "url": "http://localhost:5201/?sid=sid-shop"},
+        {"app": "mail", "attempt_sid": "sid-mail", "url": "http://localhost:5202/?sid=sid-mail"},
+    ]
+    s = db_session.get(models.ReviewSession, UUID(attempt))
+    s.cua_apps = apps
+    s.bridge_session_id = attempt
+    s.bridge_gym_url = "http://127.0.0.1:8077"
+    db_session.commit()
+    monkeypatch.setattr(
+        live.live_world.bridge_client, "pool_status",
+        lambda: {"sessions": {attempt: {"gym": "http://127.0.0.1:8077"}}},
+    )
+    return s
+
+
+def test_resetting_a_bridged_world_reseeds_through_the_bridge(client, attempt, live_service,
+                                                              db_session, monkeypatch):
+    """Resetting the ENGINE alone left the five mocks showing the world the
+    annotator had just discarded, and their buttons acting on a world that no
+    longer existed. Only the bridge re-baselines the apps."""
+    opens: list = []
+    monkeypatch.setattr(live.bridge_client, "open_session",
+                        lambda sid, task_id, seed, sids, force=False:
+                        (opens.append((sid, task_id, seed, sids, force)), {"ok": True})[1])
+    client.post(f"/api/sessions/{attempt}/live")
+    _bridged(monkeypatch, db_session, attempt)
+    live_service.reset_calls.clear()   # the open's own seeding is not what is under test
+
+    r = client.post(f"/api/sessions/{attempt}/live/reset-world")
+    assert r.status_code == 200, r.text
+    assert len(opens) == 1, "the reset must go through the bridge, not straight at the gym"
+    assert opens[0][0] == attempt and opens[0][4] is True, "a plain re-open would attach, not reseed"
+    assert opens[0][3] == {"shop": "sid-shop", "mail": "sid-mail"}, \
+        "the apps must be re-baselined under the SIDs this attempt's world lives under"
+    assert live_service.reset_calls == [], "the raw gym must not be reset behind the bridge's back"
+
+
+def test_resetting_a_bridged_world_leaves_the_pane_in_the_realistic_ui(client, attempt, live_service,
+                                                                       db_session, monkeypatch):
+    """Reset navigated to the gym's own page, which is not the product being
+    annotated — and whose buttons drive a different surface entirely."""
+    monkeypatch.setattr(live.bridge_client, "open_session", lambda *a, **kw: {"ok": True})
+    navigated: list = []
+    real_request = live._live_request
+
+    def spy(method, path, body=None, timeout=45):
+        if path.endswith("/act"):
+            navigated.append((body or {}).get("args", {}).get("url"))
+            return 200, {}
+        return real_request(method, path, body, timeout)
+
+    monkeypatch.setattr(live, "_live_request", spy)
+    client.post(f"/api/sessions/{attempt}/live")
+    _bridged(monkeypatch, db_session, attempt)
+
+    assert client.post(f"/api/sessions/{attempt}/live/reset-world").status_code == 200
+    assert navigated == ["http://localhost:5201/?sid=sid-shop"], \
+        "back to the primary app's tab, not the raw gym"
+    assert client.get(f"/api/sessions/{attempt}/live").json()["session"]["url"] \
+        == "http://localhost:5201/?sid=sid-shop", "and the pane is told where it now is"
+
+
+def test_a_bridge_that_cannot_reseed_leaves_the_world_alone(client, attempt, live_service,
+                                                            db_session, monkeypatch):
+    """Reporting a reset that did not happen would have the annotator start over
+    on top of the world they thought was gone."""
+    def boom(*a, **kw):
+        raise live.bridge_client.BridgeUnreachable("bridge is down")
+
+    monkeypatch.setattr(live.bridge_client, "open_session", boom)
+    client.post(f"/api/sessions/{attempt}/live")
+    _bridged(monkeypatch, db_session, attempt)
+
+    r = client.post(f"/api/sessions/{attempt}/live/reset-world")
+    assert r.status_code == 409 and "left as it was" in r.json()["detail"]
+
+
+def test_closing_releases_the_lease_even_when_nothing_is_attached(client, attempt, live_service,
+                                                                  db_session, monkeypatch):
+    """The attachment map is process memory: a backend restart, or a pane that
+    found its browser gone, drops the entry while the bridge lease lives on.
+    Returning early on "nothing attached" left the row naming a gym the bridge
+    then re-leased, and this attempt's events kept landing in that annotator's
+    world."""
+    released: list = []
+    monkeypatch.setattr(live.bridge_client, "close_session", lambda sid: (released.append(sid), True)[1])
+    _bridged(monkeypatch, db_session, attempt)
+    live._ATTACHED.clear()          # the browser is gone; the lease is not
+
+    assert client.post(f"/api/sessions/{attempt}/live/close").json() == {"closed": True}
+    assert released == [attempt], "the pooled gym must be handed back"
+
+    db_session.expire_all()
+    s = db_session.get(models.ReviewSession, UUID(attempt))
+    assert not s.bridge_session_id and not s.bridge_gym_url, \
+        "the stale handle must be cleared, or world_for keeps resolving to that gym"
+
+
+def test_closing_records_what_the_attempt_changed(client, attempt, live_service, db_session, monkeypatch):
+    """`worlddiff` was never imported here, so this line raised NameError inside a
+    suppress() and every exported sample shipped an empty state_trajectory
+    summary."""
+    from app import checkpoints
+
+    s = _bridged(monkeypatch, db_session, attempt)
+    monkeypatch.setattr(live.live_world.BridgedWorld, "world",
+                        lambda self: {"step": 3, "shop": {"orders": {"ORD_7": {"id": "ORD_7"}}}},
+                        raising=False)
+    monkeypatch.setattr(live.bridge_client, "close_session", lambda sid: True)
+    cp = checkpoints.capture(db_session, attempt_id=s.id, world={"step": 0, "shop": {"orders": {}}},
+                             step_clock=0)
+    s.initial_checkpoint_id = cp.id
+    db_session.commit()
+
+    assert client.post(f"/api/sessions/{attempt}/live/close").json() == {"closed": True}
+
+    db_session.expire_all()
+    summary = db_session.get(models.ReviewSession, UUID(attempt)).world_summary
+    assert summary and summary["changed"] is True
+    assert summary["scope"] == "attempt"
+    assert "ORD_7" in summary["summary"], "the diff must name what the annotator actually did"
+
+
 def test_reattaching_reports_the_world_as_preserved(client, attempt, live_service, monkeypatch):
     """Re-attach resets nothing, so it must not report "seeded" — an annotator an
     hour into a world would read that as their work having just been discarded."""

@@ -335,12 +335,56 @@ def test_a_press_that_travels_is_a_drag_not_a_click():
 
 
 def test_a_right_click_is_not_recorded_as_a_left_click():
+    """It used to come out as `click` with the button only in the payload — and
+    the executor's `click` takes no button, so it replayed as a LEFT click and
+    certify stamped it verified. A step reading "right-click Save for later"
+    shipped as a left click that reported ok."""
     t = {"targetKey": "row", "testId": "row"}
     out = recorder.coalesce([
         _k(1, "mouseDown", 0, t, nx=0.5, ny=0.5, button="right"),
         _k(2, "mouseUp", 30, t, nx=0.5, ny=0.5, button="right", clicks=1),
     ])
-    assert out[0]["kind"] == "click" and out[0]["payload"]["button"] == "right"
+    assert out[0]["kind"] == "right_click" and out[0]["payload"]["button"] == "right"
+    assert out[0]["kind"] not in recorder.EXECUTOR_KINDS, "it must fail, not pass as a left click"
+
+
+def test_a_middle_click_is_not_a_left_click_either():
+    t = {"targetKey": "row", "testId": "row"}
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, t, nx=0.5, ny=0.5, button="middle"),
+        _k(2, "mouseUp", 30, t, nx=0.5, ny=0.5, button="middle", clicks=1),
+    ])
+    assert out[0]["kind"] == "middle_click"
+
+
+def test_pressing_enter_to_submit_becomes_the_executor_s_press():
+    """`keyPress` is not a kind the executor answers to, so submitting a search
+    with Enter — one of the commonest actions in the corpus — produced a step
+    certify could only mark diverged, blocking the whole trajectory."""
+    t = {"targetKey": "q", "testId": "input-search"}
+    out = recorder.coalesce([
+        _k(1, "keyChar", 0, t, text="m", value="m"),
+        _k(2, "keyChar", 100, t, text="ug", value="mug"),
+        _k(3, "keyPress", 200, t, key="Enter", value="mug"),
+    ])
+    assert [a["kind"] for a in out] == ["fill", "press"]
+    assert out[1]["payload"]["key"] == "Enter"
+    assert all(a["kind"] in recorder.EXECUTOR_KINDS for a in out)
+
+
+def test_a_key_event_that_names_no_key_is_not_turned_into_a_press():
+    """`act("press")` defaults a missing key to Enter, so translating this would
+    submit whatever form happened to be open."""
+    out = recorder.coalesce([_k(1, "keyPress", 0, {"targetKey": "q", "testId": "q"})])
+    assert out[0]["kind"] == "keyPress"
+
+
+def test_a_modified_key_keeps_its_modifiers_in_the_key_itself():
+    """`act()` passes only `args.key` to the browser. Dropping the modifiers made
+    Cmd+V replay as a bare "v" typed into the field."""
+    t = {"targetKey": "q", "testId": "input-search"}
+    out = recorder.coalesce([_k(1, "keyPress", 0, t, key="v", modifiers=["Meta"])])
+    assert out[0]["kind"] == "press" and out[0]["payload"]["key"] == "Meta+v"
 
 
 def test_a_double_click_is_one_action_not_two():

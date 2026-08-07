@@ -27,6 +27,7 @@ Two rules keep this honest:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -43,6 +44,27 @@ SETTLE_MS = 2000
 # Kinds that never become a step on their own: they are folded into one, or they
 # are exploration that carries no world change.
 _NON_STEP = {"mouseDown", "mouseUp", "mousePressed", "mouseReleased", "keyChar", "move"}
+
+# Actions that move the VIEWPORT or the browser, never the gym world: nothing in
+# them reaches the engine. Used twice below — a batch made only of these cannot be
+# losing a race with the engine, and it cannot be the cause of a change either.
+_BROWSER_ONLY = {"scroll", "switch_tab", "open_tab", "close_tab", "wait"}
+
+# How long to wait before believing "this action changed nothing".
+#
+# The world is read a few milliseconds after the action acked, which is a race
+# with the mock UI's own POST to the engine — and losing it looks EXACTLY like a
+# no-op: the world still hashes to what the batch started from. That was written
+# down as {"changed": false}, i.e. "your click did nothing", which is a lie an SFT
+# target learns from; NULL at least means "not observed" and the UI renders it as
+# such. So an apparent no-op is confirmed by a second read rather than believed.
+#
+# This is off the annotator's interaction path: their clicks go to the browser
+# over the websocket, while this runs inside the background POST /events flush —
+# a sync endpoint, so the wait sits in a worker thread and not on the event loop.
+# It is paid only when the world looks unchanged, and only when the batch could
+# have reached the engine at all.
+CONFIRM_MS = 150
 
 
 def _now_ms() -> int:
@@ -84,6 +106,29 @@ def _settled(rows: list[models.InteractionEvent], now_ms: int) -> list[models.In
     return rows[:cut]
 
 
+def _acted_at(ev: models.InteractionEvent | None) -> datetime | None:
+    """WHEN the annotator performed this step — the only per-step timing a
+    trajectory carries.
+
+    The client's `payload.t` rather than the row's `occurred_at`, because
+    `occurred_at` is the moment the BATCH was written: the recorder flushes on a
+    boundary or a 1.2s timer, so a minute of work came back as a handful of
+    identical timestamps and no step had a duration. `t` is the annotator's own
+    clock, which makes the absolute time only as good as their machine's — but
+    the intervals between steps, which is what a trajectory dataset is actually
+    read for, are then real.
+
+    Naive UTC, matching every other datetime written here; a tz-aware value in a
+    TIMESTAMP WITHOUT TIME ZONE column silently loses its offset.
+    """
+    if ev is None:
+        return None
+    t = int((ev.payload or {}).get("t") or 0)
+    if t <= 0:
+        return ev.occurred_at
+    return datetime.fromtimestamp(t / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+
 def _describe(action: dict) -> str:
     """A one-line human summary — what the step list actually shows.
 
@@ -109,8 +154,15 @@ def _describe(action: dict) -> str:
     if kind == "scroll":
         dy = payload.get("dy", 0)
         return f"scroll {'down' if (dy or 0) > 0 else 'up'}" + (f" in {name}" if name else "")
-    if kind in ("click", "dblclick") and payload.get("button") == "right":
+    if kind == "right_click":
         return f"right-click {name}".strip()
+    if kind == "middle_click":
+        return f"middle-click {name}".strip()
+    if kind == "press":
+        # "press Enter", not "press input-search": the KEY is the action here, and
+        # the field is only where it landed.
+        key = payload.get("key") or "?"
+        return f"press {key}" + (f" in {name}" if name else "")
     return f"{kind} {name}".strip() if name else kind
 
 
@@ -145,6 +197,15 @@ def _chain_and_observe(db: Session, attempt: models.ReviewSession,
     nothing", and conflating the two would teach a model that half its actions
     were no-ops.
 
+    Two things the single read can still say honestly, and used to not:
+
+    * when the window changed NOTHING, that holds for every step in it, not just
+      the last — so a batch of typing no longer ships three fills with no
+      observation at all;
+    * when it did change, the delta is attributed to the last step that could
+      possibly have caused it. A tab switch cannot place an order, and a batch
+      ending in one used to hang the order on the switch.
+
     The delta is computed against the world the batch STARTED from (the cursor
     checkpoint), so the first batch of an attempt diffs against the seeded world
     rather than reporting the entire world as newly added.
@@ -175,27 +236,70 @@ def _chain_and_observe(db: Session, attempt: models.ReviewSession,
 
     if world is None:
         return
-    try:
-        w = world.world()
-    except Exception:  # noqa: BLE001 — a world we cannot read must not lose the steps
-        w = None
+    w = _read_world(world)
     if not w:
         return
 
     prev_hash, prev_world = worlddiff.previous_world(db, attempt, cursor)
     if prev_hash and prev_hash == checkpoints.hash_world(w):
-        # Nothing moved. Record that positively — "your click did nothing" is
-        # useful to an annotator — but do not write another identical world.
-        made[-1].world_delta = worlddiff.diff_worlds(w, w)
-        db.flush()
-        return
+        # The world reads exactly as the batch started. Either the actions changed
+        # nothing, or the engine has not applied them yet — this runs milliseconds
+        # after the ack, in a race with the mock UI's own POST. Ask again before
+        # concluding no-change; the alternative is recording "your click did
+        # nothing" whenever we lose the race, which is worse than saying nothing.
+        late = _confirm_unchanged(world, prev_hash, made)
+        if late is None:
+            # Genuinely unchanged, and that is true of every step in the window:
+            # the world is the same before and after all of them.
+            unchanged = worlddiff.diff_worlds(w, w)
+            for st in made:
+                st.world_delta = unchanged
+            db.flush()
+            return
+        w = late
 
     cp = checkpoints.capture(db, attempt_id=attempt.id, world=w,
                              step_clock=int(w.get("step") or 0) if isinstance(w, dict) else 0)
-    made[-1].after_checkpoint_id = cp.id
-    made[-1].world_after = w
-    made[-1].world_delta = worlddiff.diff_worlds(prev_world, w)
+    owner = _likely_cause(made)
+    owner.after_checkpoint_id = cp.id
+    owner.world_after = w
+    owner.world_delta = worlddiff.diff_worlds(prev_world, w)
     db.flush()
+
+
+def _read_world(world) -> dict | None:
+    try:
+        return world.world()
+    except Exception:  # noqa: BLE001 — a world we cannot read must not lose the steps
+        return None
+
+
+def _confirm_unchanged(world, prev_hash: str, made: list[models.TrajectoryStep]) -> dict | None:
+    """Re-read the world once, and hand back the LATE one if it moved after all.
+
+    None means "asked twice, still unchanged" — the only answer that earns a
+    `{"changed": false}` on a step. A batch that could not have reached the engine
+    at all skips the wait: there is no race to lose.
+    """
+    if all(st.action_type in _BROWSER_ONLY for st in made):
+        return None
+    if CONFIRM_MS:
+        time.sleep(CONFIRM_MS / 1000)
+    late = _read_world(world)
+    if not late or checkpoints.hash_world(late) == prev_hash:
+        return None
+    return late
+
+
+def _likely_cause(made: list[models.TrajectoryStep]) -> models.TrajectoryStep:
+    """The step in the window a change can honestly be hung on: the last one that
+    reaches the gym engine at all. Falls back to the last step, which is all there
+    is to say when the whole window was viewport motion (an async scheduled event
+    can still land during one)."""
+    for st in reversed(made):
+        if st.action_type not in _BROWSER_ONLY:
+            return st
+    return made[-1]
 
 
 def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | None = None,
@@ -254,7 +358,15 @@ def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | Non
                 break
         # `needs_value` is a step we deliberately refuse to certify: its value was
         # redacted at record time, so replaying it would type a placeholder.
-        state = "needs_value" if a.get("needsValue") else "unverified"
+        # A kind outside the executor's vocabulary (a drag, a right-click) is the
+        # other thing that cannot be proven, and saying so HERE rather than at
+        # certify is the difference between the annotator learning it now and
+        # learning it at the end of the task.
+        state, error = "unverified", ""
+        if a.get("needsValue"):
+            state = "needs_value"
+        elif kind not in recorder.EXECUTOR_KINDS:
+            state, error = "failed", f"the executor has no {kind!r} action, so this step cannot be replayed"
         st = versions.append_step(
             db, version, trajectory_id=traj.id, actor="human",
             action_type=kind,
@@ -266,10 +378,11 @@ def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | Non
             # nx/ny belong in coordinate_fallback, not smuggled into arguments:
             # a locator is what replays, a coordinate is only the last resort.
             coordinate_fallback={k: payload[k] for k in ("nx", "ny") if k in payload},
-            intervention_at=(first.occurred_at if first is not None else None),
+            intervention_at=_acted_at(first),
             screenshot_url=shot,
             marks_artifact_id=(UUID(str(shot_id)) if shot_id else None),
             replay_state=state,
+            replay_error=error,
         )
         # Link every raw event to the step it became, so the two layers stay
         # navigable in both directions and nothing is folded twice.

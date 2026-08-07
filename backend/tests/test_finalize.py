@@ -271,7 +271,7 @@ def test_the_exported_sample_ships_the_lineage_and_authorship(db_session, setup)
     db_session.commit()
 
     sample = build_sample(db_session, s)
-    assert sample["schema"] == "golden-sample/4"
+    assert sample["schema"] == "golden-sample/5"
     # /4 pairs every action with what could be SEEN when it was taken. Both keys
     # must be present on every step even where this fixture has no artifacts:
     # a missing key is indistinguishable from "never captured", and a consumer
@@ -300,23 +300,134 @@ def test_the_exported_sample_cannot_drift_after_it_ships(db_session, setup):
     before = build_sample(db_session, s)
 
     steps[0].description = "rewritten after shipping"
+    task.prompt = "a different task entirely"
+    task.seed = s.seed + 7
     db_session.query(models.Verifier).filter(models.Verifier.suite_id == suite.id).delete()
     db_session.commit()
 
     after = build_sample(db_session, s)
     assert after["golden_trajectory"] == before["golden_trajectory"]
     assert after["verifiers"] == before["verifiers"] != []
+    # The recorded run and the task block were rebuilt LIVE on this path even
+    # though the docstring promised a shipped sample cannot drift, so a
+    # re-capture or a catalog reseed rewrote what a delivered bundle said the
+    # annotator was asked to do and what the agent actually did.
+    assert after["recorded_trajectory"] == before["recorded_trajectory"] != []
+    assert after["task"] == before["task"]
+    assert after["task"]["prompt"] == "p"
+
+
+def test_the_shipped_seed_is_the_one_the_golden_was_recorded_under(db_session, setup):
+    """The bundle shipped `task.seed`, the task's CURRENT mutable seed. A client
+    resetting at it gets a different world from the one the golden was recorded
+    and scored in — the seed has to come from the attempt."""
+    from app.api.export import build_sample
+
+    s, v1, suite, steps, task = setup
+    s.seed = 11
+    task.seed = 0
+    db_session.flush()
+    _approve(db_session, v1)
+    ex = FakeExecutor()
+    gym = FakeGym(ex)
+    _finalize(db_session, setup, ex=ex, gym=gym)
+    db_session.commit()
+
+    assert gym.resets == [(task.external_id, 11)], "the replay ran at the attempt's seed"
+    assert build_sample(db_session, s)["task"]["seed"] == 11
+
+
+def test_the_environment_digest_is_pinned_or_says_it_is_unknown(db_session, setup):
+    """`environment_image_digest` was hardcoded to "" on every bundle, so the one
+    field that pins the build a trajectory was recorded against silently claimed
+    the same (blank) environment for all of them."""
+    from app.api.export import build_sample
+
+    s, v1, suite, steps, task = setup
+    v1.environment_image_digest = "sha256:abc123"
+    db_session.flush()
+    _approve(db_session, v1)
+    _finalize(db_session, setup)
+    db_session.commit()
+
+    tv = build_sample(db_session, s)["trajectory_version"]
+    assert tv["environment_image_digest"] == "sha256:abc123"
+    assert tv["environment_image_digest_provenance"]["source"] == "trajectory_version"
+    assert tv["environment_image_digest_provenance"]["missing_reason"] is None
+
+
+def test_an_unknown_environment_digest_is_null_not_an_empty_string(db_session, setup):
+    """Nothing stamps a digest on a version recorded outside a provisioned
+    workspace. "" reads as a value; a consumer pinning the build has to be able
+    to tell "unknown" from "known and blank"."""
+    from app.api.export import build_sample
+
+    s, v1, suite, steps, task = setup
+    _approve(db_session, v1)
+    _finalize(db_session, setup)
+    db_session.commit()
+
+    tv = build_sample(db_session, s)["trajectory_version"]
+    assert tv["environment_image_digest"] is None
+    assert tv["environment_image_digest_provenance"]["missing_reason"]
+
+
+def test_the_versioned_bundle_ships_the_per_verifier_outcomes(db_session, setup):
+    """The bundle carried a bare 0/1 and nothing about which check produced it,
+    which is the only actionable part of a breaker sample."""
+    from app.api.export import build_sample
+
+    s, v1, suite, steps, task = setup
+    _approve(db_session, v1)
+    _finalize(db_session, setup, scorer=FakeScorer(reward=0, results={"m0": "fail"}),
+              accept_failing=True)
+    db_session.commit()
+
+    sample = build_sample(db_session, s)
+    assert sample["reward"] == 0
+    assert sample["verifier_results"] == {"m0": "fail"}
+    assert [(v["id"], v["result"]) for v in sample["verifiers"]] == [("m0", "fail")]
+
+
+def test_a_versioned_sample_with_no_seed_world_says_so(db_session, setup):
+    """The triplet's first leg degraded to the non-world keys of seed_state, so a
+    bundle with no world at all shipped {"initial_url", "category", "difficulty"}
+    in the slot a client resets from."""
+    from app.api.export import build_sample
+
+    s, v1, suite, steps, task = setup
+    task.seed_state = {"initial_url": "/shop", "category": "e-commerce"}
+    db_session.flush()
+    _approve(db_session, v1)
+    _finalize(db_session, setup)
+    db_session.commit()
+
+    sample = build_sample(db_session, s)
+    assert sample["initial_state"] is None
+    assert sample["initial_state_provenance"]["missing_reason"]
+    assert sample["initial_state_provenance"]["metadata"]["initial_url"] == "/shop"
+
+    task.seed_state = {"initial_url": "/shop", "world": {"shop": {"cart": []}}}
+    db_session.commit()
+    sample = build_sample(db_session, s)
+    assert sample["initial_state"] == {"shop": {"cart": []}}
+    assert sample["initial_state_provenance"]["source"] == "task.seed_state.world"
 
 
 def test_a_legacy_submission_still_exports_on_the_old_schema(db_session, setup):
-    """The version-bound path must not break samples submitted before it existed."""
+    """The version-bound path must not break samples submitted before it existed —
+    but the thin shape has to NAME itself. It used to be the one bundle with no
+    `schema` key at all, so a loader reading the dataset could not tell a legacy
+    row from a full one except by probing for keys that are legitimately absent
+    on both."""
     from app.api.export import build_sample
 
     s, v1, suite, steps, task = setup
     db_session.add(models.Submission(session_id=s.id, reward=1, kind="golden", snapshot={"verifiers": [], "reward": 1}))
     db_session.commit()
     sample = build_sample(db_session, s)
-    assert "schema" not in sample and "trajectory_version" not in sample
+    assert sample["schema"] == "golden-sample-legacy/1"
+    assert "trajectory_version" not in sample
     assert sample["reward"] == 1
 
 

@@ -361,9 +361,21 @@ export interface LiveSocketConfig {
   /** An input that was APPLIED, with the state it produced. The only place
    *  interactions should be recorded from. */
   onRecord?: (ev: RecordedEvent) => void;
+  /** Inputs that were dispatched and can now never be recorded, because the
+   *  socket died before their ack came back. Distinct from `unackedInputs`,
+   *  which is a number in the counter bar: these inputs may well have moved the
+   *  world, so the trajectory has a hole in it and only the annotator can decide
+   *  whether the task has to be redone. Called with the count, not a total. */
+  onRecordLoss?: (n: number) => void;
   /** Something the page did on its own (a popup, a redirect) — no ack to ride on. */
   onNotice?: (n: Record<string, unknown>) => void;
 }
+
+/** `WebSocket.readyState` values, spelled out rather than read off the global:
+ *  the constructor is stubbed wholesale in tests, and a fake without the
+ *  constants would make every comparison undefined. */
+const WS_CLOSING = 2;
+const WS_CLOSED = 3;
 
 export class LiveSocket {
   private sock: WebSocket | null = null;
@@ -424,7 +436,24 @@ export class LiveSocket {
         /* already gone */
       }
     }
+    this.loseRecords();
     this.patch({ status: "closed", controller: false, attempt: 0, pendingInputs: 0 });
+  }
+
+  /**
+   * Give up on every ack still outstanding, and say how many steps that costs.
+   *
+   * An input whose ack never arrives may still have applied — a recorded world
+   * that moved with no step explaining why is exactly the corruption this whole
+   * component exists to avoid — so the count goes to the annotator rather than
+   * being left as an "unacked" number they cannot act on. Emptying the map is
+   * also what stops a long session accumulating a factory per dead input.
+   */
+  private loseRecords(): void {
+    const lost = this.pendingRecords.size;
+    if (!lost) return;
+    this.pendingRecords.clear();
+    this.cfg.onRecordLoss?.(lost);
   }
 
   /** Reconnect now, without waiting out the backoff (the "Reconnect" button). */
@@ -471,6 +500,14 @@ export class LiveSocket {
     }
     if (!this.state.controller) {
       return this.refuse("read-only viewer — another connection holds control");
+    }
+    // A socket in CLOSING/CLOSED does NOT throw from send(); per spec it discards
+    // the payload and bumps bufferedAmount. `status` is still "live" until the
+    // close event lands, so those inputs used to look delivered, sit in `pending`
+    // until onClose swept them into "unacked", and never record anything.
+    const readyState = (this.sock as { readyState?: number }).readyState;
+    if (readyState === WS_CLOSING || readyState === WS_CLOSED) {
+      return this.refuse("the stream is closing — that input was NOT delivered");
     }
     const id = this.state.lastInputId + 1;
     try {
@@ -567,6 +604,7 @@ export class LiveSocket {
     // ambiguity is the point, so they are counted apart from refusals.
     const unacked = this.state.unackedInputs + this.pending.size;
     this.pending.clear();
+    this.loseRecords();
     this.patch({ controller: false, pendingInputs: 0, unackedInputs: unacked });
     if (this.stopped) {
       this.patch({ status: "closed" });
@@ -819,14 +857,25 @@ export class EventRecorder {
     return this.droppedCount;
   }
 
+  /** Every way an interaction stops existing goes through here.
+   *
+   *  The queue cap used to be the only path that reported, so a backend that
+   *  accepted half a batch, or a tab closed on a queue that could not be handed
+   *  over, lost interactions with the alert still reading zero — which is worse
+   *  than no alert, because the annotator ships the sample believing it whole. */
+  private drop(n: number): void {
+    if (n <= 0) return;
+    this.droppedCount += n;
+    this.cfg.onDrop?.(this.droppedCount);
+  }
+
   /**
    * Queue one raw event. Never sent alone: a keystroke per request would put a
    * round trip between the annotator and every character they type.
    */
   push(ev: RecordedEvent): string | null {
     if (this.queue.length >= EVENT_QUEUE_CAP) {
-      this.droppedCount += 1;
-      this.cfg.onDrop?.(this.droppedCount);
+      this.drop(1);
       return null;
     }
     const payload: Record<string, unknown> = { ...ev.payload };
@@ -891,7 +940,13 @@ export class EventRecorder {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const out = (await res.json()) as { recorded?: number };
-        return out?.recorded ?? batch.length;
+        const recorded = out?.recorded ?? batch.length;
+        // A 200 that recorded fewer events than it was sent is a partial write:
+        // the rest are gone, the batch cannot be retried without duplicating what
+        // did land, and nothing else in the pipeline notices. This used to return
+        // the server's number and let the caller assume the batch was whole.
+        this.drop(batch.length - recorded);
+        return recorded;
       } catch {
         this.queue = [...batch, ...this.queue];
         // Re-arm. flush() cleared the pending timer on entry, so without this a
@@ -909,11 +964,80 @@ export class EventRecorder {
     return this.inFlight;
   }
 
-  /** Drop the pending timer. Callers flush first — this only stops the clock. */
+  /**
+   * Hand the queue to the browser to finish delivering after the page is gone.
+   *
+   * A normal fetch started during unload is cancelled along with the document,
+   * so closing the tab used to throw away everything still inside the 1.2s flush
+   * window — easily a whole fill and the click that terminated it, with nothing
+   * anywhere saying the trajectory now ends mid-action. sendBeacon is the only
+   * transport the browser promises to complete past unload.
+   *
+   * Returns false when the queue could not be handed over, in which case the
+   * events are counted as lost rather than assumed sent.
+   */
+  flushBeacon(): boolean {
+    if (!this.queue.length) return true;
+    const batch = this.queue;
+    const nav = (globalThis as { navigator?: { sendBeacon?: (url: string, data?: unknown) => boolean } }).navigator;
+    let ok = false;
+    try {
+      // A Blob, not a string: sendBeacon labels a bare string text/plain and the
+      // events endpoint parses by content type, so the batch would 422 on arrival.
+      const body = new Blob([JSON.stringify(batch)], { type: "application/json" });
+      ok = nav?.sendBeacon?.(`/api/sessions/${encodeURIComponent(this.cfg.attemptId)}/events`, body) === true;
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      this.drop(batch.length);
+      return false;
+    }
+    this.queue = [];
+    return true;
+  }
+
+  /**
+   * Flush on unload. Returns the uninstaller.
+   *
+   * Both events, because neither alone covers a tab close: `beforeunload` does
+   * not fire when a mobile browser freezes the page into the bfcache, and
+   * `pagehide` is the one the spec actually guarantees. The beacon is a no-op on
+   * an empty queue, so firing twice costs nothing.
+   */
+  installUnloadFlush(target?: {
+    addEventListener: (t: string, fn: () => void) => void;
+    removeEventListener: (t: string, fn: () => void) => void;
+  }): () => void {
+    const w = target ?? (globalThis as unknown as {
+      addEventListener?: (t: string, fn: () => void) => void;
+      removeEventListener?: (t: string, fn: () => void) => void;
+    });
+    if (typeof w?.addEventListener !== "function") return () => {};
+    const onUnload = () => {
+      this.flushBeacon();
+    };
+    w.addEventListener("pagehide", onUnload);
+    w.addEventListener("beforeunload", onUnload);
+    return () => {
+      w.removeEventListener?.("pagehide", onUnload);
+      w.removeEventListener?.("beforeunload", onUnload);
+    };
+  }
+
+  /** Stop the clock, and account for anything the caller's final flush could not
+   *  place. Callers flush first, so a non-empty queue here means the POST came
+   *  back and failed onto a recorder nobody holds any more — those events are
+   *  never going anywhere, and used to disappear without touching the counter. */
   dispose(): void {
     if (this.handle !== null) {
       this.timers.clear(this.handle);
       this.handle = null;
+    }
+    const stranded = this.queue.length;
+    if (stranded) {
+      this.queue = [];
+      this.drop(stranded);
     }
   }
 }

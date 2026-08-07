@@ -11,7 +11,10 @@ from uuid import UUID as _UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import agent, canonical, checkpoints, gym_client, gym_review, jobs, models, recorder, verify, workspace
+from app import (
+    agent, canonical, checkpoints, gym_client, gym_review, jobs, models, recorder,
+    replay_surface, verify, workspace,
+)
 from app.config import settings
 from app.auth import current_annotator
 from app.db import SessionLocal, get_db
@@ -68,13 +71,29 @@ def _persist_gym_review(db: Session, task_id: str, agent: str, run: dict, review
     task.category = t.get("task_category") or ""
     task.difficulty = (t.get("task_difficulty") or "").lower()
     task.priority = review["task"]["priority"]
-    task.seed = seed
-    task.start_url = t.get("initial_url") or ""
+    # `task.seed` names the world `task.seed_state` holds — capture-seed writes the
+    # two together. A run at another seed used to move it on its own, so the task
+    # advertised seed 7 next to a seed-0 world and every export of it named a seed
+    # its bundle was not built from.
+    if "seed" not in (task.seed_state or {}):
+        task.seed = seed
+    # Keep the captured start URL when this run reports none: blanking it left the
+    # live pane with nothing to resolve the task's primary app from, which is the
+    # other half of the deep link the meta clobber below used to break.
+    task.start_url = t.get("initial_url") or task.start_url or ""
     # Merge — don't clobber what capture-seed persisted (seed / current_user_id / world).
     prior = dict(task.seed_state or {})
     prior.update({"initial_url": t.get("initial_url"), "category": t.get("task_category"), "difficulty": t.get("task_difficulty")})
     task.seed_state = prior
-    task.meta = {"constraints": review["task"]["constraints"], "allowedSites": review["task"]["allowedSites"], "runSummary": review["task"]["runSummary"]}
+    # MERGE, never replace. This assigned a fresh dict, which deleted the catalog's
+    # own keys on the SHARED task: `inEightyFive` (so the task disappeared from
+    # every annotator's unassigned board) and `primaryApp`/`apps` (so nothing knew
+    # which mock the task starts in, and the pane stopped honouring its deep link).
+    # One person's run must not edit the task definition everyone else works from —
+    # `seed.py` upserts the same column the same careful way.
+    meta = dict(task.meta or {})
+    meta.update({"constraints": review["task"]["constraints"], "allowedSites": review["task"]["allowedSites"], "runSummary": review["task"]["runSummary"]})
+    task.meta = meta
     db.flush()
 
     # The gym benchmark record belongs to a SYSTEM annotator, NOT the human. This
@@ -184,6 +203,26 @@ def _persist_gym_review(db: Session, task_id: str, agent: str, run: dict, review
     return str(s.id)
 
 
+def _owned_attempt(db: Session, session_id: str, current: models.Annotator) -> models.ReviewSession:
+    """The caller's OWN attempt, by id.
+
+    A gym run persists its verdict against whatever session id the request names,
+    and `sessions._gym_verdict_for` scores a corrected annotator from the run
+    linked back to their session — so an unchecked id let any signed-in annotator
+    write a verdict, and therefore a submitted reward, into somebody else's
+    sample. 404 rather than 403, so the id's existence is not disclosed either
+    (the same rule `_owned_session` states).
+    """
+    try:
+        sid = _UUID(str(session_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="unknown session") from None
+    s = db.get(models.ReviewSession, sid)
+    if s is None or s.annotator_id != current.id:
+        raise HTTPException(status_code=404, detail="unknown session")
+    return s
+
+
 class ResetBody(BaseModel):
     taskId: str
     seed: int = 0
@@ -276,6 +315,22 @@ def _agent_workspace(attempt_id: str | None):
                     workspace.release(db, fresh)
 
 
+def _tag_screenshots(review: dict, attempt_id: str | None) -> None:
+    """Point this run's step images at the workspace it actually ran in.
+
+    `gym_review` mints `/api/gym/screenshot?path=…` with nothing saying WHICH gym
+    wrote the file, and the proxy defaulted to the shared one — so an isolated run
+    rendered somebody else's frames, or none. Only stamped when the run really was
+    isolated, so the shared-gym case keeps the URLs it has always had.
+    """
+    if not attempt_id:
+        return
+    for st in review.get("steps") or []:
+        img = st.get("image")
+        if isinstance(img, str) and img.startswith("/api/gym/screenshot?"):
+            st["image"] = f"{img}&session={attempt_id}"
+
+
 @_gym_job
 def _run_review_job(task_id: str, agent: str, seed: int, brief: str | None = None, attempt_id: str | None = None) -> dict:
     """The slow work: run a real agent on a gym task, persist it as a full DB
@@ -283,6 +338,7 @@ def _run_review_job(task_id: str, agent: str, seed: int, brief: str | None = Non
     the review payload. Runs on a background thread (opens its own DB session).
     `brief` (annotator prompt edit) re-drives the whole run under the new prompt."""
     with _agent_workspace(attempt_id) as gym:
+        isolated = gym is not gym_client  # a worker of our own, not the shared gym
         r = gym.run_agent(task_id, agent, seed, brief=brief)
         if r is None:
             raise jobs.JobFailure("gym unreachable or run failed")
@@ -294,6 +350,8 @@ def _run_review_job(task_id: str, agent: str, seed: int, brief: str | None = Non
         # actions nor a verdict is a real failure.
         raise jobs.JobFailure("run produced no trajectory (task may lack an oracle solver)")
     review = gym_review.to_review(r, task_id, agent)
+    if isolated:
+        _tag_screenshots(review, attempt_id)
     review["backendState"] = _post[0]          # the REAL post-run world (cart/orders/returns/account)
     review.setdefault("gymResume", {})["worldState"] = _post[1]  # full multi-app world, for resume
     with SessionLocal() as db:
@@ -308,10 +366,16 @@ def _run_review_job(task_id: str, agent: str, seed: int, brief: str | None = Non
 
 
 @router.post("/tasks/{task_id:path}/run-review")
-def gym_run_review(task_id: str, body: RunReviewBody) -> dict:
+def gym_run_review(task_id: str, body: RunReviewBody,
+                   current: models.Annotator = Depends(current_annotator),
+                   db: Session = Depends(get_db)) -> dict:
     """M8/M9 — enqueue a real agent run + persist as a background job; returns a
     jobId to poll. The browser-driving run is slow (up to 260s), so it runs OFF
     the request path so a proxy/read timeout can't drop a finished review."""
+    if body.sessionId:
+        # The id decides whose workspace this run leases (and whose screenshots it
+        # writes), so it has to be the caller's own attempt.
+        _owned_attempt(db, body.sessionId, current)
     job = jobs.store.submit("run-review", _run_review_job, task_id, body.agent, body.seed, body.brief, body.sessionId)
     return {"jobId": job.id, "status": job.status}
 
@@ -454,6 +518,7 @@ def gym_resume(body: ResumeBody) -> dict:
 @_gym_job
 def _resume_run_job(task_id: str, seed: int, state: dict, url: str, step, agent: str, origin_session_id: str | None = None, correction: str = "") -> dict:
     with _agent_workspace(origin_session_id) as gym:
+        isolated = gym is not gym_client  # a worker of our own, not the shared gym
         r = gym.resume_run(task_id, seed, state, url, step, agent, correction=correction)
         if r is None:
             raise jobs.JobFailure("gym unreachable, task not found, or resume-run failed")
@@ -469,6 +534,8 @@ def _resume_run_job(task_id: str, seed: int, state: dict, url: str, step, agent:
         reason = f"the {missing.split('_')[0].lower()} agent produced no steps and no verdict (it may be rate-limited, unavailable, or missing {missing})"
         raise jobs.JobFailure(f"resume run produced no trajectory — {reason}")
     review = gym_review.to_review(r, task_id, agent)
+    if isolated:
+        _tag_screenshots(review, origin_session_id)
     review["backendState"] = _post[0]
     review.setdefault("gymResume", {})["worldState"] = _post[1]
     vr = (r.get("trajectory") or {}).get("verifier_result") or {}
@@ -558,18 +625,48 @@ def _cache_autogen_suite(task_id: str, seed: int, payload: dict) -> None:
         _write_autogen_suite(db, task_id, seed, payload)
 
 
-def _autogen_verifiers_job(task_id: str, seed: int, iterations: int) -> dict:
+def _autogen_worlds(attempt_id: str, task_id: str, seed: int) -> tuple[dict, dict, dict]:
+    """Capture the INITIAL and GOLDEN worlds for the reward agent, in a world that
+    is not somebody else's.
+
+    This reset the shared gym and ran an oracle in it, so pressing "auto-generate
+    verifiers" rewound and re-drove whatever world every other annotator happened
+    to be working in — the cardinal sin `live.reset_live_world` refuses to commit.
+    A scratch surface is the decision `certify` and `finalize` already make: a
+    bridged attempt gets a THROWAWAY bridge session with fresh sids, and anything
+    else gets the world that attempt owns (its lease, or the shared gym when this
+    deployment only has one — which is then its own world, not a stranger's).
+
+    The surface is held only for the two captures. The gate iterations that follow
+    are pure model calls over these two dicts, and a pooled gym pinned for the
+    length of an LLM loop is a gym nobody else can annotate in.
+    """
+    with SessionLocal() as db:
+        attempt = db.get(models.ReviewSession, _UUID(str(attempt_id)))
+        if attempt is None:
+            raise jobs.JobFailure("the attempt this generation belongs to is gone")
+        task = db.get(models.Task, attempt.task_id)
+        try:
+            with replay_surface.scratch_surface(db, attempt, task, purpose="autogen") as surface:
+                gym = surface.world
+                if gym.reset(task_id, seed) is None:
+                    raise jobs.JobFailure("gym unreachable or unknown task")
+                initial = gym.world() or {}  # full multi-app world (paths are world-rooted)
+                run = gym.run_agent(task_id, "oracle", seed)
+                if run is None:
+                    raise jobs.JobFailure("oracle run failed (task may lack an oracle solver)")
+                golden = gym.world() or {}
+        except HTTPException as exc:  # no free scratch gym → a job error, not a 500
+            raise jobs.JobFailure(str(exc.detail)) from None
+    return initial, golden, run
+
+
+def _autogen_verifiers_job(task_id: str, seed: int, iterations: int, attempt_id: str) -> dict:
     """The autonomous ORACLE LOOP (Kashyap's reward-agent design) on our stack:
     capture the INITIAL world (reset) and the GOLDEN world (oracle run), then have
     the reward agent author a verifier suite, gate it (must score 0 on initial, 1
     on golden), and iterate with feedback until it passes or the budget runs out."""
-    if gym_client.reset(task_id, seed) is None:
-        raise jobs.JobFailure("gym unreachable or unknown task")
-    initial = gym_client.world() or {}  # full multi-app world (paths are world-rooted)
-    run = gym_client.run_agent(task_id, "oracle", seed)
-    if run is None:
-        raise jobs.JobFailure("oracle run failed (task may lack an oracle solver)")
-    golden = gym_client.world() or {}
+    initial, golden, run = _autogen_worlds(attempt_id, task_id, seed)
     brief = (run.get("trajectory") or {}).get("task_brief") or task_id
 
     feedback: str | None = None
@@ -721,14 +818,48 @@ class AutogenBody(BaseModel):
     taskId: str
     seed: int = 0
     iterations: int = 5
+    sessionId: str | None = None  # the attempt this generation runs for → its own scratch world
+
+
+def _generation_attempt(db: Session, body: AutogenBody, current: models.Annotator) -> models.ReviewSession:
+    """Which attempt's world this generation is allowed to run in.
+
+    Resolved from the signed-in annotator rather than taken on trust, because it
+    decides which gym gets reset. Falls back to the caller's own attempt on this
+    task when the client sends no id — the button lives on the review screen, so
+    there is always one — and refuses when there is none, rather than reaching for
+    the shared gym the way it used to.
+    """
+    if body.sessionId:
+        return _owned_attempt(db, body.sessionId, current)
+    task = db.scalar(select(models.Task).where(models.Task.external_id == body.taskId))
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"unknown task {body.taskId}")
+    s = db.scalar(
+        select(models.ReviewSession)
+        .where(models.ReviewSession.task_id == task.id,
+               models.ReviewSession.annotator_id == current.id)
+        .order_by(models.ReviewSession.created_at.desc())
+    )
+    if s is None:
+        raise HTTPException(
+            status_code=409,
+            detail="open the task first — generating a suite runs an oracle, and it needs "
+                   "this attempt's own gym to run it in",
+        )
+    return s
 
 
 @router.post("/autogen-verifiers")
-def gym_autogen_verifiers(body: AutogenBody) -> dict:
+def gym_autogen_verifiers(body: AutogenBody,
+                          current: models.Annotator = Depends(current_annotator),
+                          db: Session = Depends(get_db)) -> dict:
     """Autonomously generate + oracle-validate a verifier suite for a gym task
     (reward-agent loop: initial=0, golden=1, iterate). Slow (an oracle run + LLM
     calls) — runs as a job; poll GET /api/gym/jobs/{id}."""
-    job = jobs.store.submit("autogen-verifiers", _autogen_verifiers_job, body.taskId, body.seed, body.iterations)
+    attempt = _generation_attempt(db, body, current)
+    job = jobs.store.submit("autogen-verifiers", _autogen_verifiers_job, body.taskId, body.seed,
+                            body.iterations, str(attempt.id))
     return {"jobId": job.id, "status": job.status}
 
 
@@ -758,10 +889,17 @@ def gym_cached_verifier_suite(task_id: str, seed: int = 0, db: Session = Depends
 
 
 @router.post("/resume-run")
-def gym_resume_run(body: ResumeRunBody) -> dict:
+def gym_resume_run(body: ResumeRunBody,
+                   current: models.Annotator = Depends(current_annotator),
+                   db: Session = Depends(get_db)) -> dict:
     """Drive-forward resume (async): load the corrected world (+ edits) and drive
     an OBSERVING agent FORWARD from the mid-episode URL in the gym, then verify.
     Slow + (for LLM agents) stochastic — runs as a job; poll GET /api/gym/jobs/{id}."""
+    if body.sessionId:
+        # The run is persisted with `origin_session_id = sessionId`, which is
+        # exactly what makes it THAT annotator's corrected verdict at scoring
+        # time. Unchecked, naming a stranger's session forged their reward.
+        _owned_attempt(db, body.sessionId, current)
     state = _apply_edits(body.worldState, body.edits) if body.edits else body.worldState
     job = jobs.store.submit(
         "resume-run", _resume_run_job, body.taskId, body.seed, state, body.resumeUrl, body.resumeStep, body.agent, body.sessionId, body.correction
@@ -770,9 +908,35 @@ def gym_resume_run(body: ResumeRunBody) -> dict:
 
 
 @router.get("/screenshot")
-def gym_screenshot(path: str) -> Response:
-    """Proxy a per-step screenshot PNG from the gym."""
-    png = gym_client.screenshot(path)
+def gym_screenshot(path: str, session: str | None = None,
+                   current: models.Annotator = Depends(current_annotator),
+                   db: Session = Depends(get_db)) -> Response:
+    """Proxy a per-step screenshot PNG from the gym the run was recorded in.
+
+    A run that got its own workspace wrote its PNGs on THAT gym's disk, but this
+    always dialled the shared one: at best a 404 for every step, at worst — the
+    paths are run-relative, so they collide — a frame from an unrelated world
+    served as if it were this step. The job tags its step images with the attempt
+    (`&session=`), so the fetch follows the run instead of guessing.
+
+    An untagged path is a run that really did happen on the shared gym, and still
+    reads from it. A tagged one reads from that attempt's worker and nowhere else:
+    the worker is reclaimed when the run ends, so a later fetch 404s rather than
+    quietly substituting a different gym's file.
+    """
+    gym = gym_client
+    if session:
+        s = _owned_attempt(db, session, current)
+        lease = db.scalar(
+            select(models.WorkspaceLease)
+            .where(models.WorkspaceLease.attempt_id == s.id,
+                   models.WorkspaceLease.purpose == workspace.AGENT_BRANCH,
+                   models.WorkspaceLease.endpoint != "")
+            .order_by(models.WorkspaceLease.created_at.desc())
+        )
+        if lease is not None:
+            gym = gym_client.GymEndpoint(lease.endpoint)
+    png = gym.screenshot(path)
     if png is None:
         raise HTTPException(status_code=404, detail="screenshot not found")
     return Response(content=png, media_type="image/png")

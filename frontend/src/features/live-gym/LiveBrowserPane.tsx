@@ -92,6 +92,9 @@ export function LiveBrowserPane({
   const [, setActiveTabId] = useState<string>("");
   // The open press, so its "up" can be paired into a click — or recognised as a drag.
   const downRef = useRef<{ p: NormPoint; at: number; target: Record<string, unknown>; button: string } | null>(null);
+  // The press's describe() round trip. A press is only dispatched once it answers,
+  // so a release faster than that has to wait on this — see onPointerUp.
+  const downPendingRef = useRef<Promise<void> | null>(null);
   const clickCountRef = useRef(1);
   // Newest frame, kept so a step can carry the pixels the annotator actually saw.
   const lastFrameRef = useRef<string>("");
@@ -124,6 +127,15 @@ export function LiveBrowserPane({
   const vp: Viewport = live.viewport ?? session?.viewport ?? DEFAULT_VIEWPORT;
   const driving = live.status === "live" && live.controller;
 
+  // An interaction stops existing two different ways — the recorder refusing to
+  // queue it, and an ack that never came back to record it — and the alert takes
+  // one cumulative number. Kept in a ref, and reported through a ref, because
+  // making the socket effect depend on `onDropped` would tear the stream down and
+  // re-race for control every time the host re-rendered with a new callback.
+  const lossRef = useRef({ queued: 0, unrecorded: 0 });
+  const onDroppedRef = useRef(onDropped);
+  onDroppedRef.current = onDropped;
+
   const refreshInfo = useCallback(
     async (id: string) => {
       const info = await liveSessionInfo(id, { base });
@@ -138,8 +150,24 @@ export function LiveBrowserPane({
   // --- socket + recorder lifecycle -----------------------------------------
   useEffect(() => {
     if (!sid || !ticket) return;
-    const rec = attemptId ? new EventRecorder({ attemptId, onDrop: (n) => onDropped?.(n) }) : null;
+    const reportLoss = () => {
+      const l = lossRef.current;
+      onDroppedRef.current?.(l.queued + l.unrecorded);
+    };
+    const rec = attemptId
+      ? new EventRecorder({
+          attemptId,
+          onDrop: (n) => {
+            lossRef.current.queued = n;   // already cumulative
+            reportLoss();
+          },
+        })
+      : null;
     recRef.current = rec;
+    // Closing the tab cancels an in-flight fetch with the document, so the last
+    // batch — up to a whole flush window of typing plus the click that ended it —
+    // used to vanish. sendBeacon is the only thing that survives unload.
+    const stopUnloadFlush = rec?.installUnloadFlush();
     framesRef.current = attemptId ? new FrameRecorder({ attemptId }) : null;
     obsRef.current = attemptId ? new ObservationRecorder({ attemptId }) : null;
     const sock = new LiveSocket({
@@ -164,6 +192,13 @@ export function LiveBrowserPane({
         // whichever of the two arrives first.
         if (id) { captureFrame(id); captureObservation(id); }
       },
+      // Dispatched, then the socket died before the ack that would have recorded
+      // them. They may have moved the world, so this is a HOLE in the trajectory —
+      // the "unacked" counter alone never told the annotator that.
+      onRecordLoss: (n) => {
+        lossRef.current.unrecorded += n;
+        reportLoss();
+      },
       onNotice: (n) => {
         // A popup or redirect the page did on its own — no ack carries it.
         if (n.url) setPageUrl(String(n.url));
@@ -180,10 +215,16 @@ export function LiveBrowserPane({
     void refreshInfo(sid);
     return () => {
       sock.disconnect();
+      stopUnloadFlush?.();
       // Flush before dropping the queue: a batch that never left the browser is
       // an interaction that never happened as far as the trajectory is concerned.
-      void rec?.flush();
-      rec?.dispose();
+      // dispose() has to wait for that POST to come back — called synchronously it
+      // ran while the queue was empty mid-flight, so a batch that then FAILED onto
+      // a recorder nobody holds any more was lost with the counter reading zero.
+      void (async () => {
+        await rec?.flush();
+        rec?.dispose();
+      })();
       sockRef.current = null;
       recRef.current = null;
     };
@@ -241,36 +282,66 @@ export function LiveBrowserPane({
     // after mount.
   }, [sid, vp.width, vp.height, pageUrl]);
 
-  const onPointerDown = async (e: React.PointerEvent<HTMLDivElement>) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const sock = sockRef.current;
     const p = pointAt(e.clientX, e.clientY);
-    if (!sock || !p || !sid || !ticket) return;
+    if (!sock || !p || !sid || !ticket) {
+      // Nothing is coming; anything already parked here belongs to an older
+      // gesture and must not make the next release wait on it.
+      downPendingRef.current = null;
+      return;
+    }
     // Capture the pointer so a drag that leaves the surface still delivers its
     // "up" here — otherwise the press has no end and folds into a bogus click.
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* not fatal */ }
-    // Describe BEFORE dispatching. Afterwards the element may be gone, and a
-    // recorded pixel is not replayable — the committed step needs a locator.
-    const target = await describeAt(sid, ticket, p, { base });
-    targetRef.current = target;
-    focusStaleRef.current = false;  // a click IS a focus change, and we just named it
     const button = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
-    downRef.current = { p, at: Date.now(), target, button };
-    sock.send({ type: "mouse", phase: "down", nx: p.nx, ny: p.ny, button }, (st) => ({
-      kind: "mouseDown",
-      payload: { t: Date.now(), nx: p.nx, ny: p.ny, button },
-      target,
-      url: st?.url ?? pageUrl,
-      tab: st?.tabId ?? "",
-    }));
+    const work = (async () => {
+      // Describe BEFORE dispatching. Afterwards the element may be gone, and a
+      // recorded pixel is not replayable — the committed step needs a locator.
+      const target = await describeAt(sid, ticket, p, { base });
+      targetRef.current = target;
+      focusStaleRef.current = false;  // a click IS a focus change, and we just named it
+      downRef.current = { p, at: Date.now(), target, button };
+      // Deliberately still stamped here rather than at the press: `coalesce`
+      // pairs a down and an up only within 700ms of each other, and both halves
+      // are stamped on their ack. Backdating just this one to the press would
+      // open that gap by however long describe() took and stop a slow click
+      // folding into a click at all.
+      sock.send({ type: "mouse", phase: "down", nx: p.nx, ny: p.ny, button }, (st) => ({
+        kind: "mouseDown",
+        payload: { t: Date.now(), nx: p.nx, ny: p.ny, button },
+        target,
+        url: st?.url ?? pageUrl,
+        tab: st?.tabId ?? "",
+      }));
+    })();
+    // Published SYNCHRONOUSLY, before the describe is awaited: a release that
+    // arrives during that round trip is what onPointerUp has to rendezvous with.
+    downPendingRef.current = work;
+    return work;
   };
 
   /** The other half of a press. Sending a REAL up (rather than synthesising one
    *  1ms after the down, which is what this used to do) is the only way a drag
    *  can ever be told apart from a click: the backend folds a down/up pair into a
    *  click only when they share a target and land close together. */
-  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+  const onPointerUp = async (e: React.PointerEvent<HTMLDivElement>) => {
     const sock = sockRef.current;
+    // Read the geometry before yielding — after the await this handler no longer
+    // owns the event.
     const p = pointAt(e.clientX, e.clientY);
+    // A press does not reach the wire until describe() answers. A click faster
+    // than that round trip used to find downRef still null and send its "up"
+    // FIRST: the service saw a release with no press, the backend folded no
+    // click out of the pair, and the interaction left no step, no dropped count
+    // and no alert — a world that moved with nothing explaining why. Waiting on
+    // the press keeps the order without costing the drag/long-press
+    // classification, which needs the down's own point and target.
+    const opening = downPendingRef.current;
+    if (opening) {
+      downPendingRef.current = null;
+      await opening;
+    }
     const down = downRef.current;
     downRef.current = null;
     if (!sock || !p) return;
@@ -541,8 +612,8 @@ export function LiveBrowserPane({
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             onPointerDown={(e) => void onPointerDown(e)}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
+            onPointerUp={(e) => void onPointerUp(e)}
+            onPointerCancel={(e) => void onPointerUp(e)}
             onPointerMove={onPointerMove}
             onDoubleClick={onDoubleClick}
             onContextMenu={onContextMenu}

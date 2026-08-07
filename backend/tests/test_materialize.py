@@ -309,6 +309,117 @@ def test_a_settled_click_folds_without_waiting_out_the_edit_window(db_session, a
     assert [s.action_type for s in made] == ["click"]
 
 
+def test_a_read_that_lost_the_race_is_not_written_down_as_no_change(db_session, attempt):
+    """The world is read milliseconds after the click acks, racing the mock UI's
+    own POST to the engine. Losing that race looks exactly like a no-op, and it
+    used to be recorded as {"changed": false} — "your click did nothing" — which
+    is a lie an SFT target learns from. The confirm re-read is what tells the two
+    apart."""
+    base = _settled_base()
+    before = _w()
+    after = _w(orders={"ORD_9": {"id": "ORD_9", "status": "placed"}})
+    _seed_initial(db_session, attempt, before)
+
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+
+    # The engine applies the click between the two reads.
+    world = _FakeWorld(before, after)
+    made = materialize.materialize(db_session, attempt, world=world)
+    assert world.reads == 2, "an apparent no-op must be confirmed, not believed"
+    assert made[-1].world_delta["changed"] is True
+    assert made[-1].after_checkpoint_id is not None
+
+
+def test_an_unchanged_window_is_recorded_on_every_step_in_it(db_session, attempt):
+    """Only the tail used to carry the delta, so a batch of typing shipped fills
+    with world_delta NULL — "not observed" — when the truth is known: the world is
+    the same before and after all of them."""
+    monkey = materialize.CONFIRM_MS
+    materialize.CONFIRM_MS = 0
+    try:
+        base = _settled_base()
+        _seed_initial(db_session, attempt, _w())
+        _ev(db_session, attempt, 1, "keyChar", base, BOX, text="m", value="m")
+        _ev(db_session, attempt, 2, "keyChar", base + 80, BOX, text="g", value="mg")
+        _ev(db_session, attempt, 3, "keyPress", base + 200, BOX, key="Enter", value="mg")
+        db_session.commit()
+
+        made = materialize.materialize(db_session, attempt, world=_FakeWorld(_w()))
+        assert [s.action_type for s in made] == ["fill", "press"]
+        assert all(s.world_delta is not None and s.world_delta["changed"] is False for s in made)
+    finally:
+        materialize.CONFIRM_MS = monkey
+
+
+def test_a_change_is_not_hung_on_a_tab_switch_that_ended_the_batch(db_session, attempt):
+    """A tab switch cannot place an order. The delta used to go to whichever step
+    happened to be last, which named the wrong action as the cause."""
+    base = _settled_base()
+    _seed_initial(db_session, attempt, _w())
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    _ev(db_session, attempt, 3, "switch_tab", base + 60, {"app": "mail"}, app="mail",
+        url="https://mail.gym.local/")
+    db_session.commit()
+
+    made = materialize.materialize(
+        db_session, attempt,
+        world=_FakeWorld(_w(orders={"O1": {"id": "O1", "status": "placed"}})))
+    assert [s.action_type for s in made] == ["click", "switch_tab"]
+    assert made[0].world_delta and made[0].world_delta["changed"] is True
+    assert made[1].world_delta is None, "a tab switch did not place the order"
+
+
+def test_a_gesture_the_executor_cannot_perform_is_marked_when_it_is_folded(db_session, attempt):
+    """A right-click has no executor action at all, so it can never be proven.
+    Saying so at fold time is the difference between the annotator learning it now
+    and learning it after a whole task's work."""
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5, button="right")
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, button="right", clicks=1)
+    db_session.commit()
+
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert made[0].action_type == "right_click"
+    assert made[0].replay_state == "failed" and "right_click" in made[0].replay_error
+    assert made[0].description == "right-click btn-cart"
+
+
+def test_enter_folds_into_a_step_the_executor_can_actually_run(db_session, attempt):
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "keyChar", base, BOX, text="m", value="m")
+    _ev(db_session, attempt, 2, "keyPress", base + 100, BOX, key="Enter", value="m")
+    db_session.commit()
+
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert [s.action_type for s in made] == ["fill", "press"]
+    assert made[1].replay_state == "unverified", "a replayable step must not be pre-failed"
+    assert made[1].description == "press Enter in input-q"
+    assert made[1].arguments["key"] == "Enter"
+
+
+def test_a_step_carries_the_time_the_annotator_acted(db_session, attempt):
+    """`occurred_at` is when the BATCH was written — the recorder flushes on a
+    boundary or a 1.2s timer, so a minute of work came back as a handful of
+    identical timestamps and no step had a duration."""
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, clicks=1)
+    _ev(db_session, attempt, 3, "mouseDown", base + 9_000, BOX, nx=0.3, ny=0.3)
+    _ev(db_session, attempt, 4, "mouseUp", base + 9_030, BOX, nx=0.3, ny=0.3, clicks=1)
+    db_session.commit()
+
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert all(s.intervention_at is not None for s in made)
+    apart = (made[1].intervention_at - made[0].intervention_at).total_seconds()
+    assert 8.9 < apart < 9.1, "the nine seconds the annotator spent reading are gone"
+
+
 def test_a_trailing_unpaired_press_is_still_withheld(db_session, attempt):
     """The guard on the above: folding a lone mouseDown makes it
     `press_incomplete` and orphans its mouseUp in the next batch."""
