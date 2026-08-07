@@ -257,3 +257,57 @@ def test_certify_marks_a_clean_replay_verified_not_diverged():
     # Exactly the branch certify takes for each step.
     states = ["verified" if s.get("ok") else "diverged" for s in out.steps]
     assert states == ["verified", "verified"], out.steps
+
+
+def test_a_stale_world_read_is_asked_again_before_calling_it_divergence():
+    """The race that reported a good trajectory as diverged.
+
+    The mock UIs push to the engine asynchronously, so the world can be one push
+    behind when the replay reads it — milliseconds after the action's ack. On a
+    real M101 run the gift-message edit only reaches the engine on the checkout
+    click, so a cold first replay certified 11/11 and every back-to-back replay
+    after it failed at that exact step, on the same trajectory.
+    """
+    from app import checkpoints
+
+    late = {"shop": {"cart": {"gift_message": "Congs"}}}
+    want = checkpoints.hash_world(late)
+
+    class SlowWorld:
+        """Answers with the pre-push world once, then catches up."""
+        def __init__(self):
+            self.reads = 0
+
+        def act(self, kind, locator, args):
+            return {"ok": True, "resolved": {}}
+
+        def world(self):
+            self.reads += 1
+            return {"shop": {"cart": {"gift_message": "Get well soon"}}} if self.reads == 1 else late
+
+    ex = SlowWorld()
+    out = replay.replay([{"kind": "click", "locator": {"testId": "checkout"}}], ex,
+                        expected_hashes=[want], strict=False)
+    assert out.ok, f"a read taken too early is not a divergence: {out.reason}"
+    assert ex.reads >= 2, "it must actually have asked again"
+    assert out.steps[0]["worldHash"] == want, "and record the settled hash, not the stale one"
+
+
+def test_a_world_that_never_agrees_still_fails():
+    """The guard must not turn the divergence gate off — a mismatch that survives
+    being asked again is real, and shipping a trajectory that does not reproduce
+    is the one thing this gate exists to stop."""
+    from app import checkpoints
+
+    class NeverAgrees:
+        def act(self, kind, locator, args):
+            return {"ok": True, "resolved": {}}
+
+        def world(self):
+            return {"shop": {"cart": {}}}
+
+    out = replay.replay([{"kind": "click", "locator": {"testId": "x"}}], NeverAgrees(),
+                        expected_hashes=[checkpoints.hash_world({"shop": {"orders": {"O1": {}}}})],
+                        strict=False)
+    assert not out.ok and out.rejected_at == 0
+    assert "diverged" in out.reason

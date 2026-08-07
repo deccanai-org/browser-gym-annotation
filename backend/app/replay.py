@@ -17,6 +17,7 @@ ships as ground truth and then fails to reproduce for whoever trains on it.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -154,8 +155,49 @@ def replay(
             # An action the human took that changed nothing recorded no hash; it
             # cannot vouch for anything, so it does not get to fail the replay.
             if want and digest != want:
+                # ASK AGAIN before calling it divergence.
+                #
+                # The mock UIs push to the engine asynchronously, so the world can
+                # still be one push behind when we read it — and the read lands
+                # milliseconds after the action's ack. A stale read then looks
+                # exactly like a diverged world.
+                #
+                # This is not hypothetical and it is not rare: on a real M101
+                # trajectory the gift-message edit only reaches the engine on the
+                # checkout click, so steps 0-6 all hash the same and step 7 is
+                # where the change appears. A cold first run won that race and
+                # certified 11/11; every back-to-back run after it lost the race
+                # and reported the SAME trajectory as diverged at step 7.
+                world = _settled_world(executor, want)
+                digest = checkpoints.hash_world(world)
+                out.steps[-1]["worldHash"] = digest
+                out.final_world = world
+            if want and digest != want:
                 return _fail(out, i, "the world diverged from what this action produced when it was recorded", strict, detail=kind)
     return out
+
+
+#: How long to keep asking, and how often. Short: this is a push that has already
+#: been sent, not a job being waited on. A replay of sixty steps must not pay a
+#: second per step, so the loop exits the moment the world agrees.
+_SETTLE_TRIES = 6
+_SETTLE_MS = 120
+
+
+def _settled_world(executor: Executor, want: str) -> dict | None:
+    """Re-read until the world matches `want`, or we run out of patience.
+
+    Returns the last world read either way — a mismatch that survives this IS a
+    divergence and must still fail the replay. The point is only that a read
+    taken before the engine caught up is not evidence of one.
+    """
+    world = None
+    for _ in range(_SETTLE_TRIES):
+        time.sleep(_SETTLE_MS / 1000)
+        world = executor.world()
+        if checkpoints.hash_world(world) == want:
+            return world
+    return world
 
 
 def _fail(out: ReplayResult, at: int, reason: str, strict: bool, detail: str = "") -> ReplayResult:
