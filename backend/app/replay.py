@@ -137,7 +137,16 @@ def replay(
             clock(i)
         world = executor.world()
         digest = checkpoints.hash_world(world)
-        out.steps.append({"index": i, "kind": kind, "resolved": res.get("resolved") or {}, "worldHash": digest})
+        # `ok` is what this record exists to say, and it was never written. Its
+        # only reader — api/versions.py::certify — does `elif out.get("ok")`, so a
+        # step that replayed perfectly fell through to the else branch and was
+        # marked `diverged` with "did not replay". That is EVERY step of EVERY
+        # successful replay, which is why certify has never passed and why the
+        # hand-done attempts in the database look stranded. The tell is in the
+        # audit row: `firstFailureAt: null` beside eleven diverged steps — nothing
+        # had failed at all.
+        out.steps.append({"index": i, "ok": True, "kind": kind,
+                          "resolved": res.get("resolved") or {}, "worldHash": digest})
         out.final_world = world
 
         if expected_hashes and i < len(expected_hashes):

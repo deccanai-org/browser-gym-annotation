@@ -217,3 +217,43 @@ def test_a_gym_without_a_tick_still_replays():
     gym = OnlyVerify()
     replay.advance_clock(gym, scheduled=True)(3)
     assert gym.seen == [3]
+
+
+def test_a_replayed_step_says_it_succeeded():
+    """The record only exists to be read, and it did not say the one thing its
+    reader asks.
+
+    `api/versions.py::certify` does `elif out.get("ok")` over these entries, and
+    nothing ever wrote `ok`. So a step that replayed perfectly fell to the else
+    branch and was marked `diverged` with "did not replay" — every step of every
+    successful replay. Certify could never pass, and the hand-done attempts in
+    the database looked stranded because of it.
+    """
+    class Ex:
+        def act(self, kind, locator, args):
+            return {"ok": True, "resolved": {"selector": "#x"}}
+
+        def world(self):
+            return {"step": 1}
+
+    out = replay.replay([{"kind": "click", "locator": {"testId": "x"}}], Ex())
+    assert out.ok and out.rejected_at is None
+    assert len(out.steps) == 1
+    assert out.steps[0]["ok"] is True, "certify reads exactly this key"
+
+
+def test_certify_marks_a_clean_replay_verified_not_diverged():
+    """The same bug from the reader's side: a replay with nothing wrong must not
+    come back as a wall of diverged steps."""
+    class Ex:
+        def act(self, kind, locator, args):
+            return {"ok": True, "resolved": {}}
+
+        def world(self):
+            return {"step": 1}
+
+    out = replay.replay([{"kind": "click", "locator": {"testId": "a"}},
+                         {"kind": "click", "locator": {"testId": "b"}}], Ex(), strict=False)
+    # Exactly the branch certify takes for each step.
+    states = ["verified" if s.get("ok") else "diverged" for s in out.steps]
+    assert states == ["verified", "verified"], out.steps
