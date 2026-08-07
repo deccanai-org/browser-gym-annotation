@@ -376,3 +376,39 @@ def test_restore_and_replay_can_be_told_not_to_tick():
     replay.restore_and_replay(None, [{"kind": "click"}], Walker(), Gym(),
                               task_id="T", seed=0, advance=True, strict=False)
     assert ticks == [0], "an agent recording still is"
+
+
+def test_a_step_with_no_recorded_world_is_not_reported_as_compared():
+    """The degenerate pass: 14 steps, 0 recorded worlds, certify says 14/14.
+
+    A step the recording captured no world for has no expectation to diverge
+    from, so it clears the gate by default. When that is true of EVERY step the
+    replay is green while proving nothing at all — measured on a real M116 run,
+    which then failed to solve the task. The gate's own docstring says a
+    trajectory that mostly replays is worse than none; this is the degenerate
+    case, so the outcome has to carry whether anything was actually checked.
+    """
+    class Walker:
+        def act(self, kind, locator, args): return {"ok": True}
+        def world(self): return {"n": 1}
+
+    # Nothing recorded a world: every expectation is the empty string.
+    out = replay.replay([{"kind": "click"}] * 3, Walker(),
+                        expected_hashes=["", "", ""], strict=False)
+
+    assert out.ok is True, "no expectation means nothing to diverge from"
+    assert [s["compared"] for s in out.steps] == [False, False, False], (
+        "a step checked against nothing must not claim it was compared"
+    )
+
+
+def test_a_step_that_was_checked_says_so():
+    class Walker:
+        def act(self, kind, locator, args): return {"ok": True}
+        def world(self): return {"n": 1}
+
+    want = checkpoints.hash_world({"n": 1})
+    out = replay.replay([{"kind": "click"}] * 2, Walker(),
+                        expected_hashes=[want, ""], strict=False)
+
+    assert [s["compared"] for s in out.steps] == [True, False]

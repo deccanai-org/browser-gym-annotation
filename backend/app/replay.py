@@ -146,7 +146,16 @@ def replay(
         # hand-done attempts in the database look stranded. The tell is in the
         # audit row: `firstFailureAt: null` beside eleven diverged steps — nothing
         # had failed at all.
-        out.steps.append({"index": i, "ok": True, "kind": kind,
+        # `compared` says whether this step's world was actually CHECKED against
+        # anything. A step the recording captured no world for has no expectation
+        # to diverge from, so it passes the gate by default — and a trajectory
+        # where that is true of EVERY step replays "green" while proving nothing
+        # at all. Seen on a real M116 run: 14 steps, 0 recorded worlds, certify
+        # reported 14/14 verified, and the gym then said the task was not solved.
+        # "A trajectory that mostly replays is worse than none" — this is the
+        # degenerate case of that, and the caller has to be able to see it.
+        want_i = (expected_hashes[i] if expected_hashes and i < len(expected_hashes) else "")
+        out.steps.append({"index": i, "ok": True, "kind": kind, "compared": bool(want_i),
                           "resolved": res.get("resolved") or {}, "worldHash": digest})
         out.final_world = world
 

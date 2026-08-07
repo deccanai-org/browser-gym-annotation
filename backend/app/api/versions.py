@@ -999,9 +999,17 @@ def certify(
         out = outcomes[i] if i < len(outcomes) else None
         if out is None:
             st.replay_state = "unverified"
-        elif out.get("ok"):
+        elif out.get("ok") and out.get("compared"):
             st.replay_state = "verified"
             st.replay_error = ""
+        elif out.get("ok"):
+            # It re-executed, but there was no recorded world to check it
+            # against, so nothing was proved. Calling that "verified" is how a
+            # trajectory with NO recorded worlds reported 14/14 green and then
+            # failed to solve the task — the same fail-closed rule the verifiers
+            # already use, where an unprovable check cannot earn a reward.
+            st.replay_state = "unverified"
+            st.replay_error = "replayed, but this step recorded no world to compare against"
         else:
             st.replay_state = "diverged"
             st.replay_error = str(out.get("error") or reason or "did not replay")
@@ -1013,6 +1021,10 @@ def certify(
     return {
         "ok": bool(result and result.ok) and not blocked,
         "certified": sum(1 for st in steps if st.replay_state == "verified"),
+        # How much of the trajectory the gate could actually check. `certified`
+        # alone reads as a clean bill of health on a run where nothing was
+        # comparable; this is what tells the annotator the difference.
+        "compared": sum(1 for o in outcomes if o and o.get("compared")),
         "firstFailureAt": rejected_at,
         "needsValue": [str(st.id) for st in blocked],
         "steps": [{"stepId": str(st.id), "state": st.replay_state, "error": st.replay_error}
