@@ -226,6 +226,27 @@ def _fail(out: ReplayResult, at: int, reason: str, strict: bool, detail: str = "
     return out
 
 
+def recording_ticked(worlds: list[dict | None]) -> bool:
+    """Did the run being replayed advance the gym's clock?
+
+    An AGENT trajectory does: the harness calls `/_harness/verify {step}` after
+    every action, so its recorded worlds carry a rising `step`. A human working
+    in the live gym never calls it, so every world they record is at the step the
+    session opened on.
+
+    Replaying a human run with the agent's clock ticks a counter the recording
+    never moved, and `step` is inside the hashed world — so the comparison fails
+    on the tick alone. On M105 that was three of the four differing leaves
+    (`.step`, `.shop.step`, `.events[0].step`), and it failed the trajectory at
+    its last action for a world that was otherwise identical.
+
+    Read from the recording rather than from the attempt's mode, because it is
+    the recording that has to be reproduced.
+    """
+    seen = {w.get("step") for w in worlds if isinstance(w, dict) and "step" in w}
+    return len(seen) > 1
+
+
 def restore_and_replay(
     checkpoint: Any,
     actions: list[dict],
@@ -236,6 +257,7 @@ def restore_and_replay(
     seed: int,
     expected_hashes: list[str] | None = None,
     strict: bool = True,
+    advance: bool = True,
 ) -> ReplayResult:
     """The full §3.6 gate: put the environment back where the branch starts, then
     replay. Restoration is verified by hash before a single action runs — starting
@@ -243,4 +265,4 @@ def restore_and_replay(
     if checkpoint is not None and not checkpoints.restore(checkpoint, gym, task_id=task_id, seed=seed):
         raise ReplayRejected(0, "could not restore the branch's starting checkpoint")
     return replay(actions, executor, expected_hashes=expected_hashes,
-                  clock=advance_clock(gym), strict=strict)
+                  clock=advance_clock(gym) if advance else None, strict=strict)

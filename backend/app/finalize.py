@@ -98,6 +98,10 @@ def actions_of(db: Session, version: models.TrajectoryVersion) -> list[dict]:
             "stepId": str(s.id),
             "actor": s.actor,
             "expectedHash": checkpoints.hash_world(s.world_after) if s.world_after else "",
+            # Carried so the clean replay can tell whether the RECORDING ticked
+            # the gym clock — see replay.recording_ticked. Not a replayable
+            # field; `replay()` reads only kind/locator/args.
+            "worldAfter": s.world_after,
         })
     return out
 
@@ -243,11 +247,16 @@ def finalize(
             actions, executor,
             expected_hashes=[a["expectedHash"] for a in actions],
             # The clean replay must reproduce the RECORDING's protocol, clock and
-            # all. Without the tick the replayed world trails by one step and a
-            # correct trajectory is rejected as diverged. The scheduled-tick
-            # decision is read off the gym's own seed world (the shared helper), so
-            # a trajectory reconstructed with a tick is replayed with one.
-            clock=replay.scheduled_clock(gym),
+            # all. Without the tick an agent-recorded world trails by one step and
+            # a correct trajectory is rejected as diverged; WITH the tick a
+            # human-recorded one gains a step the recording never took, and `step`
+            # is inside the hashed world. So the recording decides: an agent run
+            # ticks (the harness verifies after every action), a human in the live
+            # gym never does. The scheduled-tick decision is read off the gym's own
+            # seed world by the shared helper.
+            clock=(replay.scheduled_clock(gym)
+                   if replay.recording_ticked([a.get("worldAfter") for a in actions])
+                   else None),
             strict=True,
         )
 

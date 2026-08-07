@@ -916,6 +916,12 @@ def certify(
                 # code — without it the only check is "did the action land".
                 expected_hashes=[checkpoints.hash_world(st.world_after) if st.world_after else ""
                                  for st in steps],
+                # Tick the gym clock only if the RECORDING did. A human working
+                # in the live gym never calls /_harness/verify, so their worlds
+                # all sit at the step the session opened on; ticking would move a
+                # counter that is inside the hashed world and fail the comparison
+                # on the tick alone.
+                advance=replay.recording_ticked([st.world_after for st in steps]),
                 strict=False,   # report EVERY problem, not just the first
             )
         except replay.ReplayRejected as exc:

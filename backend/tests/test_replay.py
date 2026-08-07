@@ -336,3 +336,43 @@ def test_a_diverged_step_is_marked_diverged_in_its_own_record():
     assert out.ok is False and out.rejected_at == 2
     assert [s["ok"] for s in out.steps] == [True, True, False]
     assert out.steps[-1]["diverged"] is True
+
+
+def test_a_human_recording_is_replayed_without_the_agents_clock():
+    """`step` is inside the hashed world, so ticking is not free.
+
+    An agent trajectory ticks: the harness calls /_harness/verify after every
+    action, so its recorded worlds carry a rising step. A human working in the
+    live gym never calls it, and every world they record sits at the step the
+    session opened on. Replaying a human run with the agent's clock moves a
+    counter the recording never moved — on M105 that was three of the four
+    differing leaves (.step, .shop.step, .events[0].step) and it failed the
+    trajectory at its last action for a world that was otherwise identical.
+    """
+    assert replay.recording_ticked([{"step": 0}, {"step": 0}, {"step": 0}]) is False
+    assert replay.recording_ticked([{"step": 0}, {"step": 1}, {"step": 2}]) is True
+    # No worlds to read, and worlds without a step at all: nothing says the
+    # recording ticked, so do not.
+    assert replay.recording_ticked([]) is False
+    assert replay.recording_ticked([None, {"cart": []}]) is False
+
+
+def test_restore_and_replay_can_be_told_not_to_tick():
+    """The decision has to reach the clock, not just be computed."""
+    ticks: list[int] = []
+
+    class Gym:
+        def verify(self, i): ticks.append(i)
+        def world(self): return {"step": 0}
+
+    class Walker:
+        def act(self, kind, locator, args): return {"ok": True}
+        def world(self): return {"step": 0}
+
+    replay.restore_and_replay(None, [{"kind": "click"}], Walker(), Gym(),
+                              task_id="T", seed=0, advance=False, strict=False)
+    assert ticks == [], "a human recording must not be ticked"
+
+    replay.restore_and_replay(None, [{"kind": "click"}], Walker(), Gym(),
+                              task_id="T", seed=0, advance=True, strict=False)
+    assert ticks == [0], "an agent recording still is"
