@@ -12,6 +12,7 @@ import base64
 import binascii
 import contextlib
 import json
+import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -315,16 +316,29 @@ class SuiteScorer:
     def score(self, suite: models.VerifierSuite, world: dict | None) -> tuple[int, dict]:
         verdict = self.gym.verify(0) or {}
         self.gym_success = bool(verdict.get("success")) if verdict else None
+        milestones = list(verdict.get("all_milestones") or [])
         by_name = {
             str(m.get("name") or m.get("id")): m
-            for m in (verdict.get("all_milestones") or [])
+            for m in milestones
             if m.get("name") or m.get("id")
         }
+        # Positional fallback for the suites already in the database. Their
+        # verifiers are keyed `m0..mN` with NO check IR, because `to_review`
+        # enumerated `all_milestones` and kept only the index — so `m0` cannot be
+        # looked up by name and every one of them scored `unknown`, which under
+        # the fail-closed rule below meant reward 0 and a refused ship for runs
+        # whose milestones had all fired correctly.
+        #
+        # `m{j}` IS that enumeration's index, so this rebinds it exactly. New
+        # suites carry `check.id` (the name) and never reach here; this is only
+        # for rows written before that existed, and it is deliberately narrow —
+        # the `m<digits>` shape and nothing else.
+        by_ordinal = {f"m{j}": m for j, m in enumerate(milestones)}
         state = world or {}
         results: dict[str, str] = {}
         for v in suite.verifiers:
             key = v.ext_id or str(v.id)
-            r = self._one(v, by_name, state)
+            r = self._one(v, by_name, by_ordinal, state)
             results[key] = r
             (self.unproven if r == UNKNOWN else self.executed).append(key)
             # The result FROM THIS RUN. `gym_result` was written once when the
@@ -337,14 +351,16 @@ class SuiteScorer:
         reward = 1 if results and all(r == "pass" for r in results.values()) else 0
         return reward, results
 
-    def _one(self, v: models.Verifier, by_name: dict, state: dict) -> str:
+    def _one(self, v: models.Verifier, by_name: dict, by_ordinal: dict, state: dict) -> str:
         ir = v.check_ir or {}
         kind = str(ir.get("kind") or "")
         if kind == "gym_milestone" or not kind:
-            # `gym_milestone` names the milestone in the IR; a suite written
-            # straight off the gym's milestone list carries no IR at all, but its
-            # ext_id IS the milestone name, so it is still executable.
-            m = by_name.get(str(ir.get("id") or "") or (v.ext_id or ""))
+            # By NAME first (the IR's id, or an ext_id that is itself the name),
+            # then by the positional `m{j}` the older suites were keyed with.
+            ext = v.ext_id or ""
+            m = by_name.get(str(ir.get("id") or "") or ext)
+            if m is None and re.fullmatch(r"m\d+", ext):
+                m = by_ordinal.get(ext)
             # The gym reports firing, not a verdict — and a FORBIDDEN milestone
             # passes by NOT firing.
             return gym_review._milestone_result(m) if m is not None else UNKNOWN

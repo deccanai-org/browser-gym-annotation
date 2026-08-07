@@ -404,7 +404,13 @@ def test_an_agent_assisted_correction_reaches_the_exported_sample(
     suite = models.VerifierSuite(session_id=UUID(sid), version=1)
     db_session.add(suite)
     db_session.flush()
-    db_session.add(models.Verifier(suite_id=suite.id, ext_id="order_held", level="backend",
+    # `m0`, not the milestone's name, because `m0` is what the platform ACTUALLY
+    # persists — api/gym.py calls the m0..mN keying mandatory, since
+    # benchmark_run.results maps 1:1 back to the rows by it, and the live database
+    # holds 21 `m0` and 21 `m1` against a handful of anything else. This id was
+    # briefly renamed to the milestone name, which made this test pass while
+    # shipping was broken for every suite the platform had ever written.
+    db_session.add(models.Verifier(suite_id=suite.id, ext_id="m0", level="backend",
                                    assertion="the order is held pending transit", code=""))
     db_session.commit()
     rev = next(v for v in client.get(f"/api/sessions/{sid}/versions").json()["versions"] if v["id"] == child_id)

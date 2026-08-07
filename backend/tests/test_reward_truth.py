@@ -263,3 +263,66 @@ def test_an_unreachable_gym_proves_nothing(db_session, attempt):
     reward, results = scorer.score(suite, {})
     assert results == {"did_the_task": "unknown"} and reward == 0
     assert scorer.gym_success is None
+
+
+# --------------------------------------------------------- the shape we persist
+def test_the_positional_ids_the_platform_actually_writes_still_score(db_session, attempt):
+    """The regression that broke shipping outright.
+
+    `to_review` enumerates the gym's milestones and keeps only the INDEX — every
+    verifier is `m0..mN` with no check IR, and api/gym.py calls that keying
+    mandatory because benchmark_run.results maps back to the rows by it. The live
+    database is 21 `m0` and 21 `m1`.
+
+    A scorer that resolves milestones by NAME therefore matched nothing at all:
+    every check came out `unknown`, which under the fail-closed rule means reward
+    0 and a refused ship — for a run whose milestones had every one fired
+    correctly. Worse than the bug it replaced, which at least shipped.
+    """
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("m0", None, ""), ("m1", None, "")])
+    gym = FakeGym(success=True, milestones=[
+        _milestone("order_held", fired=3),
+        _milestone("no_false_claim", fired=-1, required=False, forbidden=True),
+    ])
+    reward, results = SuiteScorer(gym).score(suite, gym.world())
+    assert results == {"m0": "pass", "m1": "pass"}, "m{j} is the milestone's index"
+    assert reward == 1
+
+
+def test_a_positional_id_still_reports_the_milestone_that_actually_failed(db_session, attempt):
+    """Resolving by ordinal must not become a way of passing everything."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("m0", None, ""), ("m1", None, "")])
+    gym = FakeGym(success=False, milestones=[
+        _milestone("order_held", fired=3),
+        _milestone("refund_issued", fired=-1),      # required, never fired
+    ])
+    reward, results = SuiteScorer(gym).score(suite, gym.world())
+    assert results == {"m0": "pass", "m1": "fail"}
+    assert reward == 0
+
+
+def test_a_name_bound_check_beats_its_position(db_session, attempt):
+    """New suites carry the milestone NAME as IR. That binding must win, so a
+    reordered milestone list cannot silently rebind a check to its neighbour."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("m0", {"kind": "gym_milestone", "id": "refund_issued"}, "")])
+    gym = FakeGym(success=True, milestones=[
+        _milestone("order_held", fired=3),          # position 0
+        _milestone("refund_issued", fired=-1),      # the one it actually names
+    ])
+    reward, results = SuiteScorer(gym).score(suite, gym.world())
+    assert results == {"m0": "fail"}, "the name wins over the ordinal"
+    assert reward == 0
+
+
+def test_an_unrecognisable_id_is_still_unknown(db_session, attempt):
+    """The ordinal fallback is deliberately narrow — `m<digits>` and nothing
+    else — so a human's free-text check is never scored by whichever milestone
+    happens to sit at some index."""
+    s, _v, _task = attempt
+    suite = _suite(db_session, s.id, [("add-1", None, "")])
+    gym = FakeGym(success=True, milestones=[_milestone("order_held", fired=3)])
+    reward, results = SuiteScorer(gym).score(suite, gym.world())
+    assert results == {"add-1": "unknown"} and reward == 0

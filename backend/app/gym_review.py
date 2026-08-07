@@ -113,6 +113,15 @@ def to_review(run: dict, task_id: str, agent: str) -> dict:
         name = m.get("name") or f"milestone_{j}"
         verifiers.append({
             "id": f"m{j}",
+            # WHICH milestone this check is bound to, as executable IR.
+            #
+            # `id` has to stay positional because `benchmark_run.results` is keyed
+            # by it, so the name used to be spent only on the assertion text and
+            # the code blurb — and the binding was lost the moment the row was
+            # written. A scorer then had nothing to look the milestone up BY: it
+            # matched `m0` against a verdict keyed by NAME, missed every time, and
+            # marked a suite whose milestones had all fired correctly unprovable.
+            "check": {"kind": "gym_milestone", "id": name},
             "level": _level(m),
             "assertion": name.replace("_", " ").strip().capitalize(),
             "code": (
