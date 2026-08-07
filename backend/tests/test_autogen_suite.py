@@ -225,3 +225,35 @@ def test_an_empty_suite_cannot_be_saved_over_a_good_one(db_session, task):
     latest = (db_session.query(models.VerifierSuite)
               .filter_by(session_id=s.id).order_by(models.VerifierSuite.version.desc()).first())
     assert latest.id == good.id, "the good suite must still be the newest"
+
+
+def test_a_pre_existing_empty_suite_does_not_shadow_the_good_one(db_session, task):
+    """The guard stops NEW empty suites; rows written before it are still there.
+
+    Versions are immutable and selection is by version DESC, which is what
+    finalize uses when no suite id is named — so an empty v2 sitting above a good
+    v1 makes the attempt unshippable unless the caller knows to name v1 by hand.
+    Measured on a real shipped M105 attempt: v1 held all three gym milestones,
+    v2 held nothing.
+    """
+    from app import models
+    from app.api.sessions import _latest_suite, write_suite
+
+    s = models.ReviewSession(task_id=task.id, seed=0, status="draft")
+    db_session.add(s)
+    db_session.commit()
+
+    good = write_suite(db_session, s.id, [{"id": "m0", "level": "backend",
+                                           "assertion": "order placed",
+                                           "check": {"kind": "gym_milestone", "id": "m0"}}])
+    # An empty v2 as the legacy rows have it — written directly, since the guard
+    # now refuses this path.
+    db_session.add(models.VerifierSuite(session_id=s.id, version=good.version + 1))
+    db_session.commit()
+
+    picked = _latest_suite(db_session, s.id)
+
+    assert picked is not None and picked.id == good.id, (
+        "an empty suite proves nothing and must never be the attempt's suite"
+    )
+    assert len(picked.verifiers) == 1

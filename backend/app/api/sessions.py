@@ -207,11 +207,26 @@ def _latest_branch(db: Session, session_id: UUID) -> TrajectoryBranch | None:
 
 
 def _latest_suite(db: Session, session_id: UUID) -> VerifierSuite | None:
-    return db.scalar(
+    """The newest suite that actually holds verifiers.
+
+    `write_suite` now refuses to persist an empty one, but rows written before
+    that guard are still there and versions are immutable — so an empty v2 sits
+    above a good v1 forever. Selection is by version DESC, and that is what
+    finalize and the suite endpoints use when no suite id is named, so such an
+    attempt reports "no verifier that proves anything" and cannot ship at all
+    unless the caller knows to name v1 by hand. Measured on a real shipped M105
+    attempt: v1 held all three gym milestones, v2 held nothing.
+
+    An empty suite proves nothing by definition, so it is never the right answer
+    to "which suite is this attempt's". Falls back to the newest row of any kind
+    so an attempt with genuinely no verifiers still reports a suite consistently.
+    """
+    rows = db.scalars(
         select(VerifierSuite)
         .where(VerifierSuite.session_id == session_id)
         .order_by(VerifierSuite.version.desc())
-    )
+    ).all()
+    return next((s for s in rows if s.verifiers), (rows[0] if rows else None))
 
 
 def _persisted_verifiers(db: Session, suite: VerifierSuite) -> list[dict]:
