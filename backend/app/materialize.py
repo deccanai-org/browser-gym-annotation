@@ -33,7 +33,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import checkpoints, models, recorder, versions, worlddiff
+from app import blobstore, checkpoints, models, recorder, versions, worlddiff
 
 # An event newer than this may still be part of an edit in progress. Comfortably
 # above the 1.5s keystroke-coalescing window, so a slow typist's word is not split
@@ -250,7 +250,7 @@ def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | Non
             if aid:
                 shot_id = aid
                 art = db.get(models.Artifact, UUID(str(aid))) if aid else None
-                shot = art.uri if art is not None else ""
+                shot = blobstore.api_url(art.id) if art is not None else ""
                 break
         # `needs_value` is a step we deliberately refuse to certify: its value was
         # redacted at record time, so replaying it would type a placeholder.

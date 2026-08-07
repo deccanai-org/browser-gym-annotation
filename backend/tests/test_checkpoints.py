@@ -106,6 +106,54 @@ def test_artifacts_are_registered_with_a_digest(db_session, attempt):
     assert cp.screenshot_artifact_id == art.id
 
 
+def test_the_bytes_are_actually_stored_and_come_back(db_session, attempt):
+    """The defect this whole store exists for.
+
+    `add_artifact` used to hash the JPEG, record its length, and drop it — the row
+    asserted a sha256 and a byte count for content that existed nowhere on disk,
+    and every shipped sample pointed at it. So it is not enough to assert the row
+    looks right: read the bytes back.
+    """
+    from app import blobstore
+
+    png = b"\x89PNG\r\n\x1a\n" + b"not-a-real-image" * 8
+    art = checkpoints.add_artifact(db_session, kind="screenshot", uri="attempt/a/b.jpg", data=png)
+    assert blobstore.get(art.uri) == png, "the row must be backed by its content"
+    assert art.sha256 == blobstore.digest(png)
+    assert art.uri.startswith("blobs/"), "content-addressed, not the caller's hint"
+    assert (art.meta or {}).get("source_uri") == "attempt/a/b.jpg", "the hint is kept, not lost"
+
+
+def test_the_same_frame_twice_is_stored_once(db_session, attempt):
+    """Content addressing has to pay for itself: a re-upload of the same frame —
+    which the recorder does whenever a batch is retried — must not double the
+    disk."""
+    from app import blobstore
+
+    data = b"\xff\xd8\xff" + b"frame" * 40
+    a = checkpoints.add_artifact(db_session, kind="screenshot", uri="one.jpg", data=data)
+    b = checkpoints.add_artifact(db_session, kind="screenshot", uri="two.jpg", data=data)
+    assert a.uri == b.uri and a.sha256 == b.sha256
+    assert blobstore.get(a.uri) == data
+
+
+def test_an_artifact_with_no_bytes_keeps_its_reference(db_session, attempt):
+    """Some artifacts live elsewhere (a PNG on a gym's own disk). Those pass no
+    data and must keep the uri they were given rather than being content-addressed
+    to nothing."""
+    art = checkpoints.add_artifact(db_session, kind="screenshot", uri="/api/gym/screenshot?path=x.png")
+    assert art.uri == "/api/gym/screenshot?path=x.png"
+    assert art.sha256 == "" and art.bytes == 0
+
+
+def test_the_store_refuses_to_read_outside_itself():
+    """A tampered or malformed uri must not become an arbitrary file read."""
+    from app import blobstore
+
+    assert blobstore.get("../../../../etc/passwd") is None
+    assert blobstore.get("") is None
+
+
 # --------------------------------------------------------------------------- divergence
 def test_matching_world_passes_the_guard(db_session, attempt):
     cp = checkpoints.capture(db_session, attempt_id=attempt.id, world=WORLD)

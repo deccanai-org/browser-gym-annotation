@@ -28,10 +28,15 @@ services:
       # runtime rather than assumed, and why production should use the
       # Kubernetes provider instead of a mounted socket.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Artifact BYTES — screenshots and page observations. A NAMED volume, not
+      # the container filesystem: a submitted sample references its screenshots
+      # forever, so this has to outlive `docker compose down`.
+      - artifacts:/var/lib/browser-gym-annotator/artifacts
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-annotator}:${POSTGRES_PASSWORD:-annotator}@postgres:5432/${POSTGRES_DB:-browser_gym_annotator}
       CORS_ORIGINS: '["http://localhost:8080"]'
       ENV: dev
+      ARTIFACT_ROOT: /var/lib/browser-gym-annotator/artifacts
       # Live agent re-run (M6b). Set ANTHROPIC_API_KEY in your shell or infra/.env
       # (gitignored) — passed through at runtime, never baked into the image.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -107,3 +112,4 @@ services:
 
 volumes:
   pgdata:
+  artifacts:

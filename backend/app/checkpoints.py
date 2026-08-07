@@ -26,7 +26,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app import models
+from app import blobstore, models
 
 # Keys that change on every read without representing task state. Hashing them
 # would make every comparison diverge and the guard would be useless.
@@ -93,12 +93,28 @@ def _clock_of(world: dict | None, given: int) -> int:
 
 
 def add_artifact(db: Session, *, kind: str, uri: str, data: bytes | None = None, meta: dict | None = None) -> models.Artifact:
-    """Register a blob (screenshot / DOM / AX / SoM / video). The row holds a URI +
-    digest so storage can move to object storage without touching referrers."""
+    """Register a blob (screenshot / DOM / AX / SoM / video) AND store its bytes.
+
+    This used to hash `data`, record its length, and drop it — the row asserted a
+    sha256 and a byte count for content that existed nowhere on disk. Every
+    shipped sample referenced screenshots the platform had never written.
+
+    `uri` from the caller is now only a naming HINT kept in `meta.source_uri`:
+    the authoritative uri is content-addressed, so the same frame uploaded twice
+    is one file and a row can always be checked against its bytes. Callers that
+    pass no `data` (a reference to something stored elsewhere, e.g. a gym-side
+    PNG) keep their uri as given, since there is nothing to address.
+    """
+    if data:
+        sha, stored_uri = blobstore.put(data, kind)
+        meta = {**(meta or {}), **({"source_uri": uri} if uri and uri != stored_uri else {})}
+        uri = stored_uri
+    else:
+        sha = ""
     art = models.Artifact(
         kind=kind,
         uri=uri,
-        sha256=hashlib.sha256(data).hexdigest() if data else "",
+        sha256=sha,
         bytes=len(data) if data else 0,
         meta=meta or {},
     )

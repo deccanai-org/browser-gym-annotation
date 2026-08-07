@@ -60,6 +60,17 @@ def _no_real_db_at_boot(monkeypatch, _session_factory):
     monkeypatch.setattr(main_mod, "SessionLocal", _session_factory, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _artifacts_in_a_tmpdir(tmp_path, monkeypatch):
+    """Artifact bytes go somewhere disposable during tests.
+
+    `artifact_root` defaults to a durable system path because losing it silently
+    guts every sample already shipped — which is exactly why a test run must
+    never write there, and on a dev machine cannot anyway.
+    """
+    monkeypatch.setattr(settings, "artifact_root", str(tmp_path / "artifacts"))
+
+
 @pytest.fixture()
 def client(_engine, _session_factory):
     def override_get_db():

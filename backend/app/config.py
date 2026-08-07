@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # would strand them with no way forward.
     agent_run_cap: int = 0
 
+    # Where artifact BYTES live — screenshots, DOM, element inventories. Content
+    # addressed under this root (app/blobstore.py). Must be a DURABLE volume in
+    # prod: a submitted sample references its screenshots forever, so losing this
+    # directory silently guts every sample already shipped.
+    artifact_root: str = "/var/lib/browser-gym-annotator/artifacts"
+
     env: str = "dev"
 
     # Dev bootstraps the schema with create_all; prod (GCP) sets this false and

@@ -267,6 +267,22 @@ def _rejected_steps(db: Session, attempt_id: UUID, version: models.TrajectoryVer
     return [str(s.id) for s in versions.flatten(db, version) if str(s.id) in marked]
 
 
+def _artifact_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
+    """The step's screenshot as something a CLIENT can use.
+
+    A bundle used to ship `"screenshot": "attempt/<id>/<id>.jpg"` — a path into a
+    deployment the buyer has no access to, for bytes the platform had never
+    written. This ships the archive-relative content path and the digest, so the
+    image can be located inside the export and verified, and a step with no frame
+    says so with null instead of a dangling string.
+    """
+    art = db.get(models.Artifact, s.marks_artifact_id) if s.marks_artifact_id else None
+    if art is None or not art.sha256:
+        return None
+    return {"path": art.uri, "sha256": art.sha256, "bytes": art.bytes,
+            "width": (art.meta or {}).get("width"), "height": (art.meta or {}).get("height")}
+
+
 def _kind_for(suite: models.VerifierSuite, reward: int, overridden: list[str]) -> str:
     """golden | breaker | flagged, on the same rule the legacy path uses.
 
@@ -313,7 +329,13 @@ def freeze(
             "idx": n, "stepId": str(s.id), "actor": s.actor, "type": s.action_type,
             "description": s.description, "locator": s.semantic_locator or {},
             "resolved": s.resolved_target or {}, "args": s.arguments or {},
-            "url": s.url_after, "screenshot": s.screenshot_url or None,
+            "url": s.url_after,
+            # A CONTENT reference, not a URL. `screenshot_url` is the platform's
+            # own route and means nothing once the bundle leaves the deployment;
+            # this is the path inside the exported archive plus the digest to
+            # check it against, so a client can tell a missing image from a
+            # corrupted one. None when the step genuinely has no frame.
+            "screenshot": _artifact_ref(db, s),
             "reasoning": s.reasoning or "", "human_intent": s.human_intent or "",
             "guidance": s.guidance_text or "",
             "world_hash": after.world_hash if after else "",

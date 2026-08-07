@@ -19,8 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import (
-    agent_runs, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs, live_world,
-    materialize, models, recorder, replay, replay_surface, versions, workspace,
+    agent_runs, blobstore, bridge_client, canonical, checkpoints, cua_hub, finalize, gym_client, jobs,
+    live_world, materialize, models, recorder, replay, replay_surface, versions, workspace,
 )
 from app import gym_review
 from app.api import live as live_api
@@ -858,7 +858,7 @@ def record_frames(
         if ev.committed_step_id:
             st = db.get(models.TrajectoryStep, ev.committed_step_id)
             if st is not None and not st.screenshot_url:
-                st.screenshot_url = art.uri
+                st.screenshot_url = blobstore.api_url(art.id)
                 st.marks_artifact_id = art.id
         stored += 1
     db.commit()

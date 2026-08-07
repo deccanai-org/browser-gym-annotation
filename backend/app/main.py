@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app import agent_runs, jobs, models, workspace  # noqa: F401 — also registers ORM models on Base
 from app.auth import current_annotator
 from app.api.admin import router as admin_router
+from app.api.artifacts import router as artifacts_router
 from app.api.auth import router as auth_router
 from app.api.export import router as export_router
 from app.api.gym import router as gym_router
@@ -165,3 +166,4 @@ app.include_router(gym_router, dependencies=_AUTHED)
 app.include_router(qa_router, dependencies=_AUTHED)
 app.include_router(export_router, dependencies=_AUTHED)
 app.include_router(admin_router, dependencies=_AUTHED)
+app.include_router(artifacts_router, dependencies=_AUTHED)
