@@ -17,6 +17,7 @@ import {
 import type { LiveState, NormPoint, OpenedSession, RemoteSelect, Viewport } from "../../lib/liveBrowser";
 import { FrameRecorder, ObservationRecorder } from "../../lib/liveBrowser";
 import { AppTabs } from "./AppTabs";
+import { attachLiveBrowser } from "./liveSessionApi";
 import type { LiveApp } from "./liveSessionApi";
 
 /**
@@ -40,6 +41,10 @@ import type { LiveApp } from "./liveSessionApi";
 /** Which app the streamed page belongs to, matched by origin. Lets the tab strip
  *  highlight the app actually on screen before the annotator has switched tabs —
  *  the landing app is the task's primary, which is not always apps[0]. */
+//: Comfortably inside the service's 300s ticket TTL. Refreshing is cheap (it
+//: re-tickets the same browser); expiring is not (the pane goes silently blind).
+const TICKET_REFRESH_MS = 120_000;
+
 function appForUrl(apps: LiveApp[], url: string): string | undefined {
   if (!url) return undefined;
   const originOf = (u: string) => { try { return new URL(u).origin; } catch { return ""; } };
@@ -134,6 +139,10 @@ export function LiveBrowserPane({
   const session = sessionProp ?? ownSession;
   const sid = session?.sessionId ?? null;
   const ticket = session?.ticket ?? null;
+  // The ticket the REST calls use. Held in a ref, not read off the prop, because
+  // it is re-minted while the session runs — see the refresh effect below.
+  const ticketRef = useRef<string | null>(ticket);
+  if (ticket && !ticketRef.current) ticketRef.current = ticket;
 
   const vp: Viewport = live.viewport ?? session?.viewport ?? DEFAULT_VIEWPORT;
   const driving = live.status === "live" && live.controller;
@@ -241,6 +250,30 @@ export function LiveBrowserPane({
     };
   }, [sid, ticket, attemptId, base, control, refreshInfo]);
 
+  // --- keep the ticket alive ------------------------------------------------
+  //
+  // Tickets are short-lived (LIVE_TICKET_TTL_S, 300s) and the pane minted ONE at
+  // connect and held it for the whole session. Five minutes into annotating,
+  // every describe/focused/observe started answering 403 — which `json()` turns
+  // into `{}`, indistinguishable from "nothing under the pointer". So the pane
+  // went blind silently: clicks recorded with no locator, keystrokes attributed
+  // to nothing, and the trajectory quietly stopped being replayable partway
+  // through. It is exactly what a real session showed: bare `click` steps and
+  // "2 interactions were lost".
+  //
+  // Re-attaching re-tickets the SAME browser and is idempotent, so this costs
+  // one request every few minutes and never a second Chromium.
+  useEffect(() => {
+    if (!sid || !attemptId) return;
+    let alive = true;
+    const refresh = async () => {
+      const r = await attachLiveBrowser(attemptId);
+      if (alive && r.ok && r.value?.ticket) ticketRef.current = r.value.ticket;
+    };
+    const h = setInterval(() => void refresh(), TICKET_REFRESH_MS);
+    return () => { alive = false; clearInterval(h); };
+  }, [sid, attemptId]);
+
   // --- fit the surface to the viewport aspect ------------------------------
   //
   // `fit` is the largest 1280x800 rectangle the stage can hold. `zoom` overrides
@@ -337,8 +370,8 @@ export function LiveBrowserPane({
       // that SENT the email recorded `{}` and stranded the trajectory's last
       // step as unverified, while describing that exact point by hand answered
       // fine.
-      let target = await describeAt(sid, ticket, p, { base });
-      if (!Object.keys(target).length) target = await describeAt(sid, ticket, p, { base });
+      let target = await describeAt(sid, ticketRef.current ?? ticket, p, { base });
+      if (!Object.keys(target).length) target = await describeAt(sid, ticketRef.current ?? ticket, p, { base });
 
       // A <select> is not clickable in any useful sense here: the dropdown is
       // browser chrome, and a headless browser draws none. Offer the options
@@ -346,7 +379,7 @@ export function LiveBrowserPane({
       // (measured: value 'All' -> 'All'). The press is NOT sent on; choosing an
       // option is the interaction, and it records as a `select` step.
       if (String(target.tag || "").toLowerCase() === "select") {
-        const sel = await selectAt(sid, ticket, p, { base });
+        const sel = await selectAt(sid, ticketRef.current ?? ticket, p, { base });
         if (sel) {
           const r = surfaceRef.current?.getBoundingClientRect();
           setPicker({
@@ -474,7 +507,7 @@ export function LiveBrowserPane({
     lastObsRef.current = now;
     void (async () => {
       try {
-        const payload = await observePage(sid, ticket);
+        const payload = await observePage(sid, ticketRef.current ?? ticket);
         if (payload && Object.keys(payload).length) obs.push({ clientEventId, observation: payload });
       } catch {
         /* an observation is never worth disturbing the interaction stream for */
@@ -539,7 +572,7 @@ export function LiveBrowserPane({
   const syncFocus = async () => {
     if (!sid || !ticket) return;
     try {
-      targetRef.current = await describeFocused(sid, ticket, { base });
+      targetRef.current = await describeFocused(sid, ticketRef.current ?? ticket, { base });
     } catch {
       targetRef.current = {};
     }
