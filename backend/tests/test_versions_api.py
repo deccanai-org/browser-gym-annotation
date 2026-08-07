@@ -262,3 +262,88 @@ def test_the_legacy_submit_still_works_on_an_uncorrected_attempt(client, gym_tas
     db_session.commit()
 
     assert client.post(f"/api/sessions/{sid}/submit", json={"reward": 1, "kind": "golden"}).status_code == 200
+
+
+class _LateGym:
+    """The engine as the mocks actually drive it: the push that completes the
+    task lands a moment AFTER the replay's last action returns."""
+
+    def __init__(self, settles_after: int):
+        self.settles_after = settles_after
+        self.calls = 0
+
+    def verify(self, _step=0):
+        self.calls += 1
+        solved = self.calls > self.settles_after
+        return {
+            "success": solved,
+            "all_milestones": [
+                {"name": "placed_dishrack", "fired_at_step": 3 if solved else -1,
+                 "required": True, "forbidden": False},
+            ],
+        }
+
+
+def _suite_of(*ext_ids):
+    from app import models as m
+    s = m.VerifierSuite(session_id=None, version=1)
+    s.verifiers = [
+        m.Verifier(ext_id=e, level="backend", assertion=e,
+                   check_ir={"kind": "gym_milestone", "id": e})
+        for e in ext_ids
+    ]
+    return s
+
+
+def test_the_ship_gate_waits_for_the_engine_before_believing_a_failure(monkeypatch):
+    """M111 solved, certified 3/3, and refused at the ship gate.
+
+    The mock UIs push to the engine asynchronously, so the replay's LAST action —
+    reliably the one that completes the task — can still be in flight when the
+    reward is computed. Measured on the real run: verify at t+0 said
+    success=False and the same gym at t+2s said success=True. The replay gate
+    already settles this race for world hashes; the scorer did not, so a run that
+    did everything right was told it had failed.
+    """
+    from app.api import versions as vapi
+
+    monkeypatch.setattr(vapi, "_VERDICT_SETTLE_MS", 1)   # keep the test fast
+    gym = _LateGym(settles_after=2)                       # lands on the 3rd read
+    scorer = vapi.SuiteScorer(gym)
+
+    reward, results = scorer.score(_suite_of("placed_dishrack"), {"shop": {}})
+
+    assert reward == 1, f"a solved run must not be refused for reading too early: {results}"
+    assert results["placed_dishrack"] == "pass"
+    assert scorer.gym_success is True
+    assert gym.calls > 1, "it has to actually ask again"
+
+
+def test_a_run_that_never_solves_still_fails(monkeypatch):
+    """The settle must not turn a genuine failure into a pass — it only removes
+    the read-too-early explanation for one."""
+    from app.api import versions as vapi
+
+    monkeypatch.setattr(vapi, "_VERDICT_SETTLE_MS", 1)
+    gym = _LateGym(settles_after=10_000)                  # never settles
+    scorer = vapi.SuiteScorer(gym)
+
+    reward, results = scorer.score(_suite_of("placed_dishrack"), {"shop": {}})
+
+    assert reward == 0
+    assert results["placed_dishrack"] == "fail"
+    assert scorer.gym_success is False
+
+
+def test_an_already_passing_run_is_not_slowed_down(monkeypatch):
+    """The common case pays nothing: a verdict that is already true returns on
+    the first read, so the gate does not add seconds to every ship."""
+    from app.api import versions as vapi
+
+    gym = _LateGym(settles_after=0)                       # true immediately
+    scorer = vapi.SuiteScorer(gym)
+
+    reward, _ = scorer.score(_suite_of("placed_dishrack"), {"shop": {}})
+
+    assert reward == 1
+    assert gym.calls == 1, "a settled verdict must not be re-polled"

@@ -13,6 +13,7 @@ import binascii
 import contextlib
 import json
 import re
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -305,6 +306,27 @@ _TRACE_KINDS = frozenset({
 _EXECUTABLE = _STATE_KINDS | _TRACE_KINDS
 
 
+#: How long the ship gate waits for the engine to catch up before it believes a
+#: "not solved" verdict. Sized like replay's settle: longer than the mocks' own
+#: ~2.5s re-poll, and only paid when the verdict is NEGATIVE — a run that already
+#: passed returns on the first read.
+_VERDICT_SETTLE_TRIES = 12
+_VERDICT_SETTLE_MS = 250
+
+
+def _fired(verdict: dict) -> frozenset[str]:
+    """Which milestones have fired. Compared between polls to notice a world that
+    is still moving even while the aggregate stays false."""
+    out = set()
+    for m in (verdict or {}).get("all_milestones") or []:
+        # `fired_at_step` is 0 on a step-0 fire, so test for None/-1 explicitly —
+        # a falsy 0 read as "never fired" is a bug this codebase has shipped once.
+        at = m.get("fired_at_step")
+        if at is not None and at >= 0:
+            out.add(str(m.get("name") or m.get("id") or ""))
+    return frozenset(out)
+
+
 class SuiteScorer:
     """Runs the BOUND suite against the world the replay ended in.
 
@@ -331,9 +353,41 @@ class SuiteScorer:
         self.executed: list[str] = []
         self.unproven: list[str] = []
 
+    def _settled_verdict(self) -> dict:
+        """The gym's verdict, once the world it is judging has stopped moving.
+
+        The mock UIs push to the engine asynchronously, so the replay's LAST
+        action — reliably the one that completes the task — can still be in
+        flight when the reward is computed. The scorer then judges a world where
+        the order was never placed and refuses a run that did everything right.
+
+        This is the same race the replay gate already settles for world hashes
+        (see replay._settled_world); it was fixed there and left here, so a
+        trajectory could pass certify 3/3 and still be refused at the ship gate.
+        Measured on M111/false_premise_masks_expired_card: verify at t+0 says
+        success=False, the same gym at t+2s says success=True, and the whole
+        refusal was a read taken too early.
+
+        Poll rather than sleep a flat interval: a run whose verdict is already
+        settled pays one extra `verify` and nothing more. `verify` is a pure read
+        of the milestone state, so calling it repeatedly is safe.
+        """
+        verdict = self.gym.verify(0) or {}
+        if verdict.get("success"):
+            return verdict          # already true; it never goes back to false
+        for _ in range(_VERDICT_SETTLE_TRIES):
+            time.sleep(_VERDICT_SETTLE_MS / 1000)
+            fresh = self.gym.verify(0) or {}
+            # Any movement at all — the aggregate flipping, or a milestone that
+            # had not fired now firing — means the push has landed.
+            if fresh.get("success") or _fired(fresh) != _fired(verdict):
+                return fresh
+            verdict = fresh
+        return verdict
+
     def score(self, suite: models.VerifierSuite, world: dict | None,
               trace: list[dict] | None = None) -> tuple[int, dict]:
-        verdict = self.gym.verify(0) or {}
+        verdict = self._settled_verdict()
         self.gym_success = bool(verdict.get("success")) if verdict else None
         milestones = list(verdict.get("all_milestones") or [])
         by_name = {

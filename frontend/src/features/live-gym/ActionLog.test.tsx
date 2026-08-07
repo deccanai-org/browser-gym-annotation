@@ -4,7 +4,7 @@
  *  moved, and moved. Collapsing the first two would tell an annotator their
  *  action was a no-op when in truth we simply did not look.
  */
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { ActionLog, type LoggedStep } from "./ActionLog";
@@ -68,3 +68,29 @@ describe("the dropped-interactions alert", () => {
     expect(screen.getByText(/3/)).toBeTruthy();
   });
 });
+
+
+describe("the collapse-to-rail", () => {
+  it("folds to a rail that keeps the step count and the live signal", () => {
+    render(<ActionLog steps={[base, { ...base, stepId: "s2", index: 1 }]} />);
+    fireEvent.click(screen.getByTitle(/fold the trajectory away/i));
+    // The rail keeps the count so the annotator still knows recording is alive.
+    const rail = screen.getByLabelText("Recorded actions");
+    expect(rail.textContent).toContain("2");
+    // ...and it is reversible.
+    fireEvent.click(rail);
+    expect(screen.getByText(/recording as you work/i)).toBeTruthy();
+  });
+
+  it("turns the rail RED and shows the count when interactions were dropped", () => {
+    // The regression this guards: a first cut of the rail hid the dropped-
+    // interactions alert behind an unconditional green dot, so an annotator who
+    // folded the trajectory would never learn the recording was incomplete.
+    render(<ActionLog steps={[base]} dropped={2} />);
+    fireEvent.click(screen.getByTitle(/fold the trajectory away/i));
+    const rail = screen.getByLabelText("Recorded actions");
+    expect(rail.textContent, "the fold must still surface the loss").toMatch(/2/);
+    expect(rail.textContent?.toLowerCase()).toContain("lost");
+    expect(rail.getAttribute("title")?.toLowerCase()).toContain("lost");
+  });
+})

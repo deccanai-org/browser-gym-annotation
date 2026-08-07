@@ -106,24 +106,43 @@ export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifyin
   // the one thing it must keep saying is that the recording is still running;
   // the width it gives up goes to the browser, which is the surface the
   // annotator is actually working on.
+  //
+  // The dropped-interactions alert MUST survive the fold. It lives in the
+  // expanded body below, and a first cut of this rail simply hid it behind an
+  // unconditional green dot — so an annotator who folded the trajectory (which
+  // the rail is designed to encourage) would never learn the recording was
+  // incomplete, and losing the middle of a task is the one failure they can
+  // neither see nor recover from. When something was dropped the rail turns red,
+  // shows the count, and stops claiming the recording is fine.
   if (collapsed) {
+    const dead = dropped > 0;
     return (
       <aside
         aria-label="Recorded actions"
         onClick={() => setCollapsed(false)}
-        title={`Show the trajectory — ${steps.length} step${steps.length === 1 ? "" : "s"} recorded`}
+        title={dead
+          ? `${dropped} interaction${dropped === 1 ? "" : "s"} were LOST — open the trajectory`
+          : `Show the trajectory — ${steps.length} step${steps.length === 1 ? "" : "s"} recorded`}
         style={{
           display: "flex", flexDirection: "column", alignItems: "center", gap: 10, width: 34, flexShrink: 0,
-          padding: "10px 0", borderLeft: `1px solid ${t.n7}`, background: t.n9, cursor: "pointer",
+          padding: "10px 0", borderLeft: `1px solid ${dead ? t.red : t.n7}`, cursor: "pointer",
+          background: dead ? t.redLite : t.n9,
         }}
       >
-        <Icon name="expand" size={13} stroke={2.2} color={t.n2} />
+        <Icon name="expand" size={13} stroke={2.2} color={dead ? t.redDark : t.n2} />
         <span style={{ fontFamily: t.fontMono, fontSize: "0.72rem", fontWeight: weight.bold, color: t.primary6 }}>
           {steps.length}
         </span>
-        <span style={{ width: 7, height: 7, borderRadius: t.radiusFull, background: t.green, flexShrink: 0 }} />
-        <span style={{ writingMode: "vertical-rl", fontSize: "0.68rem", color: t.n3, letterSpacing: "0.04em" }}>
-          Trajectory
+        <span style={{ width: 7, height: 7, borderRadius: t.radiusFull, background: dead ? t.red : t.green, flexShrink: 0 }} />
+        {dead && (
+          <span title={`${dropped} dropped`}
+                style={{ fontFamily: t.fontMono, fontSize: "0.72rem", fontWeight: weight.bold, color: t.redDark }}>
+            ⚠{dropped}
+          </span>
+        )}
+        <span style={{ writingMode: "vertical-rl", fontSize: "0.68rem",
+                       color: dead ? t.redDark : t.n3, letterSpacing: "0.04em" }}>
+          {dead ? "Interactions lost" : "Trajectory"}
         </span>
       </aside>
     );
