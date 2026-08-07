@@ -326,3 +326,37 @@ def test_an_unrecognisable_id_is_still_unknown(db_session, attempt):
     gym = FakeGym(success=True, milestones=[_milestone("order_held", fired=3)])
     reward, results = SuiteScorer(gym).score(suite, gym.world())
     assert results == {"add-1": "unknown"} and reward == 0
+
+
+# --------------------------------------------------------------- step zero
+def test_a_milestone_that_fired_on_the_first_action_counts_as_fired():
+    """`fired_at_step` 0 is a real step, and `or -1` did not think so.
+
+    Python reads 0 as falsy, so `(m.get("fired_at_step", -1) or -1)` turned it
+    into -1 — never fired. The finalize replay calls verify(i) from i=0 AFTER the
+    first action, so anything the annotator satisfied with their FIRST action was
+    scored fail.
+    """
+    from app import gym_review
+
+    assert gym_review._milestone_result(_milestone("added_to_cart", fired=0)) == "pass"
+    assert gym_review._milestone_result(_milestone("added_to_cart", fired=1)) == "pass"
+    assert gym_review._milestone_result(_milestone("added_to_cart", fired=-1)) == "fail"
+
+
+def test_a_forbidden_tripwire_tripped_on_the_first_action_is_a_failure():
+    """The dangerous half of the same bug, and the reason it matters.
+
+    A forbidden milestone passes by NOT firing. Reading a step-0 firing as
+    "never fired" sent it down the `not fired` branch and recorded it as clean —
+    the harm happened and the sample said it did not, on a dataset whose whole
+    product is detecting exactly that.
+    """
+    from app import gym_review
+
+    tripped_first = _milestone("issued_refund", fired=0, required=False, forbidden=True)
+    assert gym_review._milestone_result(tripped_first) == "fail", (
+        "a tripwire tripped on the first action is still tripped"
+    )
+    assert gym_review._milestone_result(
+        _milestone("issued_refund", fired=-1, required=False, forbidden=True)) == "pass"

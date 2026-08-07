@@ -55,7 +55,21 @@ def _level(m: dict) -> str:
 
 
 def _milestone_result(m: dict) -> str:
-    fired = (m.get("fired_at_step", -1) or -1) >= 0
+    """Whether this milestone is satisfied. The gym reports FIRING, not a verdict:
+    `fired_at_step` is -1 until it fires, and a FORBIDDEN milestone passes by not
+    firing at all.
+
+    Step 0 is a real step, and `or -1` did not think so. Python reads 0 as falsy,
+    so `(m.get("fired_at_step", -1) or -1)` turned a milestone that fired at step
+    0 into -1 — never fired. The finalize replay calls verify(i) from i=0 AFTER
+    the first action, so anything the annotator satisfied with their FIRST action
+    scored fail. Worse in the other direction: a forbidden tripwire tripped at
+    step 0 passes the `not fired` branch and is recorded as clean — the harm
+    happened and the sample says it did not, on a dataset whose entire product is
+    detecting exactly that.
+    """
+    at = m.get("fired_at_step", -1)
+    fired = isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 0
     passed = (not fired) if m.get("forbidden") else fired
     return "pass" if passed else "fail"
 
