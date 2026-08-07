@@ -309,7 +309,17 @@ def _args_for(kind: str, raw: dict) -> dict:
     if kind == "press":
         return {"key": str(raw.get("key") or "Enter")}
     if kind in ("switch_tab", "close_tab"):
-        return {"tab_index": int(raw.get("tab_index", raw.get("index", 0)) or 0)}
+        # Carry the URL when the recording has one. A session opens with only the
+        # task's primary app and the others get a tab when first visited, so a tab
+        # INDEX only means something inside the run that produced it. Dropping the
+        # url here left `tab_index` — which defaults to 0 — as the only addressing,
+        # so every cross-app step replayed against the primary app and reported
+        # success. The executor resolves a url by origin and keeps the index as
+        # the fallback for recordings that never had one.
+        out: dict = {"tab_index": int(raw.get("tab_index", raw.get("index", 0)) or 0)}
+        if raw.get("url"):
+            out["url"] = str(raw["url"])
+        return out
     if kind == "scroll":
         return {"amount_px": raw.get("amount_px", 400), "direction": raw.get("direction", "down")}
     if kind in ("fill", "type", "select"):

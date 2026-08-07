@@ -565,15 +565,18 @@ export function LiveBrowserPane({
             // trajectory showed the two halves with nothing between them.
             // Recorded on the ACK, so a switch the service refuses (another
             // connection holds control) never becomes a step.
-            const idx = apps.findIndex((x) => x.app === a.app);
             const ok = sockRef.current?.send(
               { type: "switch_tab", app: a.app, url: a.url },
               (st) => ({
                 kind: "switch_tab",
-                // All three: the executor addresses tabs by index, the pane
-                // knows the app key, and the url is the fallback a replay can
-                // always fall back to.
-                payload: { app: a.app, url: a.url, tabIndex: idx, t: Date.now() },
+                // The url is the address, and deliberately the only one. This
+                // also recorded the app's position in the STRIP as `tabIndex`,
+                // which is a different number from the browser tab index: the
+                // strip lists every app the task spans, but only visited apps
+                // have tabs. Replay addressed by that index, so a switch landed
+                // on whichever tab happened to sit at that position — and on
+                // tab 0 when the key was missing, which never fails.
+                payload: { app: a.app, url: a.url, t: Date.now() },
                 target: { app: a.app, title: a.title, targetKey: `app:${a.app}` },
                 url: st?.url ?? a.url,
                 tab: st?.tabId ?? a.app,

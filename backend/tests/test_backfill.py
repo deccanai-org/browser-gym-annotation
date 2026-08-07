@@ -480,6 +480,23 @@ def test_a_coordinate_action_is_refused_rather_than_translated():
     assert backfill.to_action({"action_kind": "click_xy", "action_args": {"x": 10, "y": 20}}) is None
 
 
+def test_a_tab_switch_keeps_the_url_it_was_recorded_with():
+    """The one failure that reported success.
+
+    A live session opens with only the task's primary app; the others get a tab
+    when first visited. So a recorded tab INDEX means nothing on replay, and
+    dropping the url left `tab_index` — which the executor defaults to 0 — as the
+    only addressing. Every cross-app step ran against the primary app and
+    answered ok, so the transcript of a broken replay read clean.
+    """
+    action = backfill.to_action({
+        "action_kind": "switch_tab",
+        "action_args": {"app": "mail", "url": "http://localhost:5203/", "tab_index": 1},
+    })
+    assert action["args"]["url"] == "http://localhost:5203/"
+    assert action["args"]["tab_index"] == 1, "kept as the fallback, not as the answer"
+
+
 # --------------------------------------------------------------------------- persistence
 def _replayed(effects=None, absent=None, steps=None, accept=backfill.WORLD):
     run = archived(steps or [
