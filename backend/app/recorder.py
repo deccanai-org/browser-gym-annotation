@@ -146,6 +146,17 @@ SCROLL_MIN_DY = 40       # below this a "scroll" is trackpad jitter
 # re-materializing from seq 0 on a fresh version restores the scroll steps.
 SCROLL_IS_A_STEP = False
 
+# Things the ENVIRONMENT did on its own — a popup the page opened, a redirect, an
+# effect the backend produced. They arrive on the same event channel as real
+# actions (LiveBrowserPane's `onNotice` pushes them), and `coalesce` used to end
+# in a catch-all that turned every unrecognised kind into a step.
+#
+# Deliberately a DENY-list, not an allow-list: an allow-list silently drops any
+# action kind added later, and losing a real action is far worse than keeping a
+# stray one. Add to this set only after confirming the kind is not something an
+# annotator can do.
+ENVIRONMENT_KINDS = frozenset({"popup", "notice", "redirect", "backend_effect"})
+
 # Keys that only EDIT the value of the field being typed into, so they belong
 # inside a fill rather than splitting it. The final value comes from the page, so
 # their effect is already accounted for.
@@ -221,7 +232,16 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
                 same = _same_target(e.get("target"), up.get("target"))
                 clicks = int((up.get("payload") or {}).get("clicks", 1) or 1)
                 button = str((e.get("payload") or {}).get("button", "left"))
-                if moved > DRAG_PX or not same:
+                # A drag REQUIRES movement. `not same` alone used to be enough,
+                # and `_same_target` answers False for two unidentified targets
+                # deliberately (see its docstring) — so every click whose element
+                # the page could not name became a "drag": description "drag", no
+                # locator, not replayable, and a lie about what the annotator did.
+                # Measured on the real corpus: 14 of 90 recorded human steps, all
+                # 14 with an empty locator and 13 of 14 with the pointer not
+                # having moved by a single pixel. Target identity still promotes
+                # a SHORT drag between two named elements, which is why it stays.
+                if moved > DRAG_PX or (not same and moved > 0 and (e.get("target") or up.get("target"))):
                     # A press that travelled is a DRAG. Recording it as a click at
                     # the start point (what synthesising both ends produced) both
                     # loses the gesture and replays as the wrong action.
@@ -324,6 +344,18 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
             out.append({**last, "kind": "scroll",
                         "payload": {**(last.get("payload") or {}), "dy": dy, "dx": dx},
                         "sources": [g.get("seq") for g in group]})
+            continue
+
+        if kind in ENVIRONMENT_KINDS:
+            # Something the ENVIRONMENT did, not something the annotator did.
+            # Consumed like a suppressed scroll: the raw event is kept and the
+            # watermark advances, it simply does not become a step.
+            #
+            # The catch-all below promoted these, so a trajectory carried steps
+            # reading `popup` with no target and no locator — 15 of 90 recorded
+            # human steps. In a shipped sample that teaches a policy to emit
+            # "popup" as an action, which is not an action anyone can take.
+            i += 1
             continue
 
         out.append({**e, "kind": kind, "sources": [e.get("seq")]})

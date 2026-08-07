@@ -107,6 +107,63 @@ def test_a_long_gap_is_not_folded_into_a_click():
     assert [a["kind"] for a in out] == ["long_press"]
 
 
+def test_a_click_the_page_could_not_name_is_still_a_click():
+    """The single defect behind 14 of the 90 human steps recorded so far.
+
+    `_same_target` answers False for two unidentified targets on purpose — that
+    is what stops one typing run splitting into two fills. But the pointer branch
+    treated "not the same element" as sufficient for a DRAG, so any click whose
+    element the page could not name came out as `drag`: no locator, description
+    "drag", not replayable, and untrue. Every one of the 14 had an empty locator
+    and 13 had not moved by a pixel.
+    """
+    out = recorder.coalesce([
+        {"seq": 1, "kind": "mousePressed", "target": {}, "payload": {"nx": 0.5, "ny": 0.4}, "t": 0},
+        {"seq": 2, "kind": "mouseReleased", "target": {}, "payload": {"nx": 0.5, "ny": 0.4}, "t": 120},
+    ])
+    assert [a["kind"] for a in out] == ["click"]
+
+
+def test_a_press_that_travels_is_still_a_drag():
+    """The guard above must not cost us real drags."""
+    out = recorder.coalesce([
+        {"seq": 1, "kind": "mousePressed", "target": {"testId": "slider"}, "payload": {"nx": 0.20, "ny": 0.5}, "t": 0},
+        {"seq": 2, "kind": "mouseReleased", "target": {"testId": "slider"}, "payload": {"nx": 0.80, "ny": 0.5}, "t": 300},
+    ])
+    assert [a["kind"] for a in out] == ["drag"]
+
+
+def test_a_short_drag_between_two_named_elements_is_still_a_drag():
+    """Dragging a card onto an adjacent column moves only a few pixels, so
+    distance alone cannot decide it — two DIFFERENT named targets still can."""
+    out = recorder.coalesce([
+        {"seq": 1, "kind": "mousePressed", "target": {"testId": "card-7"}, "payload": {"nx": 0.500, "ny": 0.5}, "t": 0},
+        {"seq": 2, "kind": "mouseReleased", "target": {"testId": "col-done"}, "payload": {"nx": 0.502, "ny": 0.5}, "t": 200},
+    ])
+    assert [a["kind"] for a in out] == ["drag"]
+
+
+@pytest.mark.parametrize("kind", sorted(recorder.ENVIRONMENT_KINDS))
+def test_something_the_page_did_itself_is_not_a_step(kind):
+    """A popup the page opened is not an action an annotator took, and a shipped
+    sample that lists it teaches a policy to emit `popup`. `coalesce` used to end
+    in a catch-all that promoted every unrecognised kind — 15 of 90 human steps
+    came out as bare `popup` with no target."""
+    out = recorder.coalesce([
+        {"seq": 1, "kind": kind, "target": {}, "payload": {"type": "notice"}, "t": 0},
+        {"seq": 2, "kind": "mousePressed", "target": {"testId": "ok"}, "payload": {}, "t": 50},
+        {"seq": 3, "kind": "mouseReleased", "target": {"testId": "ok"}, "payload": {}, "t": 90},
+    ])
+    assert [a["kind"] for a in out] == ["click"], f"{kind} must not become a step"
+
+
+def test_an_unknown_action_kind_is_still_kept():
+    """The gate is a deny-list on purpose: dropping a real action that was added
+    later is far worse than keeping a stray one."""
+    out = recorder.coalesce([{"seq": 1, "kind": "hover", "target": {"testId": "x"}, "payload": {}, "t": 0}])
+    assert [a["kind"] for a in out] == ["hover"]
+
+
 def test_keystrokes_coalesce_into_one_fill_with_the_final_value():
     """A trajectory should say 'type the answer', not replay twelve keystrokes."""
     t = {"testId": "input-search"}
