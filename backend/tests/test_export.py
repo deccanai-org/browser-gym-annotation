@@ -248,3 +248,41 @@ def test_an_attempt_pins_the_seed_it_will_be_reset_at(client, db_session):
     assert r.status_code == 200, r.json()
     s = db_session.get(models.ReviewSession, UUID(r.json()["sessionId"]))
     assert s.seed == 7, "the attempt must carry the seed it is reset at, not 0"
+
+
+def test_the_initial_state_resolves_its_own_cart(client, db_session):
+    """A bundle's first leg has to be a world you can reset INTO.
+
+    The seed capture stored `/_harness/world`, which is `to_json()` — it reports
+    `products_count` and drops the products themselves. Fine for a verifier,
+    which reads the cart and the orders, but it meant every shipped sample
+    carried an `initial_state` whose cart named products that appeared nowhere in
+    the bundle. A client resetting from it gets line items pointing at nothing.
+    """
+    from uuid import UUID
+
+    from app import models
+    from app.api.export import build_sample
+
+    task = models.Task(
+        external_id="INIT-FULL/x", title="t", prompt="p", source="gym", seed=0,
+        seed_state={"seed": 0, "world_view": "full", "world": {
+            "shop": {
+                "products": {"p_socks": {"id": "p_socks", "title": "Wool socks", "price": 22.0}},
+                "cart": {"items": [{"product_id": "p_socks", "quantity": 1}]},
+            },
+        }},
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    r = client.post(f"/api/tasks/{task.external_id}/sessions", json={"fresh": True})
+    s = db_session.get(models.ReviewSession, UUID(r.json()["sessionId"]))
+    shop = ((build_sample(db_session, s).get("initial_state") or {}).get("shop")) or {}
+
+    catalog = shop.get("products") or {}
+    cart = (shop.get("cart") or {}).get("items") or []
+    assert catalog, "the world must carry its catalog, not just a count of it"
+    assert cart and all(i["product_id"] in catalog for i in cart), (
+        "every line the cart names must resolve inside the bundle"
+    )

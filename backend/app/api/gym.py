@@ -750,7 +750,12 @@ def _capture_seed_world(db: Session, task_id: str, seed: int) -> dict:
     reset = gym_client.reset(task_id, seed)
     if reset is None:
         raise HTTPException(status_code=502, detail="gym unreachable or unknown task")
-    world = gym_client.world() or {}
+    # The FULL world, not the verifier projection. `/_harness/world` drops the
+    # shop catalog and every per-product field, so what landed in seed_state was
+    # a cart and some orders referring to products that were not in it — and
+    # that blob is exactly what the export ships as `initial_state`, the leg a
+    # client is supposed to reset FROM.
+    world = gym_client.world_full() or gym_client.world() or {}
     task = db.scalar(select(models.Task).where(models.Task.external_id == task_id))
     if task is None:
         task = models.Task(external_id=task_id, source="gym")

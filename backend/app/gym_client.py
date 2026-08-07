@@ -80,6 +80,19 @@ def world() -> dict | None:
     return _req("GET", "/_harness/world")
 
 
+def world_full() -> dict | None:
+    """The COMPLETE world, catalog included.
+
+    `/_harness/world` is `to_json()`, which reports `products_count` and drops
+    the products themselves. That projection is fine for a verifier — it reads
+    the cart and the orders — but it is NOT a world you can reset into, and it
+    is what the seed capture was storing: every exported sample shipped an
+    `initial_state` whose cart named products that appeared nowhere in the
+    bundle.
+    """
+    return _req("GET", "/_harness/world_full")
+
+
 def state() -> dict | None:
     """The real post-run shop GymState (cart / orders / returns / subscriptions /
     account) read-only from GET /_harness/state — the true world the agent left."""
