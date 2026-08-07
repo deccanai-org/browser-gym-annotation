@@ -245,6 +245,18 @@ class TrajectoryStep(Base):
 
     trajectory: Mapped[Trajectory] = relationship(back_populates="steps")
 
+    __table_args__ = (
+        # `materialize()` documents itself as idempotent — "advance the watermark
+        # in the SAME transaction as the steps it produced, so re-running produces
+        # nothing new". That holds under one caller and nothing enforced it: the
+        # ordinal is assigned as max()+1 with no lock, so two concurrent folds
+        # (the events endpoint and a ship, say) each read the same max and write
+        # the whole batch twice at identical ordinals. The duplicate steps then
+        # flatten into the golden and a client is sold a trajectory that does
+        # every action twice.
+        UniqueConstraint("version_id", "suffix_ordinal", name="uq_step_ordinal_per_version"),
+    )
+
 
 class TaskAssignment(Base):
     """Who is meant to annotate which task.
@@ -554,6 +566,14 @@ class InteractionEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("attempt_id", "client_event_id", name="uq_event_client_id"),
+        # `seq` is assigned as max()+1, and the fold watermark is `seq > N`. Two
+        # recorders on one attempt — a second tab, or a reopened pane whose old
+        # recorder has not died — can therefore mint the SAME seq twice, and the
+        # watermark then steps past both: the events are durably recorded and
+        # permanently skipped, so the annotator's actions are in the database and
+        # missing from their trajectory. The constraint turns that into a write
+        # that fails loudly instead of data that quietly disappears.
+        UniqueConstraint("attempt_id", "seq", name="uq_event_seq_per_attempt"),
     )
 
 
