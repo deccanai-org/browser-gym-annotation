@@ -57,7 +57,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import checkpoints, gym_client, gym_review, models
+from app import checkpoints, gym_client, gym_review, models, recorder
 from app.config import settings
 
 # The imported run belongs to a system identity distinct from the live gym
@@ -90,11 +90,12 @@ _SNAPSHOT_FIELDS = (
     "returns_count", "subscriptions_count", "applied_promo",
 )
 
-# What the live browser executor speaks (live_browser/service.py :: LiveSession.act).
-EXECUTOR_KINDS = frozenset({
-    "click", "fill", "select", "check", "submit", "navigate",
-    "open_tab", "switch_tab", "close_tab", "scroll", "wait", "press", "type",
-})
+# What the live browser executor speaks. Imported rather than restated: this file
+# had its own copy, and when the executor learned `right_click`/`dblclick` only
+# one of the two lists was updated — so a step the executor could perfectly well
+# run was reported as "the executor has no 'dblclick' action". One definition
+# cannot disagree with itself.
+EXECUTOR_KINDS = recorder.EXECUTOR_KINDS
 
 # The archive names four actions differently from the executor. A missed rename is
 # silent — the executor rejects the unknown kind, the step is skipped, and a

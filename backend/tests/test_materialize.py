@@ -373,9 +373,27 @@ def test_a_change_is_not_hung_on_a_tab_switch_that_ended_the_batch(db_session, a
 
 
 def test_a_gesture_the_executor_cannot_perform_is_marked_when_it_is_folded(db_session, attempt):
-    """A right-click has no executor action at all, so it can never be proven.
+    """A long-press has no executor action at all, so it can never be proven.
     Saying so at fold time is the difference between the annotator learning it now
-    and learning it after a whole task's work."""
+    and learning it after a whole task's work.
+
+    This used to use a RIGHT-CLICK, which the executor has since learned to
+    perform (with no JS fallback, so it is the real gesture or a refusal). A test
+    of "cannot be performed" has to name something that actually cannot be."""
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5)
+    _ev(db_session, attempt, 2, "mouseUp", base + 5000, BTN, nx=0.5, ny=0.5, clicks=1)
+    db_session.commit()
+
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert made[0].action_type == "long_press"
+    assert made[0].replay_state == "failed" and "long_press" in made[0].replay_error
+
+
+def test_a_right_click_is_no_longer_marked_unperformable(db_session, attempt):
+    """The other side of the same change: the executor presses a right button
+    now, so folding one must not pre-emptively condemn the trajectory."""
     base = _settled_base()
     _ev(db_session, attempt, 1, "mouseDown", base, BTN, nx=0.5, ny=0.5, button="right")
     _ev(db_session, attempt, 2, "mouseUp", base + 30, BTN, nx=0.5, ny=0.5, button="right", clicks=1)
@@ -384,7 +402,7 @@ def test_a_gesture_the_executor_cannot_perform_is_marked_when_it_is_folded(db_se
     made = materialize.materialize(db_session, attempt)
     db_session.commit()
     assert made[0].action_type == "right_click"
-    assert made[0].replay_state == "failed" and "right_click" in made[0].replay_error
+    assert made[0].replay_state == "unverified", made[0].replay_error
     assert made[0].description == "right-click btn-cart"
 
 

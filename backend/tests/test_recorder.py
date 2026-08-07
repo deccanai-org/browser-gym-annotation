@@ -345,7 +345,11 @@ def test_a_right_click_is_not_recorded_as_a_left_click():
         _k(2, "mouseUp", 30, t, nx=0.5, ny=0.5, button="right", clicks=1),
     ])
     assert out[0]["kind"] == "right_click" and out[0]["payload"]["button"] == "right"
-    assert out[0]["kind"] not in recorder.EXECUTOR_KINDS, "it must fail, not pass as a left click"
+    # It used to have to be OUTSIDE the vocabulary — failing loudly was the only
+    # honest option while the executor could not press a right button. It can
+    # now, with no JS fallback, so the honest answer changed from "refuse" to
+    # "perform the real gesture".
+    assert out[0]["kind"] in recorder.EXECUTOR_KINDS, "the executor performs this now"
 
 
 def test_a_middle_click_is_not_a_left_click_either():
@@ -433,3 +437,37 @@ def test_typed_text_is_redacted_under_every_kind_the_client_sends(db_session, at
         )
         assert ev.payload.get("redacted") is True, kind
         assert "hunter2" not in str(ev.payload), f"{kind} leaked the secret"
+
+
+def test_the_executor_vocabulary_is_declared_once():
+    """It was declared twice — here and in backfill — and when the executor
+    learned right_click/dblclick only one copy was updated. The result showed up
+    while doing a real task: a triple-click in a text field folds to a `dblclick`,
+    the executor performs it perfectly well, and the step was still marked failed
+    with "the executor has no 'dblclick' action"."""
+    from app import backfill
+
+    assert backfill.EXECUTOR_KINDS is recorder.EXECUTOR_KINDS
+
+
+def test_the_kinds_we_claim_the_executor_speaks_are_the_ones_it_speaks():
+    """Reads the executor's own dispatch rather than a copy of it. This list
+    living in a different repo is exactly why it drifted; a test that restated it
+    would drift the same way."""
+    import pathlib
+    import re
+
+    svc = pathlib.Path("/Users/dhiren/Deccan AI/E Commerce Broswer Gym/live_browser/service.py")
+    if not svc.exists():
+        import pytest
+        pytest.skip("the gym repo is not checked out beside this one")
+
+    body = svc.read_text()
+    act = body[body.index("    async def act("):]
+    act = act[:act.index("\n    async def ", 10)]
+    handled: set[str] = set()
+    for m in re.finditer(r'kind (?:==|in) \(?((?:"[a-z_]+"(?:, )?)+)\)?', act):
+        handled |= set(re.findall(r'"([a-z_]+)"', m.group(1)))
+
+    missing = recorder.EXECUTOR_KINDS - handled
+    assert not missing, f"we claim the executor speaks {sorted(missing)}, and it does not"

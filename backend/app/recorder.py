@@ -171,12 +171,19 @@ ENVIRONMENT_KINDS = frozenset({"popup", "notice", "redirect", "backend_effect"})
 EXECUTOR_KINDS = frozenset({
     "click", "submit", "fill", "type", "select", "select_option", "check",
     "press", "navigate", "open_tab", "switch_tab", "close_tab", "scroll", "wait",
+    # The executor performs these as the real gesture, with no JS fallback (see
+    # live_browser/service.py `act`). They were outside this set while it could
+    # only left-click, which was right then and wrong the moment it learned how:
+    # a triple-click in a text field folds to a `dblclick`, and every trajectory
+    # containing one was refused at certify as unreplayable.
+    "right_click", "dblclick",
 })
 
-# A pointer button the executor cannot press. The kinds named here — like
-# `dblclick`, `drag` and `long_press` — are deliberately outside EXECUTOR_KINDS:
-# they fail loudly at certify, and are marked when they are folded (see
-# materialize), rather than replaying as a different action.
+# Gestures the executor still cannot perform: `drag` and `long_press`. They are
+# deliberately outside EXECUTOR_KINDS so they fail LOUDLY at certify and are
+# marked when they are folded (see materialize), rather than replaying as a
+# different action — a drag that replays as a click is a lie the transcript
+# cannot show.
 _BUTTON_KINDS = {"right": "right_click", "middle": "middle_click"}
 
 # Keys that only EDIT the value of the field being typed into, so they belong
