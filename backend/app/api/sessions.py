@@ -792,6 +792,20 @@ def write_suite(db: Session, session_id: UUID, verifiers: list) -> VerifierSuite
     def g(v, name, default=None):
         return getattr(v, name, None) if not isinstance(v, dict) else v.get(name, default)
 
+    # An empty suite is never worth a version, and saving one is quietly
+    # destructive: versions are immutable and the ship gate takes the NEWEST, so
+    # an empty save shadows a good suite and every attempt to ship afterwards
+    # fails with "no verifier that proves anything" while the real suite sits one
+    # version below, intact and unreachable. Found on a real M105 attempt — v1
+    # held all three gym milestones, v2 held nothing, and only naming v1's id
+    # explicitly could ship it.
+    if not verifiers:
+        raise HTTPException(
+            status_code=422,
+            detail=("a verifier suite with no verifiers cannot be saved — it would replace the "
+                    "current one and leave nothing able to prove the run"),
+        )
+
     ids = [str(g(v, "id") or "") for v in verifiers]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     if dupes:

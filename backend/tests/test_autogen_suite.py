@@ -190,3 +190,38 @@ def test_another_annotators_attempt_is_not_yours_to_change(client_for, db_sessio
     sid = _open(a, task.external_id)
     # 404 not 403 — whether that attempt exists is not b's business
     assert b.post(f"/api/sessions/{sid}/suite/from-autogen", json={}).status_code == 404
+
+
+def test_an_empty_suite_cannot_be_saved_over_a_good_one(db_session, task):
+    """Suite versions are immutable and the ship gate takes the NEWEST.
+
+    So saving an empty one is quietly destructive: it shadows a good suite, and
+    every attempt to ship afterwards fails with "no verifier that proves
+    anything" while the real suite sits one version below, intact and
+    unreachable. Found on a real M105 attempt — v1 held all three gym
+    milestones, v2 held nothing, and only naming v1's id explicitly could ship
+    it.
+    """
+    from fastapi import HTTPException
+
+    from app import models
+    from app.api.sessions import write_suite
+
+    s = models.ReviewSession(task_id=task.id, seed=0, status="draft")
+    db_session.add(s)
+    db_session.commit()
+
+    good = write_suite(db_session, s.id, [{"id": "m0", "level": "backend",
+                                           "assertion": "order placed",
+                                           "check": {"kind": "gym_milestone", "id": "m0"}}])
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as caught:
+        write_suite(db_session, s.id, [])
+    assert caught.value.status_code == 422
+    assert "no verifiers" in str(caught.value.detail)
+
+    db_session.rollback()
+    latest = (db_session.query(models.VerifierSuite)
+              .filter_by(session_id=s.id).order_by(models.VerifierSuite.version.desc()).first())
+    assert latest.id == good.id, "the good suite must still be the newest"
