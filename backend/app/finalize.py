@@ -19,6 +19,7 @@ reproduces from the state we happened to save".
 
 from __future__ import annotations
 
+import contextlib
 from typing import Protocol
 from uuid import UUID
 
@@ -354,6 +355,41 @@ def _rejected_steps(db: Session, attempt_id: UUID, version: models.TrajectoryVer
     return [str(s.id) for s in versions.flatten(db, version) if str(s.id) in marked]
 
 
+def _observation_from_events(db: Session, s: models.TrajectoryStep):
+    """The observation hanging off the EVENTS this step folded from.
+
+    The checkpoint link is only made when an observation arrives AFTER its event
+    has already become a step. It normally arrives before — the pane posts
+    observations alongside the interactions and folding happens server-side once
+    the batch lands — so the artifact is written, its id is recorded on the event
+    payload, and the checkpoint is never updated. The reader looked only at the
+    checkpoint, so a bundle shipped 0 of 14 observations for a trajectory whose
+    observations had all been captured and stored.
+
+    Same write-path/read-path split this codebase has produced several times: the
+    data existed, nothing was looking where it was put.
+
+    Last one wins — a step folds from several events (a press and a release, or a
+    run of keystrokes) and the newest observation is the page as the step left
+    it, which is what this reference describes.
+    """
+    found = None
+    rows = db.scalars(
+        select(models.InteractionEvent)
+        .where(models.InteractionEvent.committed_step_id == s.id)
+        .order_by(models.InteractionEvent.seq)
+    ).all()
+    for ev in rows:
+        raw = (ev.payload or {}).get("observationArtifactId")
+        if not raw:
+            continue
+        with contextlib.suppress(ValueError, TypeError):
+            cand = db.get(models.Artifact, UUID(str(raw)))
+            if cand is not None and cand.sha256:
+                found = cand
+    return found
+
+
 def _observation_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
     """The page this step was taken against, as a content reference.
 
@@ -365,6 +401,8 @@ def _observation_ref(db: Session, s: models.TrajectoryStep) -> dict | None:
     """
     cp = db.get(models.EnvironmentCheckpoint, s.after_checkpoint_id) if s.after_checkpoint_id else None
     art = db.get(models.Artifact, cp.dom_artifact_id) if cp is not None and cp.dom_artifact_id else None
+    if art is None or not art.sha256:
+        art = _observation_from_events(db, s)
     if art is None or not art.sha256:
         return None
     meta = art.meta or {}

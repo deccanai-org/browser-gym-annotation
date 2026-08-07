@@ -610,3 +610,66 @@ def test_the_suite_is_derived_from_the_gyms_own_milestone_key(db_session, monkey
     assert gym_review._level(got[1]) == "safety", "a forbidden milestone is a safety check"
     assert gym_review._milestone_result(got[0]) == "fail", "required and never fired"
     assert gym_review._milestone_result(got[1]) == "pass", "forbidden and never fired"
+
+
+def test_an_observation_is_found_on_the_event_when_the_checkpoint_never_got_it(db_session):
+    """A bundle shipped 0 of 14 observations for a trajectory that captured all of them.
+
+    The write path only reaches the checkpoint when an observation arrives AFTER
+    its event has already become a step. It normally arrives before — the pane
+    posts observations alongside the interactions and folding happens server-side
+    once the batch lands — so the artifact is written, its id goes on the event
+    payload, and the checkpoint link is never made. The reader looked only at the
+    checkpoint. Measured on two real attempts: 0/14 and 1/12 reachable before,
+    10/14 and 9/12 after.
+    """
+    from app import checkpoints, finalize
+
+    task = models.Task(external_id=f"OBS-{uuid4().hex[:6]}", title="t", prompt="p", source="gym", seed=0)
+    db_session.add(task); db_session.flush()
+    s = models.ReviewSession(task_id=task.id, seed=0, status="draft", source="gym")
+    db_session.add(s); db_session.flush()
+    traj = models.Trajectory(session_id=s.id, source="gym")
+    db_session.add(traj); db_session.flush()
+    step = models.TrajectoryStep(trajectory_id=traj.id, idx=0, action_type="click",
+                                 description="click Send", actor="human")
+    db_session.add(step); db_session.flush()
+
+    art = checkpoints.add_artifact(
+        db_session, kind="observation", uri=f"attempt/{s.id}/e0.json",
+        data=b'{"url":"http://shop/","elements":[]}',
+        meta={"url": "http://shop/", "elements": 7, "truncated": False},
+    )
+    db_session.add(models.InteractionEvent(
+        attempt_id=s.id, seq=1, client_event_id="e0", kind="mouseUp",
+        payload={"observationArtifactId": str(art.id)}, committed_step_id=step.id,
+    ))
+    db_session.flush()
+
+    # The step has NO after_checkpoint_id at all — exactly the shape that shipped blank.
+    assert step.after_checkpoint_id is None
+    ref = finalize._observation_ref(db_session, step)
+
+    assert ref is not None, "an observation that was captured must reach the bundle"
+    assert ref["sha256"] == art.sha256
+    assert ref["elements"] == 7
+    assert ref["url"] == "http://shop/"
+
+
+def test_a_step_that_truly_has_no_observation_still_says_so(db_session):
+    """The fallback must not invent one — a step with nothing captured reports
+    null, which is what lets a consumer tell 'not observed' from 'observed and
+    empty'."""
+    from app import finalize
+
+    task = models.Task(external_id=f"OBS-{uuid4().hex[:6]}", title="t", prompt="p", source="gym", seed=0)
+    db_session.add(task); db_session.flush()
+    s = models.ReviewSession(task_id=task.id, seed=0, status="draft", source="gym")
+    db_session.add(s); db_session.flush()
+    traj = models.Trajectory(session_id=s.id, source="gym")
+    db_session.add(traj); db_session.flush()
+    step = models.TrajectoryStep(trajectory_id=traj.id, idx=0, action_type="click",
+                                 description="click", actor="human")
+    db_session.add(step); db_session.flush()
+
+    assert finalize._observation_ref(db_session, step) is None
