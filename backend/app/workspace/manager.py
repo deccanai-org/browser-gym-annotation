@@ -228,7 +228,18 @@ def reap_expired(db: Session) -> int:
 def reconcile_on_startup(db: Session) -> int:
     """After a backend restart, any lease we believe is active either still has a
     live process (adopt it) or does not (mark terminated). Without this, restarts
-    leak gym processes and hand out endpoints that answer nothing."""
+    leak gym processes and hand out endpoints that answer nothing.
+
+    Expired leases are reaped FIRST, and the ordering is the whole point. A
+    healthy process behind an expired lease is not something to adopt — it is
+    precisely what a leak looks like — and adopting it renewed the leak on every
+    restart. `reap_expired` is otherwise only reached when an annotator hits
+    their per-annotator cap, so on a host where nobody hits the cap nothing ever
+    reclaimed anything: found a lease still marked `ready` ten days past its
+    expiry, its container up the whole time, holding a gym's worth of memory.
+    """
+    reap_expired(db)
+    db.flush()      # so the loop below cannot re-adopt what was just reclaimed
     adopted = 0
     for lease in db.scalars(
         select(models.WorkspaceLease).where(models.WorkspaceLease.status.in_(_ACTIVE))

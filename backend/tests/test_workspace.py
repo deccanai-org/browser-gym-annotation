@@ -616,3 +616,63 @@ def test_a_plain_seed_carries_no_version(iso, db_session, attempt):
                         reset_result={"task_id": "M37/x"}, version_id=None)
     gym = FakeGym(base_url=lease.endpoint, task_id="M37/x", seed=0)
     assert manager.holds_seeded_world(lease, gym, task_key="M37/x", seed=0, version_id=None) is True
+
+
+def test_an_expired_lease_is_not_adopted_however_healthy_its_process_is(monkeypatch, db_session, attempt):
+    """The leak: a lease still marked `ready` ten days past its expiry, container up
+    the whole time.
+
+    `reap_expired` is only reached when an annotator hits their per-annotator
+    cap, so on a host where nobody hits the cap nothing ever reclaims anything —
+    and `reconcile_on_startup` then ADOPTED the expired lease on every restart
+    because its process was still answering. A healthy process behind an expired
+    lease is not something to adopt; it is what a leak looks like.
+    """
+    monkeypatch.setattr(manager, "_provider", lambda: _AlwaysHealthy())
+    past = datetime.utcnow() - timedelta(days=10)
+    lease = models.WorkspaceLease(
+        attempt_id=attempt.id, annotator_id=attempt.annotator_id, purpose="human",
+        runtime_kind="docker", endpoint="http://host.docker.internal:55099",
+        external_ref="c0ffee", status="ready", expires_at=past, last_active_at=past,
+    )
+    db_session.add(lease)
+    db_session.commit()
+
+    adopted = manager.reconcile_on_startup(db_session)
+    db_session.commit()
+    db_session.refresh(lease)
+
+    assert lease.status == "terminated", "an expired lease must be reclaimed, not adopted"
+    assert adopted == 0
+
+
+def test_a_live_unexpired_lease_is_still_adopted(monkeypatch, db_session, attempt):
+    """The reap must not evict work in progress — an annotator mid-task across a
+    backend restart keeps their world."""
+    monkeypatch.setattr(manager, "_provider", lambda: _AlwaysHealthy())
+    future = datetime.utcnow() + timedelta(hours=1)
+    lease = models.WorkspaceLease(
+        attempt_id=attempt.id, annotator_id=attempt.annotator_id, purpose="human",
+        runtime_kind="docker", endpoint="http://host.docker.internal:55098",
+        external_ref="beef", status="ready", expires_at=future, last_active_at=datetime.utcnow(),
+    )
+    db_session.add(lease)
+    db_session.commit()
+
+    adopted = manager.reconcile_on_startup(db_session)
+    db_session.commit()
+    db_session.refresh(lease)
+
+    assert lease.status == "ready"
+    assert adopted == 1
+
+
+class _AlwaysHealthy:
+    """A provider whose processes are all up — the condition under which the
+    expired lease used to be adopted."""
+
+    def health(self, _handle):
+        return True
+
+    def terminate(self, _handle):
+        return True
