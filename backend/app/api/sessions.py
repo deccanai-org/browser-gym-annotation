@@ -605,6 +605,16 @@ def open_session(external_id: str, body: OpenSessionBody, current: Annotator = D
         )
         existing = ReviewSession(task_id=task.id, annotator_id=ann.id, status="draft",
                                  source=task.source,
+                                 # The seed this attempt is RESET AT, pinned now.
+                                 # It was never assigned for a human attempt, so
+                                 # the column sat at its 0 default while the
+                                 # export had just been changed to ship it —
+                                 # correct today only because every task is also
+                                 # seed 0. The task's seed is mutable, which is
+                                 # the whole reason the export stopped reading
+                                 # it; copying it at creation is what makes the
+                                 # attempt's own seed mean something.
+                                 seed=task.seed or 0,
                                  origin_session_id=returned.id if returned is not None else None)
         db.add(existing)
         db.flush()

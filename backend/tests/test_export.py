@@ -229,3 +229,22 @@ def test_an_annotator_cannot_download_another_annotators_bundle(client, client_f
     monkeypatch.setattr("app.agent.settings.anthropic_api_key", "")
     sid = _golden(client)
     assert client_for("nosy@x.io").get(f"/api/export/samples/{sid}").status_code == 403
+
+
+def test_an_attempt_pins_the_seed_it_will_be_reset_at(client, db_session):
+    """The export ships `attempt.seed` rather than `task.seed`, because the task's
+    is mutable and a client resetting at it would get a world the golden was
+    never recorded in. Nothing assigned the attempt's, though — it sat at its 0
+    default, which was right only because every task is currently seed 0 too."""
+    from uuid import UUID
+
+    from app import models
+
+    task = models.Task(external_id="SEED-PIN/x", title="t", prompt="p", source="gym", seed=7)
+    db_session.add(task)
+    db_session.commit()
+
+    r = client.post(f"/api/tasks/{task.external_id}/sessions", json={"fresh": True})
+    assert r.status_code == 200, r.json()
+    s = db_session.get(models.ReviewSession, UUID(r.json()["sessionId"]))
+    assert s.seed == 7, "the attempt must carry the seed it is reset at, not 0"
