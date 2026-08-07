@@ -12,8 +12,9 @@ import {
   observePage,
   openLiveSession,
   scaleDelta,
+  selectAt,
 } from "../../lib/liveBrowser";
-import type { LiveState, NormPoint, OpenedSession, Viewport } from "../../lib/liveBrowser";
+import type { LiveState, NormPoint, OpenedSession, RemoteSelect, Viewport } from "../../lib/liveBrowser";
 import { FrameRecorder, ObservationRecorder } from "../../lib/liveBrowser";
 import { AppTabs } from "./AppTabs";
 import type { LiveApp } from "./liveSessionApi";
@@ -92,6 +93,12 @@ export function LiveBrowserPane({
   //: viewport and lets the stage scroll. Held here rather than in the parent so
   //: it survives the brief and the trajectory being folded away underneath it.
   const [zoom, setZoom] = useState<"fit" | number>("fit");
+  //: The <select> the annotator just clicked, and where to draw its list. A
+  //: headless browser paints no native dropdown, so without this a click on a
+  //: quantity box does nothing at all and the task cannot be done.
+  const [picker, setPicker] = useState<
+    { at: NormPoint; box: { left: number; top: number }; sel: RemoteSelect; target: Record<string, string> } | null
+  >(null);
   const [activeApp, setActiveApp] = useState<string | undefined>(undefined);
   const [, setActiveTabId] = useState<string>("");
   // The open press, so its "up" can be paired into a click — or recognised as a drag.
@@ -332,6 +339,24 @@ export function LiveBrowserPane({
       // fine.
       let target = await describeAt(sid, ticket, p, { base });
       if (!Object.keys(target).length) target = await describeAt(sid, ticket, p, { base });
+
+      // A <select> is not clickable in any useful sense here: the dropdown is
+      // browser chrome, and a headless browser draws none. Offer the options
+      // ourselves rather than dispatching a click that provably does nothing
+      // (measured: value 'All' -> 'All'). The press is NOT sent on; choosing an
+      // option is the interaction, and it records as a `select` step.
+      if (String(target.tag || "").toLowerCase() === "select") {
+        const sel = await selectAt(sid, ticket, p, { base });
+        if (sel) {
+          const r = surfaceRef.current?.getBoundingClientRect();
+          setPicker({
+            at: p, sel, target,
+            box: { left: e.clientX - (r?.left ?? 0), top: e.clientY - (r?.top ?? 0) },
+          });
+          downRef.current = null;
+          return;
+        }
+      }
       if (!Object.keys(target).length) {
         // Still nothing. The click is dispatched regardless — refusing to drive
         // the browser would be worse — but it is COUNTED, so the annotator is
@@ -691,6 +716,30 @@ export function LiveBrowserPane({
           >
             {/* The stream writes here directly — see the note on frames above. */}
             <img ref={imgRef} alt="live browser" style={{ display: "block", width: "100%", height: "100%" }} />
+            {picker && (
+              <SelectPicker
+                sel={picker.sel}
+                box={picker.box}
+                onDismiss={() => setPicker(null)}
+                onPick={(value, label) => {
+                  const sock = sockRef.current;
+                  const tgt = picker.target;
+                  setPicker(null);
+                  if (!sock) return;
+                  // Recorded as a `select`, not as a click: `select` is in the
+                  // executor's vocabulary, so the step replays as the same
+                  // choice rather than as a click on a dropdown that a headless
+                  // browser will not open.
+                  sock.select(picker.at, value, (st) => ({
+                    kind: "select",
+                    payload: { value, label, t: Date.now() },
+                    target: tgt,
+                    url: st?.url ?? pageUrl,
+                    tab: st?.tabId ?? "",
+                  }));
+                }}
+              />
+            )}
             {live.status !== "live" && <Blocker live={live} onRetry={() => sockRef.current?.retry()} />}
             {live.status === "live" && !live.controller && <ReadOnlyRibbon />}
             {driving && !focused && (
@@ -944,5 +993,60 @@ function Zoom({ zoom, fitPct, onZoom }: {
         );
       })}
     </span>
+  );
+}
+
+
+/** The option list a headless browser will not draw.
+ *
+ *  Rendered inside the surface at the click point, so it lands where the real
+ *  dropdown would have. Deliberately a plain list rather than a native <select>:
+ *  nesting one inside the pane would open the ANNOTATOR's dropdown, which has
+ *  nothing to do with the remote page.
+ */
+function SelectPicker({ sel, box, onPick, onDismiss }: {
+  sel: RemoteSelect;
+  box: { left: number; top: number };
+  onPick: (value: string, label: string) => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <>
+      {/* Click-away. Covers the surface so the next click dismisses rather than
+          reaching the page underneath, which would be a click the annotator did
+          not mean to make. */}
+      <div onPointerDown={(e) => { e.stopPropagation(); onDismiss(); }}
+           style={{ position: "absolute", inset: 0, zIndex: 4 }} />
+      <div
+        role="listbox"
+        aria-label="Choose an option"
+        onPointerDown={(e) => e.stopPropagation()}
+        style={{
+          position: "absolute", left: box.left, top: box.top, zIndex: 5,
+          minWidth: 180, maxHeight: 280, overflowY: "auto",
+          background: t.n9, border: `1px solid ${t.n6}`, borderRadius: t.radiusLg,
+          boxShadow: t.shadowLg, padding: 4,
+        }}
+      >
+        {sel.options.map((o) => (
+          <div
+            key={o.value}
+            role="option"
+            aria-selected={o.value === sel.value}
+            onPointerDown={(e) => { e.stopPropagation(); if (!o.disabled) onPick(o.value, o.label); }}
+            style={{
+              padding: "6px 10px", borderRadius: t.radiusLg, fontSize: "0.8rem",
+              cursor: o.disabled ? "not-allowed" : "pointer",
+              opacity: o.disabled ? 0.45 : 1,
+              background: o.value === sel.value ? t.primary8 : "transparent",
+              color: o.value === sel.value ? t.primary6 : t.n1,
+              fontWeight: o.value === sel.value ? weight.semibold : weight.regular,
+            }}
+          >
+            {o.label || o.value}
+          </div>
+        ))}
+      </div>
+    </>
   );
 }

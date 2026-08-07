@@ -215,6 +215,34 @@ export async function describeAt(
   return out ?? {};
 }
 
+/** The <select> under a point, with its options — or null when there is none.
+ *
+ *  A native dropdown is painted by the BROWSER, not the page, so the headless
+ *  Chromium behind the screencast never renders one and the annotator sees
+ *  nothing happen when they click a quantity box. The pane draws the list itself;
+ *  this is what it draws. Every task whose answer runs through a <select> — a
+ *  quantity, a ship-to address — was impossible to annotate without it.
+ */
+export interface RemoteSelect {
+  value: string;
+  multiple: boolean;
+  options: { value: string; label: string; selected: boolean; disabled: boolean }[];
+}
+
+export async function selectAt(
+  sessionId: string,
+  ticket: string,
+  p: NormPoint,
+  opts?: RestOptions,
+): Promise<RemoteSelect | null> {
+  const out = await json<RemoteSelect>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/select-at`,
+    { x: p.nx, y: p.ny, ticket },
+    opts,
+  );
+  return out && Array.isArray(out.options) && out.options.length ? out : null;
+}
+
 /** Locator candidates for whatever has KEYBOARD focus in the remote browser.
  *
  *  A client cannot infer this. It knows where the human last clicked, but focus
@@ -478,6 +506,11 @@ export class LiveSocket {
 
   typeText(text: string): boolean {
     return this.send({ type: "type", text });
+  }
+
+  /** Choose `value` in the <select> at `p`. See selectAt for why this exists. */
+  select(p: NormPoint, value: string, record?: RecordFactory): boolean {
+    return this.send({ type: "select", nx: p.nx, ny: p.ny, value }, record);
   }
 
   key(key: string): boolean {

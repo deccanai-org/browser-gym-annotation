@@ -408,6 +408,58 @@ describe("a click on the surface", () => {
     await waitFor(() => expect(dropped[dropped.length - 1]).toBeGreaterThan(0));
   });
 
+  it("offers the options instead of dispatching a click a headless browser ignores", async () => {
+    // A native dropdown is browser chrome, so the headless Chromium behind the
+    // screencast never paints one: measured, a click on ShopGym's Qty box moved
+    // the value from 'All' to 'All'. Every task whose answer runs through a
+    // <select> — a quantity, a ship-to address — was impossible to annotate.
+    const h = await mountPane({}, undefined, (url) => {
+      if (url.endsWith("/describe")) return { tag: "select", role: "select", name: "qty" };
+      if (url.endsWith("/select-at")) {
+        return { value: "1", multiple: false, options: [
+          { value: "1", label: "Qty: 1", selected: true, disabled: false },
+          { value: "4", label: "Qty: 4", selected: false, disabled: false }] };
+      }
+      return { url: "http://shop.test/product" };
+    });
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await h.pointerAt(900 * 0.5, 563 * 0.5);
+
+    // The chooser is shown...
+    expect(await screen.findByRole("listbox")).toBeTruthy();
+    expect(screen.getByText("Qty: 4")).toBeTruthy();
+    // ...and NO mouse press was dispatched, because it would do nothing.
+    expect(h.sock().messages.filter((m) => m.type === "mouse")).toHaveLength(0);
+  });
+
+  it("records the chosen option as a `select`, which the executor can replay", async () => {
+    // Not as a click: `select` is in EXECUTOR_KINDS, so the step replays as the
+    // same choice rather than as a click on a dropdown that never opens.
+    const h = await mountPane({}, undefined, (url) => {
+      if (url.endsWith("/describe")) return { tag: "select", role: "select", name: "qty" };
+      if (url.endsWith("/select-at")) {
+        return { value: "1", multiple: false, options: [
+          { value: "4", label: "Qty: 4", selected: false, disabled: false }] };
+      }
+      return { url: "http://shop.test/product" };
+    });
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+    await h.pointerAt(900 * 0.5, 563 * 0.5);
+
+    await act(async () => {
+      fireEvent(await screen.findByText("Qty: 4"),
+                new MouseEvent("pointerdown", { bubbles: true }));
+    });
+
+    const sent = h.sock().messages.find((m) => m.type === "select");
+    expect(sent, "the choice must reach the remote browser").toBeTruthy();
+    expect(sent?.value).toBe("4");
+    expect(sent?.nx as number).toBeCloseTo(0.5, 6);
+  });
+
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {
     // The recorder batches, so a pane that closes without flushing loses exactly
     // the interactions somebody was mid-way through making.
