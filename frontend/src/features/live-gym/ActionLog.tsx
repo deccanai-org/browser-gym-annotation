@@ -13,6 +13,9 @@
  *   needs_value the value was redacted at record time, so it cannot be replayed
  *               until the annotator supplies it
  */
+import { useState } from "react";
+
+import { Icon } from "../../ds/Icon";
 import { t, weight } from "../../ds";
 
 export interface LoggedStep {
@@ -97,18 +100,50 @@ export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifyin
     acc[k] = (acc[k] ?? 0) + 1;
     return acc;
   }, {});
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Folded, this is a 34px rail. The step count and the live dot stay, because
+  // the one thing it must keep saying is that the recording is still running;
+  // the width it gives up goes to the browser, which is the surface the
+  // annotator is actually working on.
+  if (collapsed) {
+    return (
+      <aside
+        aria-label="Recorded actions"
+        onClick={() => setCollapsed(false)}
+        title={`Show the trajectory — ${steps.length} step${steps.length === 1 ? "" : "s"} recorded`}
+        style={{
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 10, width: 34, flexShrink: 0,
+          padding: "10px 0", borderLeft: `1px solid ${t.n7}`, background: t.n9, cursor: "pointer",
+        }}
+      >
+        <Icon name="expand" size={13} stroke={2.2} color={t.n2} />
+        <span style={{ fontFamily: t.fontMono, fontSize: "0.72rem", fontWeight: weight.bold, color: t.primary6 }}>
+          {steps.length}
+        </span>
+        <span style={{ width: 7, height: 7, borderRadius: t.radiusFull, background: t.green, flexShrink: 0 }} />
+        <span style={{ writingMode: "vertical-rl", fontSize: "0.68rem", color: t.n3, letterSpacing: "0.04em" }}>
+          Trajectory
+        </span>
+      </aside>
+    );
+  }
 
   return (
     <aside
       aria-label="Recorded actions"
       style={{
-        display: "flex", flexDirection: "column", width: 320, minWidth: 260,
+        display: "flex", flexDirection: "column", width: 320, minWidth: 260, flexShrink: 0,
         borderLeft: `1px solid ${t.n7}`, background: t.n9, overflow: "hidden",
       }}
     >
       <header style={{ padding: "10px 12px", borderBottom: `1px solid ${t.n7}`, display: "flex",
                        alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <div>
+        <span onClick={() => setCollapsed(true)} title="Fold the trajectory away and give the browser its width"
+              style={{ display: "inline-flex", padding: 3, cursor: "pointer", color: t.n3, flexShrink: 0 }}>
+          <Icon name="collapse" size={13} stroke={2.2} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: weight.semibold, fontSize: "0.82rem" }}>
             Trajectory · {steps.length} step{steps.length === 1 ? "" : "s"}
           </div>

@@ -55,6 +55,25 @@ const live: LiveSession = {
 
 describe("the review screen", () => {
   const html = renderToStaticMarkup(<ReviewScreen data={data} nav={nav} startFresh={false} onStartNew={() => {}} />);
+  // The brief is FOLDED by default, so anything about its contents has to ask
+  // for it. Asserting `not.toContain` against the default would pass for the
+  // wrong reason: the section is not missing because it is empty, it is missing
+  // because the whole panel is.
+  const withBrief = renderToStaticMarkup(
+    <ReviewScreen data={data} nav={nav} startFresh={false} onStartNew={() => {}} briefOpen />,
+  );
+
+  it("gives the browser the width by default, and keeps the prompt in reach", () => {
+    // The three-column default rendered the gym at ~70% of the remote viewport,
+    // which is small enough that you have to squint at the buttons a task is
+    // asking you to click. The brief was the column worth folding — read once,
+    // then resident — but the PROMPT is needed throughout, so it moves up into
+    // the strip above the gym rather than folding away with the panel.
+    expect(html).toContain(data.task.prompt);
+    expect(html, "the brief's own panel is folded").not.toContain("Start state");
+    expect(html).toContain("Show brief");
+    expect(withBrief).toContain("Start state");
+  });
 
   it("opens on the workspace, never on a recorded run", () => {
     // The annotator performs the task themselves. There is no agent attempt to
@@ -84,8 +103,11 @@ describe("the review screen", () => {
     // as "there is nothing here".
     expect(data.task.constraints).toHaveLength(0);
     expect(data.task.runSummary).toHaveLength(0);
-    expect(html).not.toContain("Constraints");
-    expect(html).not.toContain("Run summary");
+    // Against the OPEN brief: the point is that an empty section is left out of
+    // a panel that is on screen, not that the panel is folded away.
+    expect(withBrief).toContain("Task prompt");
+    expect(withBrief).not.toContain("Constraints");
+    expect(withBrief).not.toContain("Run summary");
   });
 
   it("labels an allowed site even when the payload names apps, not hosts", () => {
@@ -96,7 +118,7 @@ describe("the review screen", () => {
       task: { ...data.task, allowedSites: [{ host: "", app: "mail", color: t.primary6 }] },
     };
     const out = renderToStaticMarkup(
-      <ReviewScreen data={byApp} nav={nav} startFresh={false} onStartNew={() => {}} />,
+      <ReviewScreen data={byApp} nav={nav} startFresh={false} onStartNew={() => {}} briefOpen />,
     );
     expect(out).toContain("mail");
   });

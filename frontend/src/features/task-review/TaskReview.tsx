@@ -61,9 +61,14 @@ function SectionHeader({ n, title, subtitle, done, right }: { n: number; title: 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "2px 4px 12px" }}>
       <span style={{ width: 22, height: 22, borderRadius: t.radiusFull, background: n === 1 ? t.primary6 : done ? t.green : t.n4, color: t.n9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontFamily: t.fontMono, fontSize: "0.75rem", fontWeight: weight.bold }}>{n}</span>
-      <span style={{ fontSize: "0.875rem", fontWeight: weight.bold, color: active ? t.n0 : t.n2 }}>{title}</span>
-      <span style={{ fontSize: "0.78rem", color: t.n3 }}>{subtitle}</span>
-      {right && <span style={{ marginLeft: "auto" }}>{right}</span>}
+      <span style={{ fontSize: "0.875rem", fontWeight: weight.bold, color: active ? t.n0 : t.n2, flexShrink: 0 }}>{title}</span>
+      {/* Truncates: with the brief folded this carries the task prompt, and a
+          long one would otherwise shove the controls off the right edge. */}
+      <span title={subtitle}
+            style={{ fontSize: "0.78rem", color: t.n3, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {subtitle}
+      </span>
+      {right && <span style={{ marginLeft: "auto", flexShrink: 0 }}>{right}</span>}
     </div>
   );
 }
@@ -668,7 +673,13 @@ interface TaskNav {
   onBackToTasks?: () => void;
 }
 
-export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: ReviewData; nav: TaskNav; startFresh: boolean; onStartNew: () => void }) {
+export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = false }: {
+  data: ReviewData; nav: TaskNav; startFresh: boolean; onStartNew: () => void;
+  /** Whether the task brief starts unfolded. Closed by default — see the note on
+   *  `focusMode`. A seam rather than a constant so the tests that are ABOUT the
+   *  brief can render it, instead of quietly passing because it is not there. */
+  briefOpen?: boolean;
+}) {
   const [state, dispatch] = useReducer(reducer, data, makeInitialState);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // Whether the open has ANSWERED, which is not the same as whether it produced a
@@ -750,7 +761,12 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
   // Folds the task brief away so the live browser gets its 360px. Not
   // persisted: it is a per-moment choice — you widen the browser to do the
   // fiddly part, then want the prompt back.
-  const [focusMode, setFocusMode] = useState(false);
+  // Folded by DEFAULT. The brief is a 340px column that is read once and then
+  // sat there for the rest of the task, while the browser it was taking the
+  // width from rendered at 70% — small enough that you had to squint at the
+  // buttons you were being asked to click. The prompt itself does not go away:
+  // it moves into the strip above the gym, which is where you want it anyway.
+  const [focusMode, setFocusMode] = useState(!briefOpen);
   // Why the gym would not start. Distinct from `liveNotice` (a transient toast):
   // this one REPLACES the workspace, because a live pane with no stream accepts
   // clicks and records none of them.
@@ -1043,7 +1059,14 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew }: { data: Revi
       <Header {...nav} />
       {liveNotice && <Toast message={liveNotice} onDismiss={() => setLiveNotice(null)} bottom={24} />}
       <div style={{ padding: "16px 16px 8px" }}>
-        <SectionHeader n={1} title="Do the task" subtitle="Work through it in the live gym. Every action you take is recorded as the trajectory." right={
+        <SectionHeader n={1} title="Do the task" subtitle={
+          // With the brief folded this IS the brief, so it carries the prompt
+          // rather than a description of what the screen is for. Unfolded it
+          // steps back out of the way, because the panel says it better.
+          focusMode
+            ? (promptOverride || data.task.prompt || "Work through it in the live gym.")
+            : "Work through it in the live gym. Every action you take is recorded as the trajectory."
+        } right={
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {liveSession && (
               <WorldBadge

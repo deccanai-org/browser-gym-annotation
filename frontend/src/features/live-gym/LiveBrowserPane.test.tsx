@@ -85,10 +85,13 @@ const SESSION: OpenedSession = {
 async function mountPane(
   over: Partial<ComponentProps<typeof LiveBrowserPane>> = {},
   hold?: (url: string) => Promise<void> | undefined,
+  /** How the service answers. Overridden by the tests about an EMPTY describe,
+   *  which is a different answer rather than a different timing. */
+  reply: (url: string) => unknown = REPLY,
 ) {
   FakeSocket.opened = [];
   vi.stubGlobal("WebSocket", FakeSocket);
-  const calls = stubFetch(REPLY, hold);
+  const calls = stubFetch(reply, hold);
   let commits = 0;
 
   render(
@@ -358,6 +361,51 @@ describe("a click on the surface", () => {
     const described = h.calls.find((c) => c.url.endsWith("/describe"));
     expect(described?.body).toEqual({ x: 0.25, y: 0.6, ticket: SESSION.ticket });
     expect(h.sock().messages.map((m) => m.type)).toEqual(["mouse"]);
+  });
+
+  it("asks a second time when the first description comes back empty", async () => {
+    // `describeAt` cannot tell a point with nothing under it from a round trip
+    // that failed — both answer `{}` — and the difference decides whether the
+    // step can ever be replayed. Seen on a real M105 run: the click that SENT
+    // the email recorded an empty locator and stranded the trajectory's last
+    // step as unverified, while describing that exact point by hand answered
+    // fine. The page has not moved yet at press time, so asking again is the
+    // same question.
+    let asked = 0;
+    const dropped: number[] = [];
+    const h = await mountPane({ onDropped: (n) => dropped.push(n) }, undefined, (url) => {
+      if (!url.endsWith("/describe")) return { url: "http://shop.test/cart" };
+      asked += 1;
+      return asked === 1 ? {} : { testId: "send", role: "button" };
+    });
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await h.clickAt(225, 338);
+
+    expect(asked, "the empty answer must be retried").toBe(2);
+    await act(async () => cleanup());
+    const posted = h.calls.find((c) => c.url === "/api/sessions/A-1/events");
+    const events = (posted?.body ?? []) as { kind: string; target: Record<string, string> }[];
+    const down = events.find((e) => e.kind === "mouseDown");
+    expect(down?.target, "the retry's answer is what gets recorded").toEqual({ testId: "send", role: "button" });
+    // It answered on the retry, so nothing was lost and nothing is reported.
+    expect(dropped.filter((n) => n > 0)).toHaveLength(0);
+  });
+
+  it("counts a click it could not name, instead of letting it pass for a recorded one", async () => {
+    // Two empty answers is a click with no locator. It is still dispatched —
+    // refusing to drive the browser would be worse — but the annotator is told
+    // now rather than meeting an unshippable step at the last gate.
+    const dropped: number[] = [];
+    const h = await mountPane({ onDropped: (n) => dropped.push(n) }, undefined,
+      (url) => (url.endsWith("/describe") ? {} : { url: "http://shop.test/cart" }));
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await h.clickAt(225, 338);
+
+    await waitFor(() => expect(dropped[dropped.length - 1]).toBeGreaterThan(0));
   });
 
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {

@@ -88,6 +88,10 @@ export function LiveBrowserPane({
   const [urlDraft, setUrlDraft] = useState("");
   const [focused, setFocused] = useState(false);
   const [fit, setFit] = useState({ w: 0, h: 0 });
+  //: "fit" fills the stage; a number renders that multiple of the remote
+  //: viewport and lets the stage scroll. Held here rather than in the parent so
+  //: it survives the brief and the trajectory being folded away underneath it.
+  const [zoom, setZoom] = useState<"fit" | number>("fit");
   const [activeApp, setActiveApp] = useState<string | undefined>(undefined);
   const [, setActiveTabId] = useState<string>("");
   // The open press, so its "up" can be paired into a click — or recognised as a drag.
@@ -231,6 +235,12 @@ export function LiveBrowserPane({
   }, [sid, ticket, attemptId, base, control, refreshInfo]);
 
   // --- fit the surface to the viewport aspect ------------------------------
+  //
+  // `fit` is the largest 1280x800 rectangle the stage can hold. `zoom` overrides
+  // it with an explicit multiple of the remote viewport, and the stage scrolls
+  // instead of shrinking — fit alone caps the surface at whatever the layout
+  // leaves over, which on a laptop was 70% and left the mock storefronts too
+  // small to read the buttons you are being asked to click.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -245,6 +255,18 @@ export function LiveBrowserPane({
     ro.observe(stage);
     return () => ro.disconnect();
   }, [vp.width, vp.height]);
+
+  // The rendered size, and how much of native it works out to. Every pointer
+  // coordinate is normalized against the surface's own box, so zooming cannot
+  // mis-place a click however the number is arrived at.
+  const surface = zoom === "fit"
+    ? { w: fit.w || 0, h: fit.h || 0 }
+    : { w: Math.round(vp.width * zoom), h: Math.round(vp.height * zoom) };
+  // What FIT works out to — always, whatever is currently selected. Reading it
+  // off the live surface made the Fit button label itself 125% while 125% was
+  // the thing selected, so the control reported the answer back to you instead
+  // of telling you what picking it would do.
+  const fitPct = fit.w && vp.width ? Math.round((fit.w / vp.width) * 100) : 100;
 
   const pointAt = (clientX: number, clientY: number): NormPoint | null => {
     const box = surfaceRef.current;
@@ -298,7 +320,26 @@ export function LiveBrowserPane({
     const work = (async () => {
       // Describe BEFORE dispatching. Afterwards the element may be gone, and a
       // recorded pixel is not replayable — the committed step needs a locator.
-      const target = await describeAt(sid, ticket, p, { base });
+      //
+      // Asked twice when the first answer is empty. `describeAt` cannot tell a
+      // point with nothing under it from a round trip that failed — both are
+      // `{}` — and the difference decides whether the step can ever be replayed.
+      // The page has not moved yet at press time, so a second ask is the same
+      // question, and it costs a round trip only in the case that was going to
+      // produce an unreplayable step anyway. Seen on a real M105 run: the click
+      // that SENT the email recorded `{}` and stranded the trajectory's last
+      // step as unverified, while describing that exact point by hand answered
+      // fine.
+      let target = await describeAt(sid, ticket, p, { base });
+      if (!Object.keys(target).length) target = await describeAt(sid, ticket, p, { base });
+      if (!Object.keys(target).length) {
+        // Still nothing. The click is dispatched regardless — refusing to drive
+        // the browser would be worse — but it is COUNTED, so the annotator is
+        // told rather than finding an unshippable step at the last gate.
+        lossRef.current.unrecorded += 1;
+        const l = lossRef.current;
+        onDroppedRef.current?.(l.queued + l.unrecorded);
+      }
       targetRef.current = target;
       focusStaleRef.current = false;  // a click IS a focus change, and we just named it
       downRef.current = { p, at: Date.now(), target, button };
@@ -602,9 +643,20 @@ export function LiveBrowserPane({
         <Pill onClick={() => sid && void refreshInfo(sid)} disabled={!sid}>
           <Icon name="reload" size={13} />
         </Pill>
+        <Zoom zoom={zoom} fitPct={fitPct} onZoom={setZoom} />
       </div>
 
-      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", background: t.n85, padding: 8 }}>
+      {/* `overflow: auto` only bites past fit — below it the surface is smaller
+          than the stage and centred, so nothing scrolls.
+
+          The surface is centred by `margin: auto` on the child, NOT by
+          `alignItems`/`justifyContent` here. Flex centring an item that
+          overflows its container clips it at BOTH ends and the overflow is
+          unreachable — scrollTop 0 still showed the page's middle, so at 125%
+          the ShopGym header could not be scrolled back to. `margin: auto`
+          centres it while it fits and gives the scroll its start edge once it
+          does not. */}
+      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", background: t.n85, padding: 8, overflow: zoom === "fit" ? "hidden" : "auto" }}>
         {session ? (
           <div
             ref={surfaceRef}
@@ -621,8 +673,10 @@ export function LiveBrowserPane({
             onKeyDown={onKeyDown}
             style={{
               position: "relative",
-              width: fit.w || "100%",
-              height: fit.h || "100%",
+              width: surface.w || "100%",
+              height: surface.h || "100%",
+              flexShrink: 0,        // or the stage squeezes it back instead of scrolling
+              margin: "auto",       // centres while it fits; see the note on the stage
               background: t.n0,
               borderRadius: 4,
               overflow: "hidden",
@@ -849,6 +903,42 @@ function Pill({ children, onClick, disabled }: { children: React.ReactNode; onCl
       }}
     >
       {children}
+    </span>
+  );
+}
+
+//: What the annotator can pick. Fit is the default because it always shows the
+//: whole page; the rest exist because "the whole page" was arriving at 70% and
+//: the buttons a task asks you to click were not readable at that size.
+const ZOOMS: Array<"fit" | number> = ["fit", 1, 1.25, 1.5];
+
+function Zoom({ zoom, fitPct, onZoom }: {
+  zoom: "fit" | number;
+  /** What FIT works out to — it is whatever the layout leaves over, so the
+   *  number is the only honest label for that option. Not the current surface:
+   *  a control has to say what picking it would do. */
+  fitPct: number;
+  onZoom: (z: "fit" | number) => void;
+}) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", border: `1px solid ${t.n6}`, borderRadius: t.radiusLg, overflow: "hidden", flexShrink: 0 }}>
+      {ZOOMS.map((z) => {
+        const on = z === zoom;
+        return (
+          <span
+            key={String(z)}
+            onClick={() => onZoom(z)}
+            title={z === "fit" ? `Fit the whole page in the pane — ${fitPct}% at this window size` : `Render at ${Math.round(z * 100)}% — the pane scrolls`}
+            style={{
+              padding: "5px 9px", fontSize: "0.72rem", fontWeight: weight.semibold, cursor: "pointer",
+              background: on ? t.primary6 : t.n9, color: on ? t.n9 : t.n2,
+              borderLeft: z === "fit" ? "none" : `1px solid ${t.n7}`, whiteSpace: "nowrap",
+            }}
+          >
+            {z === "fit" ? `Fit ${fitPct}%` : `${Math.round(z * 100)}%`}
+          </span>
+        );
+      })}
     </span>
   );
 }
