@@ -13,6 +13,7 @@ import {
   openLiveSession,
   scaleDelta,
   selectAt,
+  setViewport,
 } from "../../lib/liveBrowser";
 import type { LiveState, NormPoint, OpenedSession, RemoteSelect, Viewport } from "../../lib/liveBrowser";
 import { FrameRecorder, ObservationRecorder } from "../../lib/liveBrowser";
@@ -44,6 +45,14 @@ import type { LiveApp } from "./liveSessionApi";
 //: Comfortably inside the service's 300s ticket TTL. Refreshing is cheap (it
 //: re-tickets the same browser); expiring is not (the pane goes silently blind).
 const TICKET_REFRESH_MS = 120_000;
+
+//: Padding the stage draws around the surface, in px. Named because the viewport
+//: negotiation has to subtract exactly this much or the surface overflows by a
+//: few pixels and the stage grows a scrollbar it does not need.
+const STAGE_PADDING = 8;
+//: A window drag-resize emits a burst of ResizeObserver callbacks and each
+//: negotiation restarts the screencast, so settle before asking.
+const VIEWPORT_DEBOUNCE_MS = 220;
 
 function appForUrl(apps: LiveApp[], url: string): string | undefined {
   if (!url) return undefined;
@@ -98,6 +107,15 @@ export function LiveBrowserPane({
   //: viewport and lets the stage scroll. Held here rather than in the parent so
   //: it survives the brief and the trajectory being folded away underneath it.
   const [zoom, setZoom] = useState<"fit" | number>("fit");
+  //: The viewport the service actually adopted after we asked it to match the
+  //: stage. Clamped server-side, so this is the ANSWER, never the request.
+  const [negotiated, setNegotiated] = useState<Viewport | null>(null);
+  //: The pane takes the whole window. Even a perfectly fitted stage is only
+  //: ~510px tall once the app header, the step strip, the tab strip and the
+  //: status row have taken their share — short enough that an annotator scrolls
+  //: constantly to reach the bottom of a product page. Fullscreen hands the
+  //: sandbox every pixel there is; Escape gives it back.
+  const [full, setFull] = useState(false);
   //: The <select> the annotator just clicked, and where to draw its list. A
   //: headless browser paints no native dropdown, so without this a click on a
   //: quantity box does nothing at all and the task cannot be done.
@@ -144,7 +162,7 @@ export function LiveBrowserPane({
   const ticketRef = useRef<string | null>(ticket);
   if (ticket && !ticketRef.current) ticketRef.current = ticket;
 
-  const vp: Viewport = live.viewport ?? session?.viewport ?? DEFAULT_VIEWPORT;
+  const vp: Viewport = negotiated ?? live.viewport ?? session?.viewport ?? DEFAULT_VIEWPORT;
   const driving = live.status === "live" && live.controller;
 
   // An interaction stops existing two different ways — the recorder refusing to
@@ -250,6 +268,51 @@ export function LiveBrowserPane({
     };
   }, [sid, ticket, attemptId, base, control, refreshInfo]);
 
+  // Escape leaves fullscreen. Bound on the window rather than the surface,
+  // because keystrokes inside the surface are forwarded to the REMOTE page —
+  // without this, Escape would be typed into the storefront and the annotator
+  // would have no way out but a reload.
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); setFull(false); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [full]);
+
+  // --- match the remote viewport to the stage ------------------------------
+  //
+  // A fixed 1280x800 inside a stage of a different shape gets letterboxed by
+  // `fit`, and on a wide pane the bars cost about 790px of horizontal space with
+  // the page drawn at 63%. Asking the browser to BE the shape of the box makes
+  // the scale 1.0 and the blank margins disappear.
+  //
+  // Debounced: a drag-resize of the window emits a burst of ResizeObserver
+  // callbacks, and each one restarts the screencast.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !sid) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let alive = true;
+    const negotiate = () => {
+      const r = stage.getBoundingClientRect();
+      // The padding the stage draws around the surface; asking for the full box
+      // would make the surface fractionally too big and reintroduce a scrollbar.
+      const w = r.width - STAGE_PADDING * 2;
+      const h = r.height - STAGE_PADDING * 2;
+      if (w <= 0 || h <= 0) return;
+      void setViewport(sid, ticketRef.current ?? ticket ?? "", w, h, { base })
+        .then((got) => { if (alive && got) setNegotiated(got); });
+    };
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(negotiate, VIEWPORT_DEBOUNCE_MS);
+    };
+    schedule();
+    const ro = new ResizeObserver(schedule);
+    ro.observe(stage);
+    return () => { alive = false; if (timer) clearTimeout(timer); ro.disconnect(); };
+  }, [sid, ticket, base]);
+
   // --- keep the ticket alive ------------------------------------------------
   //
   // Tickets are short-lived (LIVE_TICKET_TTL_S, 300s) and the pane minted ONE at
@@ -286,8 +349,13 @@ export function LiveBrowserPane({
     if (!stage) return;
     const measure = () => {
       const r = stage.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return;
-      const scale = Math.min(r.width / vp.width, r.height / vp.height);
+      // The INNER box, matching what the viewport negotiation asks for. Measuring
+      // the padded box while negotiating the unpadded one made the surface ~1%
+      // larger than the stage could hold, so it clipped by a few pixels.
+      const availW = r.width - STAGE_PADDING * 2;
+      const availH = r.height - STAGE_PADDING * 2;
+      if (availW <= 0 || availH <= 0) return;
+      const scale = Math.min(availW / vp.width, availH / vp.height);
       setFit({ w: Math.floor(vp.width * scale), h: Math.floor(vp.height * scale) });
     };
     measure();
@@ -343,6 +411,27 @@ export function LiveBrowserPane({
     // without it the listener would never attach to a pane that got its session
     // after mount.
   }, [sid, vp.width, vp.height, pageUrl]);
+
+  /** Drive browser history, and record where it landed.
+   *
+   *  Recorded as a `navigate` rather than a `back`: the executor has no history
+   *  action, but it does have navigate, and the URL history put us on is exactly
+   *  what a replay needs to reach the same page. The ack carries that URL.
+   */
+  const history = (which: "back" | "forward" | "reload") => {
+    const sock = sockRef.current;
+    if (!sock) return;
+    sock.history(which, (st) => ({
+      kind: "navigate",
+      payload: { url: st?.url ?? pageUrl, via: which, t: Date.now() },
+      args: { url: st?.url ?? pageUrl },
+      target: {},
+      url: st?.url ?? pageUrl,
+      tab: st?.tabId ?? "",
+    }));
+    // The URL bar must not keep showing the page we just left.
+    if (sid) window.setTimeout(() => void refreshInfo(sid), 400);
+  };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const sock = sockRef.current;
@@ -671,7 +760,11 @@ export function LiveBrowserPane({
     onSession?.(s);
   };
 
-  const card: React.CSSProperties = {
+  const card: React.CSSProperties = full ? {
+    position: "fixed", inset: 0, zIndex: 60,
+    display: "flex", flexDirection: "column", minHeight: 0,
+    background: t.n9,
+  } : {
     flex: 1,
     minHeight: 0,
     background: t.n9,
@@ -685,8 +778,20 @@ export function LiveBrowserPane({
 
   return (
     <div style={card}>
-      <StatusBar live={live} sessionId={session?.sessionId ?? null} />
+      <StatusBar live={live} sessionId={session?.sessionId ?? null} viewport={vp} />
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", borderBottom: `1px solid ${t.n7}`, background: t.n9 }}>
+        {/* Back / forward. The service has understood these all along; the pane
+            simply had no buttons, so an annotator who followed a link had no way
+            back — and on a bridged tab the URL carries a per-session sid, so
+            "just retype it" is not a real option. Recorded as a `navigate` to
+            wherever history landed, which is in the executor's vocabulary and so
+            replays as the same page. */}
+        <Pill onClick={() => history("back")} disabled={!driving} title="Back">
+          <Icon name="chevronLeft" size={14} stroke={2.2} />
+        </Pill>
+        <Pill onClick={() => history("forward")} disabled={!driving} title="Forward">
+          <Icon name="chevronRight" size={14} stroke={2.2} />
+        </Pill>
         <Icon name="lock" size={13} stroke={1.8} color={driving ? t.green : t.n3} />
         <input
           value={urlDraft}
@@ -706,6 +811,11 @@ export function LiveBrowserPane({
           <Icon name="reload" size={13} />
         </Pill>
         <Zoom zoom={zoom} fitPct={fitPct} onZoom={setZoom} />
+        <Pill onClick={() => setFull((v) => !v)}
+              title={full ? "Leave fullscreen (Esc)" : "Fill the window with the gym"}>
+          <Icon name={full ? "collapse" : "expand"} size={13} stroke={2.2} />
+          {full ? "Exit" : "Full"}
+        </Pill>
       </div>
 
       {/* `overflow: auto` only bites past fit — below it the surface is smaller
@@ -854,7 +964,13 @@ function statusColor(live: LiveState): string {
   return t.red;
 }
 
-function StatusBar({ live, sessionId }: { live: LiveState; sessionId: string | null }) {
+function StatusBar({ live, sessionId, viewport }: {
+  live: LiveState; sessionId: string | null;
+  /** The size the session is ACTUALLY running at. `live.viewport` is the size it
+   *  opened with, and a negotiated pane changes it — reporting the opening size
+   *  is how a resized session kept insisting it was 1280x800. */
+  viewport: Viewport;
+}) {
   const color = statusColor(live);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", background: t.n8, borderBottom: `1px solid ${t.n7}` }}>
@@ -875,7 +991,7 @@ function StatusBar({ live, sessionId }: { live: LiveState; sessionId: string | n
       </span>
       <span style={{ flex: 1 }} />
       <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", color: t.n3 }}>
-        {sessionId ? `${sessionId} · ${live.viewport.width}×${live.viewport.height}` : "no session"}
+        {sessionId ? `${sessionId} · ${viewport.width}×${viewport.height}` : "no session"}
       </span>
     </div>
   );
@@ -978,9 +1094,12 @@ function Empty({ startUrl, opening, error, onOpen }: { startUrl?: string; openin
   );
 }
 
-function Pill({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+function Pill({ children, onClick, disabled, title }: {
+  children: React.ReactNode; onClick: () => void; disabled?: boolean; title?: string;
+}) {
   return (
     <span
+      title={title}
       onClick={disabled ? undefined : onClick}
       style={{
         display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: t.radiusLg,

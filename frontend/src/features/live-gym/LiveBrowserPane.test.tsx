@@ -150,6 +150,15 @@ async function mountPane(
   };
 }
 
+/** The STAGE's box, which is what the viewport negotiation reads. jsdom measures
+ *  every box as zero, so both the stage and the surface have to be faked. */
+function sizeStage(surface: HTMLElement, box: { left: number; top: number; width: number; height: number }): void {
+  const stage = surface.parentElement as HTMLElement;
+  stage.getBoundingClientRect = () =>
+    ({ ...box, right: box.left + box.width, bottom: box.top + box.height, x: box.left, y: box.top, toJSON: () => box }) as DOMRect;
+  sizeSurface(surface, box);
+}
+
 /** jsdom measures every box as zero, which would clamp every click to the page
  *  origin. The surface is the only element whose rect the pane reads. */
 function sizeSurface(surface: HTMLElement, box: { left: number; top: number; width: number; height: number }): void {
@@ -458,6 +467,63 @@ describe("a click on the surface", () => {
     expect(sent, "the choice must reach the remote browser").toBeTruthy();
     expect(sent?.value).toBe("4");
     expect(sent?.nx as number).toBeCloseTo(0.5, 6);
+  });
+
+  it("asks the browser to be the shape of the stage, so nothing is letterboxed", async () => {
+    // A fixed 1280x800 inside a stage of a different shape gets letterboxed by
+    // fit. Measured on the pane the annotator actually uses: about 790px of
+    // blank margin either side and the page drawn at 63%.
+    vi.useFakeTimers();
+    try {
+      const h = await mountPane();
+      await h.hello(true);
+      sizeStage(h.surface, { left: 0, top: 0, width: 1900, height: 700 });
+      await act(async () => { vi.advanceTimersByTime(400); });
+
+      const asked = h.calls.find((c) => c.url.endsWith("/viewport"));
+      expect(asked, "the pane must negotiate a viewport at all").toBeTruthy();
+      const body = asked?.body as { width: number; height: number };
+      // The stage minus its padding, not the raw box — asking for the full box
+      // overflows the surface and grows a scrollbar.
+      expect(body.width).toBe(1900 - 16);
+      expect(body.height).toBe(700 - 16);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drives browser history and records where it landed", async () => {
+    // The service has understood back/forward all along; the pane had no
+    // buttons, so an annotator who followed a link had no way back — and a
+    // bridged URL carries a per-session sid, so retyping it is not an option.
+    const h = await mountPane();
+    await h.hello(true);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Back"));
+    });
+
+    const sent = h.sock().messages.find((m) => m.type === "back");
+    expect(sent, "Back must reach the remote browser").toBeTruthy();
+  });
+
+  it("can take the whole window, and Escape gives it back", async () => {
+    // Even a perfectly fitted stage is only ~510px tall once the app header, the
+    // step strip, the tab strip and the status row have taken their share —
+    // short enough that an annotator scrolls constantly to reach the bottom of a
+    // product page.
+    const h = await mountPane();
+    await h.hello(true);
+
+    await act(async () => { fireEvent.click(screen.getByTitle(/fill the window/i)); });
+    const card = h.surface.closest("[style*='fixed']");
+    expect(card, "fullscreen must take the pane out of the page flow").toBeTruthy();
+
+    // Escape is bound on the WINDOW, because keystrokes inside the surface are
+    // forwarded to the remote page — otherwise Escape is typed into the
+    // storefront and there is no way out but a reload.
+    await act(async () => { fireEvent.keyDown(window, { key: "Escape" }); });
+    expect(screen.getByTitle(/fill the window/i)).toBeTruthy();
   });
 
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {

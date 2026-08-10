@@ -154,6 +154,11 @@ def _describe(action: dict) -> str:
     if kind == "scroll":
         dy = payload.get("dy", 0)
         return f"scroll {'down' if (dy or 0) > 0 else 'up'}" + (f" in {name}" if name else "")
+    if kind == "select_text":
+        # The TEXT is the substance of this step — it is the value the annotator
+        # went and read. "select_text order-total" says nothing they can check.
+        text = str(payload.get("text") or "")[:60]
+        return f'select "{text}"' + (f" in {name}" if name else "")
     if kind == "right_click":
         return f"right-click {name}".strip()
     if kind == "middle_click":
@@ -386,6 +391,12 @@ def materialize(db: Session, attempt: models.ReviewSession, *, now_ms: int | Non
         state, error = "unverified", ""
         if a.get("needsValue"):
             state = "needs_value"
+        elif kind in recorder.OBSERVATION_KINDS:
+            # A step that records what the annotator READ. There is nothing to
+            # replay and therefore nothing that failed — condemning it here would
+            # make one text selection cost a whole task's work. It stays
+            # `unverified`, which is exactly what it is.
+            pass
         elif kind not in recorder.EXECUTOR_KINDS:
             state, error = "failed", f"the executor has no {kind!r} action, so this step cannot be replayed"
         st = versions.append_step(

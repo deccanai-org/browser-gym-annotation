@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
-from app import checkpoints
+from app import checkpoints, recorder
 
 
 class ReplayRejected(RuntimeError):
@@ -120,10 +120,25 @@ def replay(
     reached a different state — the sequence depended on something that is not in
     it. `strict=False` records the divergence without raising, for a dry run that
     wants to show the annotator where it broke.
+
+    A step whose kind is an OBSERVATION is passed over rather than executed: see
+    the note at the top of the loop.
     """
     out = ReplayResult(ok=True)
     for i, a in enumerate(actions):
         kind = a.get("kind") or a.get("action_kind") or ""
+        if kind in recorder.OBSERVATION_KINDS:
+            # A step that records what the annotator READ — a text selection —
+            # not something they did to the world. There is no action to run, and
+            # handing it to the executor would come back "unsupported action" and
+            # abort the whole sequence: one selection would refuse a trajectory
+            # that is otherwise perfect. An outcome is still appended, and
+            # `skipped` says plainly that nothing was executed — the record stays
+            # positional (certify maps outcome i onto step i), and a caller must
+            # not be able to read this as "replayed".
+            out.steps.append({"index": i, "ok": True, "kind": kind, "compared": False,
+                              "skipped": True, "resolved": {}, "worldHash": ""})
+            continue
         res = executor.act(kind, a.get("locator") or a.get("semantic_locator"), a.get("args") or a.get("arguments"))
         if not (res or {}).get("ok"):
             reason = (res or {}).get("error") or "the action did not land"

@@ -215,6 +215,29 @@ export async function describeAt(
   return out ?? {};
 }
 
+/** Reshape the remote viewport to the pane's stage.
+ *
+ *  The viewport was fixed at 1280x800 while the stage it renders into is a
+ *  different shape, so fitting letterboxed it — about 790px of blank margin on a
+ *  wide pane, with the page drawn at 63%. Matching the shape makes the scale 1.0
+ *  and the bars disappear. Returns the size the service actually adopted, which
+ *  is clamped, so the caller must use the ANSWER rather than what it asked for.
+ */
+export async function setViewport(
+  sessionId: string,
+  ticket: string,
+  width: number,
+  height: number,
+  opts?: RestOptions,
+): Promise<Viewport | null> {
+  const out = await json<{ width: number; height: number }>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/viewport`,
+    { width: Math.round(width), height: Math.round(height), ticket },
+    opts,
+  );
+  return out && out.width ? { width: out.width, height: out.height } : null;
+}
+
 /** The <select> under a point, with its options — or null when there is none.
  *
  *  A native dropdown is painted by the BROWSER, not the page, so the headless
@@ -506,6 +529,14 @@ export class LiveSocket {
 
   typeText(text: string): boolean {
     return this.send({ type: "type", text });
+  }
+
+  /** Browser history. The service has always understood these; the pane simply
+   *  had no buttons, so an annotator who followed a link had no way back and had
+   *  to retype a URL — in a task where the URL is a per-session sid, that is not
+   *  a realistic thing to ask of them. */
+  history(which: "back" | "forward" | "reload", record?: RecordFactory): boolean {
+    return this.send({ type: which }, record);
   }
 
   /** Choose `value` in the <select> at `p`. See selectAt for why this exists. */

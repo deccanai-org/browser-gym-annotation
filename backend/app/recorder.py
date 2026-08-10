@@ -184,6 +184,30 @@ EXECUTOR_KINDS = frozenset({
 # marked when they are folded (see materialize), rather than replaying as a
 # different action — a drag that replays as a click is a lie the transcript
 # cannot show.
+#
+# Steps that record what the annotator READ rather than what they did to the
+# world. They are recorded, they are NOT executed, and they are not failures —
+# the same standing ENVIRONMENT_KINDS has, one layer up: a popup is dropped
+# before it can become a step, and these become a step that nothing is asked to
+# replay.
+#
+# `select_text` is the whole set. It is outside EXECUTOR_KINDS because `act()`
+# has no select-text action, and putting it in there would have certify report a
+# step as replayed that the executor never performed — the exact lie the
+# right_click comment above exists to prevent. But leaving it merely outside
+# EXECUTOR_KINDS is worse than either: materialize would mark it `failed` and
+# the replay would abort the sequence at it, so ONE selection anywhere in a task
+# makes the whole trajectory unshippable. Selecting a value to read it is
+# ordinary work — it is how an annotator gets an order id out of one app and
+# into another — so the honest answer is neither "replayed" nor "failed" but
+# "recorded, and there was nothing to run". `replay.replay` skips these and
+# `materialize` leaves them `unverified`.
+#
+# Nothing here is redacted: a selection reads text the page had already rendered
+# (the DOM selection never reaches an <input>'s value, which is where secrets are
+# typed), and the step's own screenshot already carries those same pixels.
+OBSERVATION_KINDS = frozenset({"select_text"})
+
 _BUTTON_KINDS = {"right": "right_click", "middle": "middle_click"}
 
 # Keys that only EDIT the value of the field being typed into, so they belong
@@ -251,6 +275,8 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
       executor has no way to perform and must therefore not be called ``click``
     * consecutive ``key`` events on one field become a single ``fill`` carrying the
       final value (a trajectory should say "type the answer", not replay 12 keys)
+    * a press that travelled AND left a selection behind becomes ``select_text``
+      carrying the text — a selection is not a drag, and it is not nothing either
     * a ``keyPress`` that is not part of an edit becomes ``press``, the executor's
       own name for it
     * scrolls marked ``auto`` are dropped: a page scrolling itself is not a human
@@ -285,7 +311,35 @@ def coalesce(events: Iterable[models.InteractionEvent | dict]) -> list[dict]:
                 # 14 with an empty locator and 13 of 14 with the pointer not
                 # having moved by a single pixel. Target identity still promotes
                 # a SHORT drag between two named elements, which is why it stays.
-                if moved > DRAG_PX or (not same and moved > 0 and (e.get("target") or up.get("target"))):
+                travelled = moved > DRAG_PX or (not same and moved > 0 and (e.get("target") or up.get("target")))
+                # What the page says was SELECTED when the button came up. Present
+                # only when the pane found a non-empty selection, so its absence is
+                # what it has always been — a plain drag — and this cannot quietly
+                # reclassify one.
+                selected = str((up.get("payload") or {}).get("selectedText") or "")
+                if travelled and selected:
+                    # Press, move across a run of text, release: a SELECTION, not a
+                    # drag. Nothing was dragged and replaying it as a drag is
+                    # meaningless — but dropping it loses a real step of the
+                    # annotator's reasoning, because selecting a value is how they
+                    # read it before typing it somewhere else. So it keeps the text
+                    # it selected and the element it happened in, and is replayed
+                    # by nobody (see OBSERVATION_KINDS).
+                    #
+                    # Only a gesture that would otherwise have been a DRAG is
+                    # reclassified. A double-click that selects a word still folds
+                    # to `dblclick`: the executor performs that one for real, so
+                    # calling it a reading would give up a step that genuinely
+                    # replays.
+                    act = {**up, "kind": "select_text",
+                           # Where the selection STARTED — the up carries the
+                           # down's target already, but only the down is guaranteed
+                           # to name the element the annotator pressed in.
+                           "target": e.get("target") or up.get("target"),
+                           "payload": {**{k: v for k, v in (up.get("payload") or {}).items()
+                                          if k != "selectedText"},
+                                       "text": selected}}
+                elif travelled:
                     # A press that travelled is a DRAG. Recording it as a click at
                     # the start point (what synthesising both ends produced) both
                     # loses the gesture and replays as the wrong action.

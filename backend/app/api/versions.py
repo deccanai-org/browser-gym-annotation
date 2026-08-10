@@ -999,6 +999,13 @@ def certify(
         out = outcomes[i] if i < len(outcomes) else None
         if out is None:
             st.replay_state = "unverified"
+        elif out.get("skipped"):
+            # A step that records a READING — a text selection — so the replay
+            # ran nothing for it. Saying "replayed" below would be the same claim
+            # the executor vocabulary exists to stop anyone making; saying
+            # "diverged" would refuse a trajectory for a step that did nothing.
+            st.replay_state = "unverified"
+            st.replay_error = "this step records what was read, so there is nothing to replay"
         elif out.get("ok") and out.get("compared"):
             st.replay_state = "verified"
             st.replay_error = ""

@@ -3,6 +3,7 @@ stream into replayable actions."""
 
 from __future__ import annotations
 
+import time
 from uuid import uuid4
 
 import pytest
@@ -501,3 +502,149 @@ def test_a_plain_input_carries_no_markup_key_at_all():
                "payload": {"text": "a", "value": "a"}}]
     fill = next(a for a in recorder.coalesce(events) if a["kind"] == "fill")
     assert "valueHtml" not in fill["payload"]
+
+
+# --------------------------------------------------------------------------- selecting text
+ORDER_ID = {"targetKey": "ord", "testId": "order-id", "text": "Order ORD-4417"}
+
+
+def _selection(selected: str | None = "ORD-4417") -> list[dict]:
+    """Press at the start of a run of text, drag across it, release.
+
+    The gesture the pane sends for a selection: an ordinary down/up pair that
+    MOVED, plus the string the page says is selected on the release.
+    """
+    up = {"nx": 0.412, "ny": 0.42, "button": "left", "clicks": 1}
+    if selected is not None:
+        up["selectedText"] = selected
+    return [
+        _k(1, "mouseDown", 0, ORDER_ID, nx=0.300, ny=0.42, button="left"),
+        _k(2, "mouseUp", 260, ORDER_ID, **up),
+    ]
+
+
+def test_selecting_text_is_not_a_drag():
+    """The bug: selecting an order id to read it recorded as `drag`.
+
+    A drag is press-move-release, and so is a selection — so the pointer branch
+    folded every selection into a gesture where nothing was dragged, which the
+    executor cannot perform and certify therefore refused. Reproduced with the
+    exact event pair above: `drag`, with the selected text buried in its payload.
+
+    A selection is worth keeping, not just re-labelling: reading a value is the
+    step that explains why the next fill types what it types.
+    """
+    out = recorder.coalesce(_selection())
+    assert [a["kind"] for a in out] == ["select_text"]
+    assert out[0]["payload"]["text"] == "ORD-4417", "the point of the step is WHAT was read"
+    assert out[0]["target"]["testId"] == "order-id", "and where it was read from"
+    assert out[0]["sources"] == [1, 2]
+
+
+@pytest.mark.parametrize("selected", [None, ""], ids=["absent", "empty"])
+def test_a_press_that_travels_with_nothing_selected_is_still_a_drag(selected):
+    """The new fold is ADDITIVE: only a release that reports a selection is one.
+
+    An older pane sends no `selectedText` at all and a drag of a real element
+    reports it empty — both must keep today's behaviour, or dragging a card
+    between columns would quietly start recording as a reading.
+    """
+    events = _selection(selected)
+    events[1]["target"] = {"targetKey": "col-done", "testId": "col-done"}
+    assert [a["kind"] for a in recorder.coalesce(events)] == ["drag"]
+
+
+def test_copying_a_selection_is_still_its_own_press():
+    """Cmd+C is the action that makes the selection useful, and folding the
+    selection must not swallow it — the copy is a separate step and the executor
+    performs it for real."""
+    out = recorder.coalesce(_selection() + [_k(3, "keyPress", 900, ORDER_ID, key="c", modifiers=["Meta"])])
+    assert [a["kind"] for a in out] == ["select_text", "press"]
+    assert out[1]["payload"]["key"] == "Meta+c"
+
+
+def test_a_click_that_did_not_move_is_still_a_click():
+    """Clicking INTO a paragraph can leave a stale selection in the page, and a
+    click is decided by the pointer, not by what happens to be highlighted."""
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, ORDER_ID, nx=0.30, ny=0.42, button="left"),
+        _k(2, "mouseUp", 40, ORDER_ID, nx=0.30, ny=0.42, button="left", clicks=1,
+           selectedText="ORD-4417"),
+    ])
+    assert [a["kind"] for a in out] == ["click"]
+
+
+def test_a_double_click_that_selects_a_word_stays_a_double_click():
+    """The executor performs a dblclick for real, so calling it a reading would
+    give up a step that genuinely replays. Only a would-be DRAG is reclassified."""
+    out = recorder.coalesce([
+        _k(1, "mouseDown", 0, ORDER_ID, nx=0.30, ny=0.42),
+        _k(2, "mouseUp", 30, ORDER_ID, nx=0.30, ny=0.42, clicks=2, selectedText="ORD-4417"),
+    ])
+    assert [a["kind"] for a in out] == ["dblclick"]
+
+
+def test_a_selection_is_recorded_but_never_claimed_to_be_executed():
+    """Where `select_text` sits, and why.
+
+    NOT in EXECUTOR_KINDS: `act()` has no select-text action, so certify would
+    report a step as replayed that the executor never performed — the same lie
+    that made a right-click ship as a left click. Not merely outside it either:
+    that is where `drag` sits, and it means `failed` at fold time. It is an
+    OBSERVATION — recorded, not executed, not a failure — which is the standing
+    ENVIRONMENT_KINDS already has one layer up.
+    """
+    assert "select_text" not in recorder.EXECUTOR_KINDS
+    assert "select_text" in recorder.OBSERVATION_KINDS
+    assert not (recorder.OBSERVATION_KINDS & recorder.EXECUTOR_KINDS)
+
+
+def test_a_selection_does_not_fail_certification(db_session, attempt):
+    """The end of the bug, at both gates a step meets.
+
+    `materialize` marks anything outside the executor's vocabulary `failed` at
+    fold time, and `replay` — which is what certify and finalize both run —
+    aborts the sequence on the first action the executor rejects. Either one
+    alone makes a single selection cost the whole trajectory, so both are pinned
+    here, together with the click AFTER the selection still replaying: a skipped
+    step must not derail what follows it.
+    """
+    from app import materialize, replay
+
+    base = int(time.time() * 1000) - 60_000
+    for i, ev in enumerate(_selection(), start=1):
+        recorder.record_event(db_session, attempt_id=attempt.id, kind=ev["kind"],
+                              payload={**ev["payload"], "t": base + ev["t"]},
+                              target=ev["target"], client_event_id=f"sel{i}")
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert [s.action_type for s in made] == ["select_text"]
+    assert made[0].replay_state == "unverified" and made[0].replay_error == ""
+    assert made[0].arguments["text"] == "ORD-4417", "the reading has to survive into the step"
+
+    performed: list[str] = []
+
+    class _OnlyWhatTheExecutorSpeaks:
+        """The live executor's contract: an unknown kind comes back not-ok."""
+
+        def act(self, kind, locator, args):
+            if kind not in recorder.EXECUTOR_KINDS:
+                return {"ok": False, "error": f"unsupported action {kind}"}
+            performed.append(kind)
+            return {"ok": True}
+
+        def world(self):
+            return {"n": len(performed)}
+
+    result = replay.replay(
+        [{"kind": "select_text", "locator": {"testId": "order-id"}, "args": {"text": "ORD-4417"}},
+         {"kind": "click", "locator": {"testId": "btn-cart"}, "args": {}}],
+        _OnlyWhatTheExecutorSpeaks(), strict=False,
+    )
+    assert result.ok and result.rejected_at is None
+    assert performed == ["click"], "nothing was executed for the reading"
+    # Positional: certify maps outcome i onto step i, so a skipped step still
+    # occupies its place — and it must not read as "replayed".
+    assert [o["index"] for o in result.steps] == [0, 1]
+    assert result.steps[0]["skipped"] is True and result.steps[0]["compared"] is False
