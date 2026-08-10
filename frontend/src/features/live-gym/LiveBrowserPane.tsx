@@ -11,6 +11,7 @@ import {
   normalizePoint,
   observePage,
   openLiveSession,
+  readSelection,
   scaleDelta,
   selectAt,
   setViewport,
@@ -53,6 +54,11 @@ const STAGE_PADDING = 8;
 //: A window drag-resize emits a burst of ResizeObserver callbacks and each
 //: negotiation restarts the screencast, so settle before asking.
 const VIEWPORT_DEBOUNCE_MS = 220;
+
+//: How far a press must travel before it is worth asking whether it selected
+//: anything. Below this it is a click, which selects nothing, and the question
+//: would be a round trip spent on every click in the session.
+const SELECTION_MIN_PX = 4;
 
 function appForUrl(apps: LiveApp[], url: string): string | undefined {
   if (!url) return undefined;
@@ -536,6 +542,22 @@ export function LiveBrowserPane({
     const button = down?.button ?? "left";
     const clicks = clickCountRef.current;
     clickCountRef.current = 1;
+
+    // Did this press READ something? A press that travelled is a drag at the
+    // wire level and a text selection at the human level, and the only thing
+    // that tells them apart is whether the page ended up with a selection. The
+    // recorder folds on exactly this key, so a selection becomes a `select_text`
+    // step carrying what was read instead of a `drag` the executor cannot
+    // perform — which used to abort the whole certify at that step.
+    //
+    // Only asked when the pointer actually moved: a click selects nothing, and
+    // putting a round trip on every click would be pure cost. Awaited before the
+    // ack so the value travels with the interaction rather than after it.
+    let selectedText = "";
+    if (sid && down && Math.hypot(p.nx - down.p.nx, p.ny - down.p.ny) * vp.width >= SELECTION_MIN_PX) {
+      selectedText = await readSelection(sid, ticketRef.current ?? ticket ?? "", { base });
+    }
+
     sock.send({ type: "mouse", phase: "up", nx: p.nx, ny: p.ny, button, clicks }, (st) => {
       // The URL after a click is how a navigation caused BY that click becomes
       // visible; nothing else reports it.
@@ -544,7 +566,7 @@ export function LiveBrowserPane({
       return {
         kind: "mouseUp",
         payload: { t: Date.now(), nx: p.nx, ny: p.ny, button, clicks,
-                   fromNx: down?.p.nx, fromNy: down?.p.ny },
+                   fromNx: down?.p.nx, fromNy: down?.p.ny, selectedText },
         target: down?.target ?? targetRef.current,
         url: st?.url ?? pageUrl,
         tab: st?.tabId ?? "",

@@ -215,6 +215,27 @@ export async function describeAt(
   return out ?? {};
 }
 
+/** The text currently selected in the remote page.
+ *
+ *  Read at pointer-UP, not tracked continuously: a selection only means anything
+ *  once it is finished, and polling it would cost a round trip per pointer move.
+ *  It is what distinguishes a READING from a drag — at the wire level both are a
+ *  press, a move and a release, and a selection recorded as a drag makes the
+ *  whole trajectory unshippable because the executor has no drag action.
+ */
+export async function readSelection(
+  sessionId: string,
+  ticket: string,
+  opts?: RestOptions,
+): Promise<string> {
+  const out = await json<{ text: string }>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/selection`,
+    { ticket },
+    opts,
+  );
+  return out?.text ?? "";
+}
+
 /** Reshape the remote viewport to the pane's stage.
  *
  *  The viewport was fixed at 1280x800 while the stage it renders into is a
