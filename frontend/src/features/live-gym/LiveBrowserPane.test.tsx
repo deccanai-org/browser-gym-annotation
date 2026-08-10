@@ -526,6 +526,26 @@ describe("a click on the surface", () => {
     expect(screen.getByTitle(/fill the window/i)).toBeTruthy();
   });
 
+  it("keeps every status signal after folding the chrome rows together", async () => {
+    // The pane had FOUR stacked full-width bars above a stage only 492px tall,
+    // and two of them were a lamp and four numbers. Folding them into rows that
+    // already existed buys the stage about 90px — but the counters are how an
+    // annotator sees that interactions are being lost, so the merge must not
+    // quietly drop them.
+    const h = await mountPane();
+    await h.hello(true);
+
+    const pane = h.surface.closest("div")!.parentElement!.parentElement!;
+    const text = pane.textContent ?? "";
+    for (const signal of ["sent", "pending", "unacked", "refused"]) {
+      expect(text, `the ${signal} counter must survive the merge`).toContain(signal);
+    }
+    // ...and the session identity, which is the only place the live viewport shows.
+    expect(text).toContain("1280×800");
+    expect(screen.getByText(/Reconnect/)).toBeTruthy();
+    expect(screen.getByText(/Stop/)).toBeTruthy();
+  });
+
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {
     // The recorder batches, so a pane that closes without flushing loses exactly
     // the interactions somebody was mid-way through making.

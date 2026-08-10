@@ -800,8 +800,13 @@ export function LiveBrowserPane({
 
   return (
     <div style={card}>
-      <StatusBar live={live} sessionId={session?.sessionId ?? null} viewport={vp} />
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", borderBottom: `1px solid ${t.n7}`, background: t.n9 }}>
+      {/* The status lamp lives IN the toolbar now. It used to own a full-width
+          row of its own, and so did the input counters at the bottom — four
+          stacked bars of chrome above a stage that was only 492px tall, which is
+          not enough page to work in. Both were a lamp and a few numbers; neither
+          needed a row. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 12px", borderBottom: `1px solid ${t.n7}`, background: t.n9 }}>
+        <StatusLamp live={live} sessionId={session?.sessionId ?? null} viewport={vp} />
         {/* Back / forward. The service has understood these all along; the pane
             simply had no buttons, so an annotator who followed a link had no way
             back — and on a bridged tab the URL carries a per-session sid, so
@@ -918,6 +923,8 @@ export function LiveBrowserPane({
         )}
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "0 12px",
+                    borderTop: `1px solid ${t.n7}`, background: t.n9, flexShrink: 0 }}>
       {apps && apps.length > 0 && (
         <AppTabs
           apps={apps}
@@ -964,7 +971,8 @@ export function LiveBrowserPane({
         />
       )}
 
-      <InputBar live={live} recording={!!attemptId} onRetry={() => sockRef.current?.retry()} onStop={() => sockRef.current?.disconnect()} />
+        <InputBar live={live} recording={!!attemptId} onRetry={() => sockRef.current?.retry()} onStop={() => sockRef.current?.disconnect()} />
+      </div>
     </div>
   );
 }
@@ -986,7 +994,7 @@ function statusColor(live: LiveState): string {
   return t.red;
 }
 
-function StatusBar({ live, sessionId, viewport }: {
+function StatusLamp({ live, sessionId, viewport }: {
   live: LiveState; sessionId: string | null;
   /** The size the session is ACTUALLY running at. `live.viewport` is the size it
    *  opened with, and a negotiated pane changes it — reporting the opening size
@@ -995,7 +1003,7 @@ function StatusBar({ live, sessionId, viewport }: {
 }) {
   const color = statusColor(live);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", background: t.n8, borderBottom: `1px solid ${t.n7}` }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
       <span style={{ width: 9, height: 9, borderRadius: t.radiusFull, background: color, flexShrink: 0 }} />
       <span style={{ fontSize: "0.78rem", fontWeight: weight.bold, color: t.n0 }}>
         {STATUS_COPY[live.status]}
@@ -1015,7 +1023,7 @@ function StatusBar({ live, sessionId, viewport }: {
       <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", color: t.n3 }}>
         {sessionId ? `${sessionId} · ${viewport.width}×${viewport.height}` : "no session"}
       </span>
-    </div>
+    </span>
   );
 }
 
@@ -1079,7 +1087,7 @@ function InputBar({ live, recording, onRetry, onStop }: { live: LiveState; recor
     </span>
   );
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", borderTop: `1px solid ${t.n7}`, background: t.n9, flexShrink: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, padding: "6px 0" }}>
       {stat("sent", live.lastInputId, t.n2)}
       {stat("pending", live.pendingInputs, live.pendingInputs ? t.n1 : t.n3)}
       {stat("unacked", live.unackedInputs, live.unackedInputs ? t.redDark : t.n3)}
