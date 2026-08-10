@@ -236,6 +236,32 @@ export async function readSelection(
   return out?.text ?? "";
 }
 
+/** Size the viewport so the WHOLE page fits, with no scrolling at all.
+ *
+ *  Iterative server-side, because narrowing the viewport reflows the page taller
+ *  — measured on the ShopGym cart, 1280 to 1128 wide took the content from
+ *  1378px to 1956px — so one measure-then-resize lands on a height that is
+ *  already wrong. `whole` says whether it actually succeeded: a page that keeps
+ *  growing (lazy content that renders as the viewport grows) or one taller than
+ *  the service will allow cannot be shown whole, and the caller should say so
+ *  rather than quietly still scrolling.
+ */
+export async function fitWholePage(
+  sessionId: string,
+  ticket: string,
+  width: number,
+  opts?: RestOptions,
+): Promise<{ viewport: Viewport; whole: boolean } | null> {
+  const out = await json<{ width: number; height: number; whole: boolean }>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/fit-page`,
+    { width: Math.round(width), ticket },
+    opts,
+  );
+  return out && out.width
+    ? { viewport: { width: out.width, height: out.height }, whole: !!out.whole }
+    : null;
+}
+
 /** Reshape the remote viewport to the pane's stage.
  *
  *  The viewport was fixed at 1280x800 while the stage it renders into is a

@@ -6,6 +6,7 @@ import {
   LiveSocket,
   describeAt,
   describeFocused,
+  fitWholePage,
   idleLiveState,
   liveSessionInfo,
   normalizePoint,
@@ -112,7 +113,17 @@ export function LiveBrowserPane({
   //: "fit" fills the stage; a number renders that multiple of the remote
   //: viewport and lets the stage scroll. Held here rather than in the parent so
   //: it survives the brief and the trajectory being folded away underneath it.
-  const [zoom, setZoom] = useState<"fit" | number>("fit");
+  //: "fit" fills the stage with a window-shaped viewport; "page" makes the
+  //: viewport as tall as the CONTENT so nothing scrolls at all; a number is an
+  //: explicit multiple. "page" is the honest answer to "I do not want to
+  //: scroll" — and it is a trade, not a free win: a product page comes out
+  //: around 21% and the home page around 13%, so the control reports what it
+  //: actually achieved instead of implying it is free.
+  const [zoom, setZoom] = useState<"fit" | "page" | number>("fit");
+  //: Whether the last whole-page fit really got the whole page. A page with
+  //: lazy content that renders as the viewport grows never converges, and
+  //: saying so beats leaving the annotator wondering why it still scrolls.
+  const [wholePage, setWholePage] = useState<boolean | null>(null);
   //: The viewport the service actually adopted after we asked it to match the
   //: stage. Clamped server-side, so this is the ANSWER, never the request.
   const [negotiated, setNegotiated] = useState<Viewport | null>(null);
@@ -306,7 +317,17 @@ export function LiveBrowserPane({
       const w = r.width - STAGE_PADDING * 2;
       const h = r.height - STAGE_PADDING * 2;
       if (w <= 0 || h <= 0) return;
-      void setViewport(sid, ticketRef.current ?? ticket ?? "", w, h, { base })
+      const tk = ticketRef.current ?? ticket ?? "";
+      if (zoom === "page") {
+        void fitWholePage(sid, tk, w, { base }).then((got) => {
+          if (!alive || !got) return;
+          setNegotiated(got.viewport);
+          setWholePage(got.whole);
+        });
+        return;
+      }
+      setWholePage(null);
+      void setViewport(sid, tk, w, h, { base })
         .then((got) => { if (alive && got) setNegotiated(got); });
     };
     const schedule = () => {
@@ -317,7 +338,9 @@ export function LiveBrowserPane({
     const ro = new ResizeObserver(schedule);
     ro.observe(stage);
     return () => { alive = false; if (timer) clearTimeout(timer); ro.disconnect(); };
-  }, [sid, ticket, base]);
+    // `pageUrl` is a dependency for the whole-page mode: a new page is a new
+    // height, and a fit measured on the last one is just wrong.
+  }, [sid, ticket, base, zoom, pageUrl]);
 
   // --- keep the ticket alive ------------------------------------------------
   //
@@ -373,7 +396,7 @@ export function LiveBrowserPane({
   // The rendered size, and how much of native it works out to. Every pointer
   // coordinate is normalized against the surface's own box, so zooming cannot
   // mis-place a click however the number is arrived at.
-  const surface = zoom === "fit"
+  const surface = (zoom === "fit" || zoom === "page")
     ? { w: fit.w || 0, h: fit.h || 0 }
     : { w: Math.round(vp.width * zoom), h: Math.round(vp.height * zoom) };
   // What FIT works out to — always, whatever is currently selected. Reading it
@@ -837,7 +860,7 @@ export function LiveBrowserPane({
         <Pill onClick={() => sid && void refreshInfo(sid)} disabled={!sid}>
           <Icon name="reload" size={13} />
         </Pill>
-        <Zoom zoom={zoom} fitPct={fitPct} onZoom={setZoom} />
+        <Zoom zoom={zoom} fitPct={fitPct} wholePage={wholePage} onZoom={setZoom} />
         <Pill onClick={() => setFull((v) => !v)}
               title={full ? "Leave fullscreen (Esc)" : "Fill the window with the gym"}>
           <Icon name={full ? "collapse" : "expand"} size={13} stroke={2.2} />
@@ -855,7 +878,7 @@ export function LiveBrowserPane({
           the ShopGym header could not be scrolled back to. `margin: auto`
           centres it while it fits and gives the scroll its start edge once it
           does not. */}
-      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", background: t.n85, padding: 8, overflow: zoom === "fit" ? "hidden" : "auto" }}>
+      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", background: t.n85, padding: 8, overflow: (zoom === "fit" || zoom === "page") ? "hidden" : "auto" }}>
         {session ? (
           <div
             ref={surfaceRef}
@@ -1145,15 +1168,19 @@ function Pill({ children, onClick, disabled, title }: {
 //: What the annotator can pick. Fit is the default because it always shows the
 //: whole page; the rest exist because "the whole page" was arriving at 70% and
 //: the buttons a task asks you to click were not readable at that size.
-const ZOOMS: Array<"fit" | number> = ["fit", 1, 1.25, 1.5];
+const ZOOMS: Array<"fit" | "page" | number> = ["fit", "page", 1, 1.25, 1.5];
 
-function Zoom({ zoom, fitPct, onZoom }: {
-  zoom: "fit" | number;
+function Zoom({ zoom, fitPct, wholePage, onZoom }: {
+  zoom: "fit" | "page" | number;
+  /** Whether the whole-page fit actually got the whole page. A page with lazy
+   *  content that renders as the viewport grows never converges, and the
+   *  annotator should be told rather than left wondering why it still scrolls. */
+  wholePage?: boolean | null;
   /** What FIT works out to — it is whatever the layout leaves over, so the
    *  number is the only honest label for that option. Not the current surface:
    *  a control has to say what picking it would do. */
   fitPct: number;
-  onZoom: (z: "fit" | number) => void;
+  onZoom: (z: "fit" | "page" | number) => void;
 }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", border: `1px solid ${t.n6}`, borderRadius: t.radiusLg, overflow: "hidden", flexShrink: 0 }}>
@@ -1163,14 +1190,21 @@ function Zoom({ zoom, fitPct, onZoom }: {
           <span
             key={String(z)}
             onClick={() => onZoom(z)}
-            title={z === "fit" ? `Fit the whole page in the pane — ${fitPct}% at this window size` : `Render at ${Math.round(z * 100)}% — the pane scrolls`}
+            title={
+              z === "fit" ? `Fit the window shape — ${fitPct}% at this size`
+              : z === "page" ? (wholePage === false
+                  ? "Whole page — this one keeps growing as it renders, so some scrolling remains"
+                  : `Whole page, no scrolling — currently ${fitPct}%, which is small by nature`)
+              : `Render at ${Math.round(z * 100)}% — the pane scrolls`}
             style={{
               padding: "5px 9px", fontSize: "0.72rem", fontWeight: weight.semibold, cursor: "pointer",
               background: on ? t.primary6 : t.n9, color: on ? t.n9 : t.n2,
               borderLeft: z === "fit" ? "none" : `1px solid ${t.n7}`, whiteSpace: "nowrap",
             }}
           >
-            {z === "fit" ? `Fit ${fitPct}%` : `${Math.round(z * 100)}%`}
+            {z === "fit" ? `Fit ${fitPct}%`
+             : z === "page" ? `Page${zoom === "page" ? ` ${fitPct}%` : ""}${zoom === "page" && wholePage === false ? "*" : ""}`
+             : `${Math.round(z * 100)}%`}
           </span>
         );
       })}

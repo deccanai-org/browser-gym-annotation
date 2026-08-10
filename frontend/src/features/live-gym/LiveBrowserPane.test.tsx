@@ -546,6 +546,55 @@ describe("a click on the surface", () => {
     expect(screen.getByText(/Stop/)).toBeTruthy();
   });
 
+  it("asks for a viewport as tall as the CONTENT when whole-page is chosen", async () => {
+    // "No scrolling" means the viewport has to be as tall as the page, not as
+    // tall as the window — a different question, answered by a different
+    // endpoint, because only the page knows its own laid-out height.
+    vi.useFakeTimers();
+    try {
+      const h = await mountPane({}, undefined, (url) => {
+        if (url.endsWith("/fit-page")) return { width: 1128, height: 2360, whole: true };
+        if (url.endsWith("/viewport")) return { width: 1128, height: 484 };
+        return { url: "http://shop.test/product" };
+      });
+      await h.hello(true);
+      sizeStage(h.surface, { left: 0, top: 0, width: 1144, height: 500 });
+      await act(async () => { vi.advanceTimersByTime(400); });
+
+      await act(async () => { fireEvent.click(screen.getByText(/^Page/)); });
+      await act(async () => { vi.advanceTimersByTime(400); });
+
+      const asked = h.calls.filter((c) => c.url.endsWith("/fit-page"));
+      expect(asked.length, "choosing Page must ask for a page-shaped viewport").toBeGreaterThan(0);
+      expect((asked[0].body as { width: number }).width).toBe(1144 - 16);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says so when a page cannot be shown whole", async () => {
+    // The ShopGym cart never converges: its carousels render more content as the
+    // viewport grows, so the height chases itself. Claiming "no scrolling" there
+    // would be a lie the annotator discovers by scrolling.
+    vi.useFakeTimers();
+    try {
+      const h = await mountPane({}, undefined, (url) => {
+        if (url.endsWith("/fit-page")) return { width: 1128, height: 3112, whole: false };
+        if (url.endsWith("/viewport")) return { width: 1128, height: 484 };
+        return { url: "http://shop.test/cart" };
+      });
+      await h.hello(true);
+      sizeStage(h.surface, { left: 0, top: 0, width: 1144, height: 500 });
+      await act(async () => { vi.advanceTimersByTime(400); });
+      await act(async () => { fireEvent.click(screen.getByText(/^Page/)); });
+      await act(async () => { vi.advanceTimersByTime(400); });
+
+      expect(screen.getByText(/^Page/).textContent).toContain("*");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {
     // The recorder batches, so a pane that closes without flushing loses exactly
     // the interactions somebody was mid-way through making.
