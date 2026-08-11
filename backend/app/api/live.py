@@ -202,8 +202,11 @@ def _live_request(method: str, path: str, body: dict | None = None, timeout: int
         ) from exc
 
 
-def _open_browser(url: str, owner: str) -> dict:
-    status, payload = _live_request("POST", "/live/sessions", {"url": url, "owner": owner})
+def _open_browser(url: str, owner: str, *, extra_urls: list[str] | None = None) -> dict:
+    body: dict = {"url": url, "owner": owner}
+    if extra_urls:
+        body["extra_urls"] = extra_urls
+    status, payload = _live_request("POST", "/live/sessions", body)
     if status != 200 or not payload.get("session_id"):
         raise HTTPException(
             status_code=409,
@@ -496,7 +499,10 @@ def _open_cua_session(db: Session, s, task, current: models.Annotator) -> dict:
     for a in apps:
         a["url"] = _browser_visible(a["url"])
     start_url = primary["url"]
-    opened = _open_browser(start_url, current.email)
+    # Pre-open every other app as a background tab so the annotator sees a real
+    # multi-window ecosystem from the first frame, not tabs that appear on demand.
+    extra_urls = [a["url"] for a in apps if a.get("url") and a["url"] != start_url and not a.get("error")]
+    opened = _open_browser(start_url, current.email, extra_urls=extra_urls)
     entry = _Attached(
         live_session_id=str(opened["session_id"]),
         owner=current.email,

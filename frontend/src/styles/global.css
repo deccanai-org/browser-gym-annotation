@@ -1,11 +1,12 @@
 /* ============================================================
    Global entry — fonts + DS tokens + minimal base/reset.
-   Tokens are the vendored Deccan Vault values (colors, type,
-   spacing, radius, shadows, effects). Fonts are self-hosted.
+   Tokens are the Deccan AI Experts values (colors, type, spacing,
+   radius, shadows, effects, the wash). Fonts are self-hosted.
    ============================================================ */
 
 @import "./fonts.css";
 @import "./tokens/colors.css";
+@import "./tokens/backgrounds.css";
 @import "./tokens/typography.css";
 @import "./tokens/spacing.css";
 @import "./tokens/radius.css";
@@ -29,34 +30,45 @@ body {
   font-size: var(--text-body);
   line-height: var(--leading-body);
   color: var(--text-primary);
-  background: var(--surface-page);
+  /* The wash is fixed so a long page keeps one continuous gradient
+     rather than repeating it per viewport. */
+  background: var(--bg-wash) fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  text-wrap: pretty;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  letter-spacing: var(--tracking-heading);
+  line-height: var(--leading-heading);
 }
 
 button {
   font-family: inherit;
 }
 
-/* Page scrollbars — per the design spec (10px, 3px transparent
-   inset, thumb clipped to content-box). */
+/* Page scrollbars — 10px, 3px transparent inset, thumb clipped to
+   content-box. Warm-tinted per "no greys as fills, ever". */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--neutrals-6) transparent;
+  scrollbar-color: var(--neutrals-5) transparent;
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--neutrals-6);
+  background: var(--neutrals-5);
   border: 3px solid transparent;
   background-clip: content-box;
   border-radius: var(--radius-lg);
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: var(--neutrals-5);
+  background: var(--neutrals-4);
   border: 3px solid transparent;
   background-clip: content-box;
 }

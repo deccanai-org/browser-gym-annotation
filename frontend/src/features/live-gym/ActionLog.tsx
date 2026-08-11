@@ -17,6 +17,8 @@ import { useState } from "react";
 
 import { Icon } from "../../ds/Icon";
 import { t, weight } from "../../ds";
+import { APP_COLOR } from "../../lib/appColors";
+import type { AppKey } from "../../lib/types";
 
 export interface LoggedStep {
   stepId: string;
@@ -34,13 +36,6 @@ export interface LoggedStep {
   stateChange?: string;
   deltaSpan?: string[];
 }
-
-/** Per-app dot colours, so a mail-side effect of a shop action reads at a
- *  glance — the cross-app signal these tasks exist to test. */
-const APP_DOT: Record<string, string> = {
-  shop: "#f59e0b", mail: "#dc2626", market: "#2563eb",
-  calendar: "#16a34a", food: "#7c3aed",
-};
 
 /** What the step did to the WORLD, under what it did to the page.
  *
@@ -66,8 +61,11 @@ function StateChange({ step }: { step: LoggedStep }) {
                    flexWrap: "wrap", alignItems: "center", gap: 6 }}>
       {apps.map((a) => (
         <span key={a} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-          <span aria-hidden style={{ width: 6, height: 6, borderRadius: 999,
-                                     background: APP_DOT[a] ?? t.n3 }} />
+          {/* Same per-app hue as the tab bar and dock, so a mail-side effect
+              of a shop action reads at a glance — the cross-app signal these
+              tasks exist to test. */}
+          <span aria-hidden style={{ width: 6, height: 6, borderRadius: t.radiusFull,
+                                     background: APP_COLOR[a as AppKey] ?? t.n3 }} />
           <span style={{ fontWeight: weight.medium }}>{a}</span>
         </span>
       ))}
@@ -77,11 +75,11 @@ function StateChange({ step }: { step: LoggedStep }) {
 }
 
 const STATE_STYLE: Record<string, { dot: string; label: string }> = {
-  verified: { dot: "#16a34a", label: "verified" },
-  diverged: { dot: "#dc2626", label: "did not replay" },
-  needs_value: { dot: "#d97706", label: "needs a value" },
-  failed: { dot: "#dc2626", label: "failed" },
-  unverified: { dot: "#94a3b8", label: "not yet proven" },
+  verified: { dot: t.green, label: "verified" },
+  diverged: { dot: t.red, label: "did not replay" },
+  needs_value: { dot: t.yellow, label: "needs a value" },
+  failed: { dot: t.red, label: "failed" },
+  unverified: { dot: t.n4, label: "not yet proven" },
 };
 
 export interface ActionLogProps {
@@ -90,11 +88,17 @@ export interface ActionLogProps {
    *  means the trajectory is incomplete from that point on. */
   queued?: number;
   dropped?: number;
+  /** Steps recorded WITHOUT a locator, because the page could not be asked what
+   *  was under the pointer. A different fact from a dropped interaction: the step
+   *  exists and the action happened, it just may not replay. It used to be counted
+   *  as `dropped`, which told annotators their trajectory had a hole in it when it
+   *  did not — so it gets its own, quieter line. */
+  unnamed?: number;
   onCertify?: () => void;
   certifying?: boolean;
 }
 
-export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifying }: ActionLogProps) {
+export function ActionLog({ steps, queued = 0, dropped = 0, unnamed = 0, onCertify, certifying }: ActionLogProps) {
   const counts = steps.reduce<Record<string, number>>((acc, s) => {
     const k = s.replayState || "unverified";
     acc[k] = (acc[k] ?? 0) + 1;
@@ -192,9 +196,30 @@ export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifyin
       {dropped > 0 && (
         // Loud on purpose: silently losing the middle of a task is the one
         // failure an annotator can neither see nor recover from.
-        <div role="alert" style={{ padding: "8px 12px", background: "#7f1d1d", color: "#fff", fontSize: "0.72rem" }}>
+        //
+        // It now also says what to DO. The alert used to end at "the trajectory is
+        // incomplete from here", which is alarming and unactionable — and it fired
+        // for clicks that had in fact been recorded and merely lacked a locator
+        // (that case is the quieter line below now). When it does fire, the work
+        // from that point on is not trustworthy, and the only real remedy is to
+        // restart the task rather than ship a trajectory with a hole in it.
+        <div role="alert" style={{ padding: "8px 12px", background: t.redDark, color: t.n9, fontSize: "0.72rem" }}>
           {dropped} interaction{dropped === 1 ? "" : "s"} were lost — the trajectory is
-          incomplete from here.
+          incomplete from here. Anything after this point may not replay: restart the
+          task from step 1 rather than shipping it.
+        </div>
+      )}
+
+      {unnamed > 0 && dropped === 0 && (
+        // Amber, not red, and deliberately below the alert: these steps WERE
+        // recorded and did happen. They just have no semantic locator, so they
+        // replay by coordinate at best and may not survive a page that renders
+        // slightly differently.
+        <div role="status" style={{ padding: "8px 12px", background: t.yellowDark, color: t.n9, fontSize: "0.72rem" }}>
+          {unnamed} step{unnamed === 1 ? "" : "s"} could not identify the element
+          {unnamed === 1 ? " it" : " they"} acted on, so {unnamed === 1 ? "it replays" : "they replay"} by
+          position only. Check the steps below name what you clicked; if they read as a
+          bare “click”, reload the page and redo those steps.
         </div>
       )}
 
@@ -219,7 +244,7 @@ export function ActionLog({ steps, queued = 0, dropped = 0, onCertify, certifyin
                              fontVariantNumeric: "tabular-nums" }}>
                 {s.index + 1}
               </span>
-              <span aria-hidden style={{ width: 8, height: 8, borderRadius: 999, marginTop: 5,
+              <span aria-hidden style={{ width: 8, height: 8, borderRadius: t.radiusFull, marginTop: 5,
                                          background: st.dot, flex: "0 0 auto" }} />
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: "0.78rem", overflowWrap: "anywhere" }}>

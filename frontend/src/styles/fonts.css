@@ -1,45 +1,96 @@
 /* ============================================================
-   Deccan Vault — Webfonts (self-hosted)
-   Cleaned from the vendored DS fonts.css:
-   · Inter Display 400/500/700/900 — UI & body (SIL OFL 1.1)
-   · JetBrains Mono 400/500/700 — code / IDs / counts / meters
-     (SIL OFL 1.1; self-hosted, NOT the Google CDN @import)
-   · Season Mix REMOVED — the shipped file is a TRIAL cut whose
-     license forbids serving; no component uses --font-display,
-     which falls back to Inter Display.
-   Note: Inter Display SemiBold (600) not shipped; CSS weight 600
-   resolves to Bold (700) per font-matching — matches the DS.
+   Deccan AI Experts — Webfonts (self-hosted)
+   The DS ships these as a Google Fonts @import; we self-host the
+   latin/latin-ext woff2 subsets instead so the container serves a
+   themed app with no third-party request and no FOUT offline.
+   · Figtree 300–900 (variable) — UI & body            (SIL OFL 1.1)
+   · Poppins 400/500/600/700 — wordmark / display voice (SIL OFL 1.1)
+   · Playfair Display 400–700 (variable) — the "Experts"
+     editorial serif, used sparingly where the brand signs
+     something                                          (SIL OFL 1.1)
+   · JetBrains Mono 400/500/700 — code / IDs / counts / meters.
+     Not a DS face: the DS is a slide system and defines no mono,
+     but IDs and metrics here need tabular figures.     (SIL OFL 1.1)
    ============================================================ */
 
+/* ---- Figtree — variable, covers every UI weight ------------ */
 @font-face {
-  font-family: "Inter Display";
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url("/fonts/Figtree-Variable-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url("/fonts/Figtree-Variable-latinext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+/* ---- Poppins — the wordmark / display voice ---------------- */
+@font-face {
+  font-family: "Poppins";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("/fonts/InterDisplay-Regular.ttf") format("truetype");
+  src: url("/fonts/Poppins-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
-  font-family: "Inter Display";
+  font-family: "Poppins";
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url("/fonts/InterDisplay-Medium.ttf") format("truetype");
+  src: url("/fonts/Poppins-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
-  font-family: "Inter Display";
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/Poppins-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Poppins";
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: url("/fonts/InterDisplay-Bold.ttf") format("truetype");
-}
-@font-face {
-  font-family: "Inter Display";
-  font-style: normal;
-  font-weight: 900;
-  font-display: swap;
-  src: url("/fonts/InterDisplay-Black.ttf") format("truetype");
+  src: url("/fonts/Poppins-700-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
+/* ---- Playfair Display — variable, the "Experts" serif ------ */
+@font-face {
+  font-family: "Playfair Display";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/PlayfairDisplay-Variable-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ---- JetBrains Mono — IDs, counts, meters ------------------ */
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;

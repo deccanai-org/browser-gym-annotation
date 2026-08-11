@@ -15,7 +15,7 @@ import {
   saveSuite,
   submitSession,
 } from "../../lib/api";
-import { continuingAfter, FORK_COPY, headOf, rejecting, type VersionNode } from "../../lib/versionsApi";
+import { continuingAfter, FORK_COPY, headOf, rejecting, setStatusOrReload, type VersionNode } from "../../lib/versionsApi";
 import type {AutogenResult, CachedAutogenSuite, VerifierPayload} from "../../lib/api";
 import type {ReviewData, Verifier} from "../../lib/types";
 import type { VerifierLevel } from "../../ds";
@@ -59,7 +59,7 @@ const DIALOG = { role: "dialog", "aria-modal": true, tabIndex: -1 } as const;
 function SectionHeader({ n, title, subtitle, done, right }: { n: number; title: string; subtitle: string; done?: boolean; right?: ReactNode }) {
   const active = n === 1 || done;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "2px 4px 12px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 4px 8px" }}>
       <span style={{ width: 22, height: 22, borderRadius: t.radiusFull, background: n === 1 ? t.primary6 : done ? t.green : t.n4, color: t.n9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontFamily: t.fontMono, fontSize: "0.75rem", fontWeight: weight.bold }}>{n}</span>
       <span style={{ fontSize: "0.875rem", fontWeight: weight.bold, color: active ? t.n0 : t.n2, flexShrink: 0 }}>{title}</span>
       {/* Truncates: with the brief folded this carries the task prompt, and a
@@ -194,19 +194,24 @@ export function ReviewSurface({ session, attemptId, owner, versionId, opening, e
   // Interactions the recorder had to drop. The alert for this already existed in
   // the action log and could never fire, because nothing passed the count.
   const [dropped, setDropped] = useState(0);
+  // Steps recorded without a locator — a separate fact with a separate remedy,
+  // and previously reported as a DROP, which said the trajectory was incomplete
+  // when in truth it was complete but thinner than it should be.
+  const [unnamed, setUnnamed] = useState(0);
   if (!session) return <GymPlaceholder opening={opening} error={error} onRetry={onRetry} />;
   return (
     <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
       <div style={{ flex: 1, minWidth: 0, display: "flex" }}>
         <LiveBrowserPane
           onDropped={setDropped}
+          onUnnamedTarget={setUnnamed}
           attemptId={attemptId}
           session={session}
           owner={owner}
           apps={session?.apps ?? null}
         />
       </div>
-      {attemptId && <LiveActionLog attemptId={attemptId} versionId={versionId ?? null} dropped={dropped} />}
+      {attemptId && <LiveActionLog attemptId={attemptId} versionId={versionId ?? null} dropped={dropped} unnamed={unnamed} />}
     </div>
   );
 }
@@ -237,8 +242,8 @@ function GymPlaceholder({ opening, error, onRetry }: { opening?: boolean; error?
           <div style={{ fontSize: "0.76rem", color: t.n2 }}>
             Seeding all five apps with this task's world.
           </div>
-          <div style={{ marginTop: 4, width: 220, height: 4, background: t.n7, borderRadius: 3, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: "40%", background: t.primary6, borderRadius: 3, animation: "gymbar 1.1s ease-in-out infinite" }} />
+          <div style={{ marginTop: 4, width: 220, height: 4, background: t.n7, borderRadius: t.radiusPill, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: "40%", background: t.primary6, borderRadius: t.radiusPill, animation: "gymbar 1.1s ease-in-out infinite" }} />
           </div>
           <style>{"@keyframes gymbar{0%{margin-left:-40%}100%{margin-left:100%}}"}</style>
         </>
@@ -248,7 +253,7 @@ function GymPlaceholder({ opening, error, onRetry }: { opening?: boolean; error?
 }
 
 /** Polls the head version's steps while the annotator works. */
-function LiveActionLog({ attemptId, versionId, dropped = 0 }: { attemptId: string; versionId: string | null; dropped?: number }) {
+function LiveActionLog({ attemptId, versionId, dropped = 0, unnamed = 0 }: { attemptId: string; versionId: string | null; dropped?: number; unnamed?: number }) {
   const [steps, setSteps] = useState<LoggedStep[]>([]);
   const [certifying, setCertifying] = useState(false);
   const [head, setHead] = useState<string | null>(versionId);
@@ -287,6 +292,7 @@ function LiveActionLog({ attemptId, versionId, dropped = 0 }: { attemptId: strin
     <ActionLog
       steps={steps}
       dropped={dropped}
+      unnamed={unnamed}
       certifying={certifying}
       onCertify={async () => {
         setCertifying(true);
@@ -360,7 +366,7 @@ function VersionPathGuide({ head }: { head: VersionNode | null }) {
  * upward is one small `Lineage` — the screen has to know which correction path
  * to render, and only this panel knows.
  */
-export function LineagePanel({ sessionId, sessionSettled = true, isGym, onLineage }: {
+export function LineagePanel({ sessionId, sessionSettled = true, isGym, hidden = false, onLineage }: {
   sessionId: string | null;
   /** Has the open ANSWERED? Not the same as whether it produced a session. While
    *  it is still in flight, "no session" must not be read as "no versions" — that
@@ -368,6 +374,10 @@ export function LineagePanel({ sessionId, sessionSettled = true, isGym, onLineag
    *  duration of the opening POST, which is the exact window this closes. */
   sessionSettled?: boolean;
   isGym: boolean;
+  /** Human-do gym pilot: the trajectory lives in the live ActionLog and shipping
+   *  moves to step 3 — the version-graph explorer is agent-review chrome. The
+   *  hooks still run so the screen knows which path and head to ship. */
+  hidden?: boolean;
   onLineage?: (l: Lineage) => void;
 }) {
   const versions = useVersionGraph(sessionId);
@@ -413,6 +423,8 @@ export function LineagePanel({ sessionId, sessionSettled = true, isGym, onLineag
 
   const viewed = versions.graph?.versions.find((v) => v.id === viewing) ?? null;
   const versionNos = Object.fromEntries((versions.graph?.versions ?? []).map((v) => [v.id, v.versionNo]));
+
+  if (hidden) return null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -549,7 +561,7 @@ async function shipVersion(
  * nothing to somebody who has never read the schema — and every reason it cannot
  * run yet is written as the thing to go and do.
  */
-function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipped }: {
+function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipped, onShipGatesChanged }: {
   sessionId: string | null;
   head: VersionNode | null;
   /** What the SERVER says still blocks this ship, from `prepare-ship`. It reads
@@ -560,17 +572,22 @@ function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipp
   kind: string;
   alreadyShipped: boolean;
   onShipped: (r: ShipResult) => void;
+  /** Re-read prepare-ship after an action that clears a gate (e.g. approval). */
+  onShipGatesChanged?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [shipped, setShipped] = useState<ShipResult | null>(null);
 
   const v = head ? `v${head.versionNo}` : "this version";
+  const needsApproval = blockers.some((b) => b.code === "not_approved");
+  const otherBlockers = blockers.filter((b) => b.code !== "not_approved");
+  const approveOnly = needsApproval && otherBlockers.length === 0;
   // Only the one thing the server cannot tell us: there is no server.
   const offline = !sessionId
     ? "This attempt was never saved — the backend is offline, so there is nothing to ship."
     : null;
-  const blocker = offline ?? (blockers.length ? blockers[0].message : null);
+  const blocker = offline ?? (approveOnly ? null : blockers.length ? "blocked" : null);
 
   const shell = { background: t.n9, border: `1px solid ${t.n7}`, borderRadius: t.radiusXl, boxShadow: t.shadowMd, padding: "16px 22px", display: "flex", flexDirection: "column" as const, gap: 12 };
 
@@ -610,6 +627,31 @@ function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipp
               {b.message}
             </span>
           ))}
+        </div>
+      ) : approveOnly ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <Button
+            variant="primary"
+            disabled={busy || !sessionId || !head}
+            style={{ minHeight: 44 }}
+            onClick={async () => {
+              if (!sessionId || !head) return;
+              setBusy(true);
+              setError(null);
+              const out = await setStatusOrReload(sessionId, head.id, "approved", head.revision);
+              setBusy(false);
+              if (!out.ok) {
+                setError(out.notice ?? "Could not approve this trajectory.");
+                return;
+              }
+              onShipGatesChanged?.();
+            }}
+          >
+            {busy ? "Approving…" : `Approve ${v} to ship`}
+          </Button>
+          <span style={{ fontSize: "0.74rem", lineHeight: 1.5, color: t.n3, maxWidth: 420 }}>
+            Your recorded trajectory must be approved before it can be replayed and frozen as the sample.
+          </span>
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
@@ -656,7 +698,7 @@ function FinalizeDock({ sessionId, head, blockers, kind, alreadyShipped, onShipp
  *  the one surface in the product that has to be legible. */
 function Frame({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
-    <div style={{ maxWidth: wide ? 2200 : 1440, width: "100%", margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.n85, border: `1px solid ${t.n7}` }}>
+    <div style={{ maxWidth: wide ? 2200 : 1440, width: "100%", margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column", background: t.surfacePage, border: `1px solid ${t.n7}` }}>
       {children}
     </div>
   );
@@ -698,6 +740,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
   // Asking the server beats re-deriving its rules here, which is how the dock
   // came to gate on a benchmark a human-do attempt can never run.
   const [shipBlockers, setShipBlockers] = useState<ShipBlocker[]>([]);
+  const [shipGatesRefresh, setShipGatesRefresh] = useState(0);
   useEffect(() => {
     if (!sessionId) { setShipBlockers([]); return; }
     let live = true;
@@ -708,7 +751,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
         if (live) setShipBlockers([{ code: "unknown", message: e instanceof Error ? e.message : String(e) }]);
       });
     return () => { live = false; };
-  }, [sessionId, lineage.head?.id, lineage.head?.status, lineage.path]);
+  }, [sessionId, lineage.head?.id, lineage.head?.status, lineage.path, shipGatesRefresh]);
   const versioned = lineage.path === "versions";
   const legacy = lineage.path === "legacy";
   const [promptOverride, setPromptOverride] = useState<string | null>(null);
@@ -1058,7 +1101,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
     <Frame wide>
       <Header {...nav} />
       {liveNotice && <Toast message={liveNotice} onDismiss={() => setLiveNotice(null)} bottom={24} />}
-      <div style={{ padding: "16px 16px 8px" }}>
+      <div style={{ padding: "8px 12px 6px" }}>
         <SectionHeader n={1} title="Do the task" subtitle={
           // With the brief folded this IS the brief, so it carries the prompt
           // rather than a description of what the screen is for. Unfolded it
@@ -1104,11 +1147,13 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
           </div>
         } />
         {/* Section 1 fills exactly the first screen: viewport minus the header
-            (56) + this block's padding (16+8) + the section header (~36) + a small
+            (56) + this block's padding (8+6) + the section header (~32) + a small
             buffer. Getting this wrong makes the page scroll, sliding the replay's
             tab-strip/URL bar up under the sticky header (clipping). minHeight kept
-            modest so short viewports degrade gracefully instead of forcing overflow. */}
-        <div style={{ display: "flex", gap: 16, height: "calc(100dvh - 134px)", minHeight: 440 }}>
+            modest so short viewports degrade gracefully instead of forcing overflow.
+            Every pixel taken off this number is page the annotator gets, which is
+            why the padding around it is as thin as it is. */}
+        <div style={{ display: "flex", gap: 12, height: "calc(100dvh - 112px)", minHeight: 440 }}>
           <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
             <ReviewSurface
               session={liveSession}
@@ -1139,13 +1184,10 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
         {/* The lineage of THIS run: v1, every correction hanging off it, and the
             per-step verdicts. It sits with the trace it describes rather than
             behind a modal — deciding which version is the attempt's answer is
-            part of reviewing the run, not a separate errand. */}
-        <div style={{ padding: "16px 16px 0", display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* Rounds recorded on the retired path before this attempt was
-              versioned. They belong to no version, so finalize cannot ship them
-              — saying so is the only honest thing to do with work that is
-              already in the database and cannot be migrated. */}
-          {versioned && state.rerunFrom != null && (
+            part of reviewing the run, not a separate errand. Hidden on gym
+            attempts: the live ActionLog is the trajectory, and shipping is step 3. */}
+        {versioned && state.rerunFrom != null && (
+          <div style={{ padding: "16px 16px 0" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: tint(t.yellow, 14), border: `1px solid ${t.n7}`, borderRadius: t.radiusLg }}>
               <Icon name="alert" size={14} color={t.yellowDark} style={{ flexShrink: 0 }} />
               <span style={{ flex: 1, fontSize: "0.75rem", lineHeight: 1.5, color: t.n1 }}>
@@ -1153,9 +1195,15 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
                 version, so finalizing will not ship them — the lineage below is what ships.
               </span>
             </div>
-          )}
-          <LineagePanel sessionId={sessionId} sessionSettled={sessionSettled} isGym={data.source === "gym"} onLineage={setLineage} />
+          </div>
+        )}
+        {data.source === "gym" ? (
+          <LineagePanel sessionId={sessionId} sessionSettled={sessionSettled} isGym hidden onLineage={setLineage} />
+        ) : (
+        <div style={{ padding: "16px 16px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+          <LineagePanel sessionId={sessionId} sessionSettled={sessionSettled} isGym={false} onLineage={setLineage} />
         </div>
+        )}
       </div>
 
       <div style={{ padding: "8px 16px 24px" }}>
@@ -1206,6 +1254,7 @@ export function ReviewScreen({ data, nav, startFresh, onStartNew, briefOpen = fa
             blockers={shipBlockers}
             kind={reward(state) === 1 ? "golden" : "breaker"}
             alreadyShipped={state.submitted || status === "submitted"}
+            onShipGatesChanged={() => setShipGatesRefresh((n) => n + 1)}
             onShipped={(r) => {
               // The server has frozen the sample; mirror that into the screen so
               // the rest of it locks the same way a legacy submit locks it.
@@ -1259,7 +1308,7 @@ function AutogenPanel({ result, onClose, onUse, using }: {
   useModalA11y(onClose, dialogRef);
   const ok = result.oracle;
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55 }}>
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--overlay-backdrop)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55 }}>
       <div ref={dialogRef} {...DIALOG} aria-label="Generated verifier suite" onClick={(e) => e.stopPropagation()} style={{ width: 660, maxHeight: "80vh", background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, display: "flex", flexDirection: "column", overflow: "hidden", outline: "none" }}>
         <div style={{ padding: "18px 20px 14px", borderBottom: `1px solid ${t.n7}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1267,7 +1316,7 @@ function AutogenPanel({ result, onClose, onUse, using }: {
             <span onClick={onClose} style={{ cursor: "pointer", color: t.n3, display: "inline-flex" }}><Icon name="close" size={18} /></span>
           </div>
           <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ padding: "3px 9px", borderRadius: 6, fontSize: "0.72rem", fontWeight: weight.bold, background: ok ? t.greenLite : t.redLite, color: ok ? t.greenDark : t.redDark }}>
+            <span style={{ padding: "3px 9px", borderRadius: t.radiusSm, fontSize: "0.72rem", fontWeight: weight.bold, background: ok ? t.greenLite : t.redLite, color: ok ? t.greenDark : t.redDark }}>
               {ok ? "✓ Oracle-valid (0 on initial · 1 on golden)" : "Not oracle-valid"}
             </span>
             <span style={{ fontSize: "0.75rem", color: t.n2 }}>
@@ -1281,7 +1330,7 @@ function AutogenPanel({ result, onClose, onUse, using }: {
             const isPolicy = (v.check as { kind?: string }).kind === "trace_policy";
             return (
               <div key={v.id} style={{ padding: "9px 20px", borderBottom: `1px solid ${t.n8}`, display: "flex", gap: 10, alignItems: "flex-start" }}>
-                <span style={{ marginTop: 1, padding: "2px 7px", borderRadius: 5, fontSize: "0.64rem", fontWeight: weight.bold, textTransform: "uppercase", background: isPolicy ? "color-mix(in srgb, #a855f7 15%, transparent)" : t.surfaceTint, color: isPolicy ? "#7c3aed" : t.n2, whiteSpace: "nowrap" }}>{isPolicy ? "policy" : v.level}</span>
+                <span style={{ marginTop: 1, padding: "2px 7px", borderRadius: t.radiusSm, fontSize: "0.64rem", fontWeight: weight.bold, textTransform: "uppercase", background: isPolicy ? tint(t.purple, 15) : t.surfaceTint, color: isPolicy ? t.purple : t.n2, whiteSpace: "nowrap" }}>{isPolicy ? "policy" : v.level}</span>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: "0.83rem", color: t.n1 }}>{v.assertion}</div>
                   <div style={{ marginTop: 2, fontFamily: t.fontMono, fontSize: "0.7rem", color: t.n3, wordBreak: "break-word" }}>{JSON.stringify(v.check)}</div>
@@ -1321,7 +1370,7 @@ function GymPicker({ onClose, onPick }: { onClose: () => void; onPick: (id: stri
   }, []);
   const list = (all ?? []).filter((id) => id.toLowerCase().includes(q.toLowerCase())).slice(0, 200);
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--overlay-backdrop)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
       <div ref={dialogRef} {...DIALOG} aria-label="Load a gym task" onClick={(e) => e.stopPropagation()} style={{ width: 620, maxHeight: "76vh", background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, display: "flex", flexDirection: "column", overflow: "hidden", outline: "none" }}>
         <div style={{ padding: "18px 20px 12px", borderBottom: `1px solid ${t.n7}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1364,12 +1413,12 @@ function GymPicker({ onClose, onPick }: { onClose: () => void; onPick: (id: stri
 function GymLoading({ taskId, phase }: { taskId: string; phase: "queued" | "running" | "done" | "error" }) {
   const heading = phase === "queued" ? "Queued — waiting for the gym…" : "Running the agent in the gym…";
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(13,13,13,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
+    <div style={{ position: "fixed", inset: 0, background: "var(--overlay-backdrop)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
       <div style={{ width: 420, background: t.n9, borderRadius: t.radius2xl, boxShadow: t.shadowXl, padding: 26, textAlign: "center" }}>
         <div style={{ fontSize: "1rem", fontWeight: weight.bold, color: t.n0 }}>{heading}</div>
         <div style={{ marginTop: 8, fontSize: "0.84rem", color: t.n2, lineHeight: 1.5 }}>Driving a real browser through <span style={{ fontFamily: t.fontMono, fontSize: "0.78rem" }}>{taskId}</span> and scoring it with the real milestone verifiers. This takes a few seconds.</div>
-        <div style={{ marginTop: 16, height: 4, background: t.n7, borderRadius: 3, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: "40%", background: t.primary6, borderRadius: 3, animation: "gymbar 1.1s ease-in-out infinite" }} />
+        <div style={{ marginTop: 16, height: 4, background: t.n7, borderRadius: t.radiusPill, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: "40%", background: t.primary6, borderRadius: t.radiusPill, animation: "gymbar 1.1s ease-in-out infinite" }} />
         </div>
         <style>{"@keyframes gymbar{0%{margin-left:-40%}100%{margin-left:100%}}"}</style>
       </div>

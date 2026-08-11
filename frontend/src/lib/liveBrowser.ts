@@ -130,24 +130,57 @@ export interface OpenedSession {
   viewport: Viewport;
 }
 
+/**
+ * One REST answer, with the FACT of failure preserved.
+ *
+ * `json()` collapses every failure into null, which is right for a caller whose
+ * answer is optional and wrong for `describe`: "nothing under the pointer" and
+ * "the call failed" are both falsy and mean opposite things. A ticket that had
+ * aged out answered 403, `describeAt` turned that into `{}`, and the pane could
+ * not tell it from a click on the page background — so it recorded a click with
+ * no locator, described downstream as a bare "click", and counted it as a lost
+ * interaction. Whole sessions went blind this way with no error anywhere.
+ */
+interface Answer<T> {
+  /** A 2xx with a body we could parse. */
+  ok: boolean;
+  /** 0 when the request never reached the service at all. */
+  status: number;
+  value: T | null;
+}
+
+async function call<T>(
+  url: string,
+  body: unknown,
+  opts: RestOptions | undefined,
+  method = "POST",
+): Promise<Answer<T>> {
+  const f = opts?.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await f(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    return { ok: false, status: 0, value: null };
+  }
+  if (!res.ok) return { ok: false, status: res.status, value: null };
+  try {
+    return { ok: true, status: res.status, value: (await res.json()) as T };
+  } catch {
+    return { ok: false, status: res.status, value: null };
+  }
+}
+
 async function json<T>(
   url: string,
   body: unknown,
   opts: RestOptions | undefined,
   method = "POST",
 ): Promise<T | null> {
-  const f = opts?.fetchImpl ?? fetch;
-  try {
-    const res = await f(url, {
-      method,
-      headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
+  return (await call<T>(url, body, opts, method)).value;
 }
 
 function liveBase(opts?: RestOptions): string {
@@ -200,19 +233,32 @@ export async function liveSessionInfo(sessionId: string, opts?: RestOptions): Pr
  *  redaction and `semantic_locator` read (`type`, `name`, `autocomplete`,
  *  `testId`, `role`, `label`) comes from here, which is why a recorded click
  *  carries a semantic target instead of a pixel. Read BEFORE dispatching: once
- *  the action lands the element may not exist. */
+ *  the action lands the element may not exist.
+ *
+ *  `null` means WE COULD NOT ASK — the service refused the ticket, or the round
+ *  trip failed. `{}` means we asked and there is genuinely nothing there. This
+ *  used to collapse both into `{}`, which is the whole of the bare-`click` bug:
+ *  a ticket that had aged past LIVE_TICKET_TTL_S answers 403 to every REST call
+ *  while the already-authorised websocket keeps applying input happily, so the
+ *  pane went on driving the browser and recording every click with no locator at
+ *  all. Reproduced against the service: after expiry, `/describe` -> 403 while
+ *  the same click over the socket still acked applied and still carried `focus`
+ *  — which is exactly why the recorded fills kept their names and the clicks
+ *  lost theirs. The caller can now re-ticket and ask again instead. */
 export async function describeAt(
   sessionId: string,
   ticket: string,
   p: NormPoint,
   opts?: RestOptions,
-): Promise<Record<string, string>> {
-  const out = await json<Record<string, string>>(
+): Promise<Record<string, string> | null> {
+  // `call`, not `json`: the distinction this function promises has to come from
+  // the HTTP result rather than from the body happening to be falsy.
+  const out = await call<Record<string, string>>(
     `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/describe`,
     { x: p.nx, y: p.ny, ticket },
     opts,
   );
-  return out ?? {};
+  return out.ok ? (out.value ?? {}) : null;
 }
 
 /** The text currently selected in the remote page.
@@ -222,18 +268,24 @@ export async function describeAt(
  *  It is what distinguishes a READING from a drag — at the wire level both are a
  *  press, a move and a release, and a selection recorded as a drag makes the
  *  whole trajectory unshippable because the executor has no drag action.
+ *
+ *  It is also what a local Cmd+C reads: the page lives in a remote headless
+ *  Chromium, so a remote copy writes to the REMOTE clipboard and the annotator's
+ *  own never sees it. `null` distinguishes "we could not ask" from "nothing is
+ *  selected" — the difference between telling them the copy failed and silently
+ *  putting an empty string on their clipboard.
  */
 export async function readSelection(
   sessionId: string,
   ticket: string,
   opts?: RestOptions,
-): Promise<string> {
+): Promise<string | null> {
   const out = await json<{ text: string }>(
     `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/selection`,
     { ticket },
     opts,
   );
-  return out?.text ?? "";
+  return out === null ? null : out.text ?? "";
 }
 
 /** Size the viewport so the WHOLE page fits, with no scrolling at all.
@@ -321,18 +373,23 @@ export async function selectAt(
  *  CLICKED element is how a password typed into a Tab-reached field ends up
  *  recorded against the email field, where the backend's redaction cannot see
  *  it. Returns `{}` when nothing is focused, which the backend treats as
- *  sensitive rather than safe. */
+ *  sensitive rather than safe.
+ *
+ *  `null` when the question could not be ASKED, for the same reason as
+ *  `describeAt`: an aged ticket 403s every REST call, and a failure that reads
+ *  as "nothing is focused" makes consecutive keystrokes in one field compare as
+ *  different elements — which is how one word came out as two `fill` steps,
+ *  "monito" and then "monitor". */
 export async function describeFocused(
   sessionId: string,
   ticket: string,
   opts?: RestOptions,
-): Promise<Record<string, string>> {
-  const out = await json<Record<string, string>>(
+): Promise<Record<string, string> | null> {
+  return json<Record<string, string>>(
     `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/focused`,
     { ticket },
     opts,
   );
-  return out ?? {};
 }
 
 /** What the page looked like: url, title, viewport, scroll, visible text and the
@@ -354,6 +411,128 @@ export async function observePage(
     opts,
   );
   return out ?? {};
+}
+
+// --------------------------------------------------------------------------- clipboard
+//
+// The page lives in a REMOTE headless Chromium, so the two clipboards involved
+// are not the same clipboard. Forwarding Cmd+C to the page (which is what the
+// pane used to do) copies the selection onto the remote OS clipboard, where
+// nothing the annotator can paste into will ever see it; forwarding Cmd+V pastes
+// whatever the remote clipboard happens to hold, which is not what they copied
+// from ShopMail. Every cross-app task that asks them to carry an order id or a
+// total from one app to another runs through this, so the accelerators are
+// handled HERE, locally, and only the resulting text crosses the wire.
+
+/** Whether the clipboard API can be used at all.
+ *
+ *  It requires a secure context. `http://localhost` IS one by spec (browsers
+ *  treat loopback as potentially trustworthy), so the pane works on the dev
+ *  stack — but a hosted deploy reached over plain http on a LAN address is not,
+ *  and there `navigator.clipboard` is simply undefined. That must degrade, not
+ *  silently no-op, which is what the fallbacks below are for. */
+export function clipboardApiAvailable(nav: unknown = globalThis.navigator): boolean {
+  const c = (nav as { clipboard?: { writeText?: unknown; readText?: unknown } } | undefined)?.clipboard;
+  return typeof c?.writeText === "function";
+}
+
+/**
+ * Put `text` on the ANNOTATOR's clipboard. Reports whether it landed.
+ *
+ * The `execCommand` fallback is not legacy cruft: `navigator.clipboard` needs a
+ * secure context, and a copy that quietly does nothing is worse than one that
+ * says it failed — the annotator pastes stale content into the next app and the
+ * trajectory records them entering the wrong value.
+ */
+export async function writeClipboard(
+  text: string,
+  env: {
+    navigator?: { clipboard?: { writeText?: (t: string) => Promise<void> } };
+    document?: Document;
+  } = {},
+): Promise<boolean> {
+  const nav = env.navigator ?? (globalThis.navigator as never);
+  const write = (nav as { clipboard?: { writeText?: (t: string) => Promise<void> } } | undefined)?.clipboard?.writeText;
+  if (typeof write === "function") {
+    try {
+      await write.call((nav as { clipboard: unknown }).clipboard, text);
+      return true;
+    } catch {
+      /* permission refused, or not a secure context — fall through */
+    }
+  }
+  const doc = env.document ?? (globalThis as { document?: Document }).document;
+  if (!doc?.body || typeof (doc as { execCommand?: unknown }).execCommand !== "function") return false;
+  // A hidden textarea, selected and copied. `readonly` would stop the selection
+  // taking on some browsers, and `position: fixed` keeps it from scrolling the
+  // pane as it is focused.
+  const ta = doc.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("aria-hidden", "true");
+  ta.style.cssText = "position:fixed;top:-1000px;left:-1000px;opacity:0";
+  doc.body.appendChild(ta);
+  try {
+    ta.focus();
+    ta.select();
+    return (doc as unknown as { execCommand: (c: string) => boolean }).execCommand("copy") === true;
+  } catch {
+    return false;
+  } finally {
+    ta.remove();
+  }
+}
+
+/**
+ * Read the ANNOTATOR's clipboard, or null when we are not allowed to.
+ *
+ * Reading is the half browsers guard hardest: Chrome gates `readText` behind a
+ * `clipboard-read` permission prompt and Safari refuses it outside a user
+ * gesture entirely. Null is therefore an ordinary outcome, and the caller's job
+ * is to fall back to the real `paste` event — which carries the same data
+ * without any permission at all — rather than to treat it as an error.
+ */
+export async function readClipboard(
+  env: { navigator?: { clipboard?: { readText?: () => Promise<string> } } } = {},
+): Promise<string | null> {
+  const nav = env.navigator ?? (globalThis.navigator as never);
+  const read = (nav as { clipboard?: { readText?: () => Promise<string> } } | undefined)?.clipboard?.readText;
+  if (typeof read !== "function") return null;
+  try {
+    return await read.call((nav as { clipboard: unknown }).clipboard);
+  } catch {
+    return null;
+  }
+}
+
+/** One tab photographed in place — what the dock of mini browser windows draws. */
+export interface TabThumb {
+  tabId: string;
+  url: string;
+  /** Whether this is the tab currently being screencast. */
+  active: boolean;
+  /** base64 JPEG, downscaled service-side (see THUMB_SCALE there). */
+  data: string;
+}
+
+/** A small picture of EVERY open tab, including the ones nobody is looking at.
+ *
+ *  A cua-hub session pre-opens all five apps but only one is screencast, so the
+ *  other four had no pixels to show until the annotator had visited them once —
+ *  the ecosystem looked half-empty exactly when it should look most alive. The
+ *  service photographs a background tab without fronting it, so this costs the
+ *  live stream nothing. Worth re-asking on a timer: a cross-app effect (an order
+ *  in ShopGym producing a ShopMail email) changes a tab nobody is watching. */
+export async function tabThumbnails(
+  sessionId: string,
+  ticket: string,
+  opts?: RestOptions,
+): Promise<TabThumb[]> {
+  const out = await json<{ thumbs?: TabThumb[] }>(
+    `${liveBase(opts)}/live/sessions/${encodeURIComponent(sessionId)}/thumbnails`,
+    { ticket },
+    opts,
+  );
+  return out?.thumbs ?? [];
 }
 
 export interface ActResult {

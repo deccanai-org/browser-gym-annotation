@@ -67,6 +67,34 @@ describe("the dropped-interactions alert", () => {
     render(<ActionLog steps={[base]} dropped={3} />);
     expect(screen.getByText(/3/)).toBeTruthy();
   });
+
+  it("says what to DO about it, not only that it happened", () => {
+    // "the trajectory is incomplete from here" is alarming and leaves the
+    // annotator with no next move. There is exactly one remedy for a real drop,
+    // and the alert is the only place it can be said.
+    render(<ActionLog steps={[base]} dropped={3} />);
+    expect(screen.getByRole("alert").textContent).toMatch(/restart the task/i);
+  });
+
+  it("does not cry loss over steps that were recorded without a name", () => {
+    // The bug behind the alert an annotator actually saw. A click whose element
+    // could not be described still applied and still got recorded — it just has no
+    // locator. Reported as a drop it said the trajectory had a hole in it and
+    // implied redoing the task, which was false and expensive.
+    render(<ActionLog steps={[base]} unnamed={5} />);
+    expect(screen.queryByRole("alert"), "an unnamed step is not a lost interaction").toBeNull();
+    const said = screen.getByRole("status").textContent ?? "";
+    expect(said).toMatch(/5 steps/i);
+    expect(said, "and it says what it means for the trajectory").toMatch(/position only/i);
+  });
+
+  it("leads with the real loss when both have happened", () => {
+    // A drop is strictly worse news than a missing name, and two banners stacked
+    // at once bury the one that matters.
+    render(<ActionLog steps={[base]} dropped={2} unnamed={5} />);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
 });
 
 

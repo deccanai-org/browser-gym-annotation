@@ -12,14 +12,18 @@ import {
   normalizePoint,
   observePage,
   openLiveSession,
+  readClipboard,
   readSelection,
   scaleDelta,
   selectAt,
   setViewport,
+  tabThumbnails,
+  writeClipboard,
 } from "../../lib/liveBrowser";
 import type { LiveState, NormPoint, OpenedSession, RemoteSelect, Viewport } from "../../lib/liveBrowser";
 import { FrameRecorder, ObservationRecorder } from "../../lib/liveBrowser";
-import { AppTabs } from "./AppTabs";
+import { AppBrowserDock } from "./AppBrowserDock";
+import { BrowserTabBar } from "./BrowserTabBar";
 import { attachLiveBrowser } from "./liveSessionApi";
 import type { LiveApp } from "./liveSessionApi";
 
@@ -44,22 +48,53 @@ import type { LiveApp } from "./liveSessionApi";
 /** Which app the streamed page belongs to, matched by origin. Lets the tab strip
  *  highlight the app actually on screen before the annotator has switched tabs —
  *  the landing app is the task's primary, which is not always apps[0]. */
-//: Comfortably inside the service's 300s ticket TTL. Refreshing is cheap (it
-//: re-tickets the same browser); expiring is not (the pane goes silently blind).
-const TICKET_REFRESH_MS = 120_000;
+//: Comfortably inside the service's 300s ticket TTL, and short enough that TWO
+//: refreshes fit inside one lifetime — so a single failed one is survivable.
+//: Refreshing is cheap (it re-tickets the same browser); expiring is not, and
+//: "silently blind" is not hyperbole: the socket is authorised at handshake and
+//: keeps applying input, so an expired ticket breaks only the REST half. Clicks
+//: keep working, every describe answers 403, and the recorded trajectory fills up
+//: with locator-less steps while the pane looks perfectly healthy.
+const TICKET_REFRESH_MS = 90_000;
 
 //: Padding the stage draws around the surface, in px. Named because the viewport
 //: negotiation has to subtract exactly this much or the surface overflows by a
-//: few pixels and the stage grows a scrollbar it does not need.
-const STAGE_PADDING = 8;
+//: few pixels and the stage grows a scrollbar it does not need — which is also
+//: why the stage's own style reads this rather than repeating the number.
+//: Kept to a hairline: it is a gutter, and every pixel of it is page the
+//: annotator does not get.
+const STAGE_PADDING = 4;
 //: A window drag-resize emits a burst of ResizeObserver callbacks and each
 //: negotiation restarts the screencast, so settle before asking.
 const VIEWPORT_DEBOUNCE_MS = 220;
+
+//: How often the inactive apps are re-photographed. Slow because it is scenery,
+//: not the stream — but not never: a task's whole point is that an order placed
+//: in ShopGym produces an email in ShopMail, and a dock that shows an empty
+//: inbox forever hides exactly the effect the annotator is being asked to make.
+const THUMB_REFRESH_MS = 20_000;
 
 //: How far a press must travel before it is worth asking whether it selected
 //: anything. Below this it is a click, which selects nothing, and the question
 //: would be a round trip spent on every click in the session.
 const SELECTION_MIN_PX = 4;
+
+//: How long Cmd/Ctrl+V waits for the browser's OWN paste event before reading the
+//: clipboard through the API instead. The event, when it comes, comes in the same
+//: task as the keydown, so this only has to outlast one turn of the event loop —
+//: it is short enough not to be felt and long enough that the API path (which can
+//: raise a permission prompt) is never taken on a browser that was going to
+//: deliver the event anyway.
+const PASTE_EVENT_GRACE_MS = 120;
+
+//: Where the dock's open/closed choice is kept. Remembered rather than reset per
+//: task: an annotator who wants the previews wants them on every task, and one
+//: who does not should not have to close them again each time.
+const DOCK_PREF_KEY = "gym.dock.open";
+
+function readDockPref(): boolean {
+  try { return window.localStorage.getItem(DOCK_PREF_KEY) === "1"; } catch { return false; }
+}
 
 function appForUrl(apps: LiveApp[], url: string): string | undefined {
   if (!url) return undefined;
@@ -79,12 +114,18 @@ export function LiveBrowserPane({
   onSession,
   apps,
   onDropped,
+  onUnnamedTarget,
 }: {
   /** Interactions the recorder had to DROP. Not cosmetic: from that point the
    *  trajectory is incomplete, and the annotator is the only one who can decide
    *  whether to redo the task. The counter and its alert already existed; only
    *  this wire was missing, so the alert could never fire. */
   onDropped?: (n: number) => void;
+  /** Steps that WERE recorded but carry no locator, because the page could not be
+   *  asked what was under the pointer. A different fact from a dropped
+   *  interaction and a different remedy — the step exists and replays by
+   *  coordinate at best — so it gets its own, quieter signal. */
+  onUnnamedTarget?: (n: number) => void;
   /** Review-session id — where recorded interactions land. Null disables
    *  recording (offline/fixture mode) but still lets the annotator drive. */
   attemptId: string | null;
@@ -139,8 +180,31 @@ export function LiveBrowserPane({
   const [picker, setPicker] = useState<
     { at: NormPoint; box: { left: number; top: number }; sel: RemoteSelect; target: Record<string, string> } | null
   >(null);
+  //: The mini-window dock costs about 150px of the pane's height — a third of the
+  //: stage on a laptop — and it is a shortcut, not the only way to reach another
+  //: app: the tab strip above switches to any of them. So it is CLOSED by
+  //: default and opened from the toolbar, where the toggle costs no row of its
+  //: own. Collapsing it does not hide anything; it hands the page the height.
+  const [dockOpen, setDockOpen] = useState(readDockPref);
   const [activeApp, setActiveApp] = useState<string | undefined>(undefined);
   const [, setActiveTabId] = useState<string>("");
+  //: A short-lived word about the last clipboard action. Copy and paste are
+  //: INVISIBLE: nothing on screen changes when a copy succeeds, so without this
+  //: an annotator cannot tell one that worked from one the browser refused —
+  //: they find out by pasting the wrong value into the next app.
+  const [notice, setNoticeText] = useState<string | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  //: A Cmd/Ctrl+V waiting to see whether the browser sends its own paste event.
+  //: Cleared by that event; on timeout the clipboard is read through the API.
+  const pasteWaitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A picture per app for the dock: the service's own capture of each tab, plus
+  // the last streamed frame of whichever app is being switched away from.
+  const [snapshots, setSnapshots] = useState<Record<string, string>>({});
+  // The apps as the polling effect sees them. Held in a ref so a host that
+  // re-renders with a new array identity does not tear the poll down and make it
+  // re-photograph five tabs from scratch.
+  const appsRef = useRef(apps);
+  appsRef.current = apps;
   // The open press, so its "up" can be paired into a click — or recognised as a drag.
   const downRef = useRef<{ p: NormPoint; at: number; target: Record<string, unknown>; button: string } | null>(null);
   // The press's describe() round trip. A press is only dispatched once it answers,
@@ -176,20 +240,67 @@ export function LiveBrowserPane({
   const ticket = session?.ticket ?? null;
   // The ticket the REST calls use. Held in a ref, not read off the prop, because
   // it is re-minted while the session runs — see the refresh effect below.
+  //
+  // It has to follow a CHANGED prop as well as being initialised from it. The
+  // host re-mints on every attach, so a reopen handed the pane a fresh ticket
+  // while this ref kept the original one forever — the socket effect keys on
+  // `ticket` and reconnected happily with the new one, so the pane looked fine
+  // and every REST call was signed with a ticket that was already dying. The
+  // second ref is what tells a new PROP apart from a ticket this component
+  // refreshed for itself, which is newer than the prop and must not be clobbered.
   const ticketRef = useRef<string | null>(ticket);
-  if (ticket && !ticketRef.current) ticketRef.current = ticket;
+  const propTicketRef = useRef<string | null>(ticket);
+  if (ticket && ticket !== propTicketRef.current) {
+    propTicketRef.current = ticket;
+    ticketRef.current = ticket;
+  }
 
   const vp: Viewport = negotiated ?? live.viewport ?? session?.viewport ?? DEFAULT_VIEWPORT;
   const driving = live.status === "live" && live.controller;
+
+  const resolvedActiveApp = activeApp ?? (apps ? appForUrl(apps, pageUrl) : undefined) ?? apps?.[0]?.app;
+
+  const switchApp = useCallback((a: LiveApp): boolean => {
+    const prev = resolvedActiveApp;
+    if (prev && lastFrameRef.current) {
+      setSnapshots((s) => ({ ...s, [prev]: lastFrameRef.current }));
+    }
+    const ok = sockRef.current?.send(
+      { type: "switch_tab", app: a.app, url: a.url },
+      (st) => ({
+        kind: "switch_tab",
+        payload: { app: a.app, url: a.url, t: Date.now() },
+        target: { app: a.app, title: a.title, targetKey: `app:${a.app}` },
+        url: st?.url ?? a.url,
+        tab: st?.tabId ?? a.app,
+      }),
+    ) ?? false;
+    if (ok) {
+      setActiveApp(a.app);
+      setPageUrl(a.url);
+    }
+    return ok;
+  }, [resolvedActiveApp]);
 
   // An interaction stops existing two different ways — the recorder refusing to
   // queue it, and an ack that never came back to record it — and the alert takes
   // one cumulative number. Kept in a ref, and reported through a ref, because
   // making the socket effect depend on `onDropped` would tear the stream down and
   // re-race for control every time the host re-rendered with a new callback.
+  //
+  // A click whose element could not be NAMED is deliberately not in here. It used
+  // to be, and that was the "5 interactions were lost" alert: those five clicks
+  // were recorded, they applied, and they moved the world — they just had no
+  // locator. Counting them as losses told the annotator their trajectory had a
+  // hole in it and to consider redoing the task, when what had actually happened
+  // was that describe was answering 403. Two different problems with two
+  // different remedies, so they are now two different counters.
   const lossRef = useRef({ queued: 0, unrecorded: 0 });
   const onDroppedRef = useRef(onDropped);
   onDroppedRef.current = onDropped;
+  const unnamedRef = useRef(0);
+  const onUnnamedRef = useRef(onUnnamedTarget);
+  onUnnamedRef.current = onUnnamedTarget;
 
   const refreshInfo = useCallback(
     async (id: string) => {
@@ -201,6 +312,87 @@ export function LiveBrowserPane({
     },
     [base],
   );
+
+  /** Mint a fresh REST ticket for THIS session, or null if we could not.
+   *
+   *  Called on demand, when a REST call has just been refused, rather than only
+   *  on a timer: the timer is a guess about when the ticket dies and a 403 is
+   *  proof that it already has.
+   *
+   *  Two things here are load-bearing. Only ONE attach is ever in flight —
+   *  re-ticketing runs off a failed describe, an annotator clicking produces a
+   *  burst of those, and every attach can OPEN A BROWSER if the backend thinks
+   *  the old one is gone. And the answer is adopted only when it is for the
+   *  session we are actually driving: a ticket is signed over
+   *  `session_id:owner:exp`, so one minted for a browser the backend just opened
+   *  in our place is refused by every call we make with it — which would turn a
+   *  recoverable expiry into a permanent 403 with no error anywhere.
+   */
+  const reticketRef = useRef<Promise<string | null> | null>(null);
+  const reticket = useCallback((): Promise<string | null> => {
+    if (!attemptId || !sid) return Promise.resolve(null);
+    if (reticketRef.current) return reticketRef.current;
+    const work = (async () => {
+      try {
+        const r = await attachLiveBrowser(attemptId);
+        if (!r.ok || !r.value?.ticket) return null;
+        if (r.value.sessionId && r.value.sessionId !== sid) return null;
+        ticketRef.current = r.value.ticket;
+        return r.value.ticket;
+      } catch {
+        return null;
+      } finally {
+        reticketRef.current = null;
+      }
+    })();
+    reticketRef.current = work;
+    return work;
+  }, [attemptId, sid]);
+
+  /** What is under this point — re-ticketing once if the page refused to say.
+   *
+   *  `null` back from `describeAt` means the question could not be ASKED, which
+   *  is not the same as "there is nothing there" and must not be recorded as
+   *  though it were. `{}` is the genuine empty answer and is returned as-is.
+   */
+  const describePoint = useCallback(
+    async (p: NormPoint): Promise<Record<string, string> | null> => {
+      if (!sid) return null;
+      const got = await describeAt(sid, ticketRef.current ?? ticket ?? "", p, { base });
+      if (got !== null) return got;
+      const fresh = await reticket();
+      return fresh ? await describeAt(sid, fresh, p, { base }) : null;
+    },
+    [sid, ticket, base, reticket],
+  );
+
+  const setNotice = useCallback((msg: string) => {
+    setNoticeText(msg);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => { noticeTimer.current = null; setNoticeText(null); }, 2600);
+  }, []);
+
+  useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    if (pasteWaitRef.current) clearTimeout(pasteWaitRef.current);
+  }, []);
+
+  /** Count a step that had to be recorded without a locator, and say so once. */
+  const noteUnnamed = useCallback(() => {
+    unnamedRef.current += 1;
+    onUnnamedRef.current?.(unnamedRef.current);
+  }, []);
+
+  /** The remote page's current selection, re-ticketing once if refused.
+   *  `null` only when we truly could not ask — an empty string means nothing was
+   *  selected, and the two lead to different things being told to the annotator. */
+  const readSelectionHealing = useCallback(async (): Promise<string | null> => {
+    if (!sid) return null;
+    const got = await readSelection(sid, ticketRef.current ?? ticket ?? "", { base });
+    if (got !== null) return got;
+    const fresh = await reticket();
+    return fresh ? await readSelection(sid, fresh, { base }) : null;
+  }, [sid, ticket, base, reticket]);
 
   // --- socket + recorder lifecycle -----------------------------------------
   useEffect(() => {
@@ -358,13 +550,57 @@ export function LiveBrowserPane({
   useEffect(() => {
     if (!sid || !attemptId) return;
     let alive = true;
-    const refresh = async () => {
-      const r = await attachLiveBrowser(attemptId);
-      if (alive && r.ok && r.value?.ticket) ticketRef.current = r.value.ticket;
-    };
-    const h = setInterval(() => void refresh(), TICKET_REFRESH_MS);
+    // Straight away, not only after the first interval. The pane is handed a
+    // ticket minted at open time, and a cua-hub open pre-loads five tabs before
+    // it returns — so a real share of the 300s TTL can already be spent by the
+    // time the annotator sees the page. Waiting two minutes to find that out is
+    // how a session started life with a ticket that expired mid-task.
+    void reticket();
+    const h = setInterval(() => { if (alive) void reticket(); }, TICKET_REFRESH_MS);
     return () => { alive = false; clearInterval(h); };
-  }, [sid, attemptId]);
+  }, [sid, attemptId, reticket]);
+
+  // --- keep the dock showing real apps -------------------------------------
+  //
+  // Every app is a loaded tab from the first frame, but only ONE of them is
+  // screencast — so the four the annotator has not visited had no pixels and the
+  // dock drew placeholders, which makes the ecosystem look half-empty exactly
+  // when it should look most alive. The service photographs a background tab
+  // without bringing it forward (fronting one would hide the tab the screencast
+  // is bound to and freeze the stream), so ask it as soon as there is a session
+  // and then on a slow timer.
+  //
+  // Only while the dock is actually showing: photographing five tabs on a timer
+  // for a strip nobody has opened is pure cost. Opening it runs the first pull
+  // straight away, so the previews are there by the time it has expanded.
+  useEffect(() => {
+    if (!sid || !dockOpen || (apps?.length ?? 0) < 2) return;
+    let alive = true;
+    const pull = async () => {
+      const list = appsRef.current;
+      if (!list) return;
+      const thumbs = await tabThumbnails(sid, ticketRef.current ?? ticket ?? "", { base });
+      if (!alive || !thumbs.length) return;
+      setSnapshots((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const th of thumbs) {
+          // By ORIGIN, like everything else that addresses these tabs — the app
+          // may have navigated within itself since it was opened.
+          const app = appForUrl(list, th.url);
+          if (app && th.data && next[app] !== th.data) { next[app] = th.data; changed = true; }
+        }
+        // Identical pixels must not commit a render: this runs forever, under a
+        // surface the annotator is mid-gesture on.
+        return changed ? next : prev;
+      });
+    };
+    void pull();
+    const h = setInterval(() => void pull(), THUMB_REFRESH_MS);
+    return () => { alive = false; clearInterval(h); };
+    // `apps.length` rather than `apps`: the array's identity is the host's, and
+    // what this effect actually depends on is whether there is a dock at all.
+  }, [sid, ticket, base, dockOpen, apps?.length]);
 
   // --- fit the surface to the viewport aspect ------------------------------
   //
@@ -414,28 +650,56 @@ export function LiveBrowserPane({
   // --- wheel: a native non-passive listener, because React's onWheel cannot
   // preventDefault and the annotator's own page would scroll instead of the
   // remote one.
+  //
+  // Deltas are ACCUMULATED and flushed once per frame, never sent per event. A
+  // trackpad emits 60-120 wheel events a second; the service handles input in
+  // one sequential loop and answered every scroll with a `post_state`, so a
+  // one-second swipe queued ~80 CDP round trips and the page kept moving for a
+  // second or two after the fingers stopped. Coalescing is also the honest
+  // recording: one gesture is one `scroll` step, not eighty of them.
   useEffect(() => {
     const box = surfaceRef.current;
     if (!box) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
+    let pending: { nx: number; ny: number; dy: number; dx: number } | null = null;
+    let frame: number | null = null;
+
+    const flush = () => {
+      frame = null;
+      const acc = pending;
+      pending = null;
       const sock = sockRef.current;
-      const p = pointAt(e.clientX, e.clientY);
-      if (!sock || !p) return;
-      const r = box.getBoundingClientRect();
-      const dy = scaleDelta(e.deltaY, r.height, vp.height);
-      const dx = scaleDelta(e.deltaX, r.width, vp.width);
+      if (!sock || !acc) return;
+      const { nx, ny, dy, dx } = acc;
       const tgt = targetRef.current;
-      sock.send({ type: "scroll", nx: p.nx, ny: p.ny, dy, dx }, (st) => ({
+      sock.send({ type: "scroll", nx, ny, dy, dx }, (st) => ({
         kind: "scroll",
-        payload: { dy, dx, nx: p.nx, ny: p.ny, auto: false, t: Date.now() },
+        payload: { dy, dx, nx, ny, auto: false, t: Date.now() },
         target: tgt,
         url: st?.url ?? pageUrl,
         tab: st?.tabId ?? "",
       }));
     };
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = pointAt(e.clientX, e.clientY);
+      if (!p) return;
+      const r = box.getBoundingClientRect();
+      const dy = scaleDelta(e.deltaY, r.height, vp.height);
+      const dx = scaleDelta(e.deltaX, r.width, vp.width);
+      // The anchor is the LATEST pointer position: a gesture that crosses a
+      // scrollable panel should land in the one the fingers are over now.
+      pending = pending
+        ? { nx: p.nx, ny: p.ny, dy: pending.dy + dy, dx: pending.dx + dx }
+        : { nx: p.nx, ny: p.ny, dy, dx };
+      if (frame == null) frame = requestAnimationFrame(flush);
+    };
+
     box.addEventListener("wheel", onWheel, { passive: false });
-    return () => box.removeEventListener("wheel", onWheel);
+    return () => {
+      box.removeEventListener("wheel", onWheel);
+      if (frame != null) cancelAnimationFrame(frame);
+    };
     // `sid` is a dependency because the surface only exists once a session does —
     // without it the listener would never attach to a pane that got its session
     // after mount.
@@ -479,46 +743,50 @@ export function LiveBrowserPane({
       // Describe BEFORE dispatching. Afterwards the element may be gone, and a
       // recorded pixel is not replayable — the committed step needs a locator.
       //
-      // Asked twice when the first answer is empty. `describeAt` cannot tell a
-      // point with nothing under it from a round trip that failed — both are
-      // `{}` — and the difference decides whether the step can ever be replayed.
-      // The page has not moved yet at press time, so a second ask is the same
-      // question, and it costs a round trip only in the case that was going to
-      // produce an unreplayable step anyway. Seen on a real M105 run: the click
-      // that SENT the email recorded `{}` and stranded the trajectory's last
-      // step as unverified, while describing that exact point by hand answered
+      // `describePoint` re-tickets and asks again when the question could not be
+      // ASKED at all, which is the case that used to be invisible: an expired
+      // ticket answers 403, the old code read that as `{}`, and the click was
+      // recorded with no locator while the socket went on applying input. It
+      // then asks a second time on a genuinely empty answer — the page has not
+      // moved yet at press time, so it is the same question, and it costs a round
+      // trip only where the step was going to be unreplayable anyway. Seen on a
+      // real M105 run: the click that SENT the email recorded `{}` and stranded
+      // the trajectory's last step, while describing that point by hand answered
       // fine.
-      let target = await describeAt(sid, ticketRef.current ?? ticket, p, { base });
-      if (!Object.keys(target).length) target = await describeAt(sid, ticketRef.current ?? ticket, p, { base });
+      let target = await describePoint(p);
+      if (target !== null && !Object.keys(target).length) target = await describePoint(p);
 
       // A <select> is not clickable in any useful sense here: the dropdown is
       // browser chrome, and a headless browser draws none. Offer the options
       // ourselves rather than dispatching a click that provably does nothing
       // (measured: value 'All' -> 'All'). The press is NOT sent on; choosing an
       // option is the interaction, and it records as a `select` step.
-      if (String(target.tag || "").toLowerCase() === "select") {
+      if (String(target?.tag || "").toLowerCase() === "select") {
         const sel = await selectAt(sid, ticketRef.current ?? ticket, p, { base });
         if (sel) {
           const r = surfaceRef.current?.getBoundingClientRect();
           setPicker({
-            at: p, sel, target,
+            at: p, sel, target: target ?? {},
             box: { left: e.clientX - (r?.left ?? 0), top: e.clientY - (r?.top ?? 0) },
           });
           downRef.current = null;
           return;
         }
       }
-      if (!Object.keys(target).length) {
+      if (!target || !Object.keys(target).length) {
         // Still nothing. The click is dispatched regardless — refusing to drive
         // the browser would be worse — but it is COUNTED, so the annotator is
         // told rather than finding an unshippable step at the last gate.
-        lossRef.current.unrecorded += 1;
-        const l = lossRef.current;
-        onDroppedRef.current?.(l.queued + l.unrecorded);
+        //
+        // Counted as an UNNAMED step, not as a dropped interaction: this click is
+        // about to be recorded and about to apply. Calling it a loss is what put
+        // "5 interactions were lost — the trajectory is incomplete from here" in
+        // front of an annotator whose trajectory was complete.
+        noteUnnamed();
       }
-      targetRef.current = target;
+      targetRef.current = target ?? {};
       focusStaleRef.current = false;  // a click IS a focus change, and we just named it
-      downRef.current = { p, at: Date.now(), target, button };
+      downRef.current = { p, at: Date.now(), target: target ?? {}, button };
       // Deliberately still stamped here rather than at the press: `coalesce`
       // pairs a down and an up only within 700ms of each other, and both halves
       // are stamped on their ack. Backdating just this one to the press would
@@ -527,7 +795,7 @@ export function LiveBrowserPane({
       sock.send({ type: "mouse", phase: "down", nx: p.nx, ny: p.ny, button }, (st) => ({
         kind: "mouseDown",
         payload: { t: Date.now(), nx: p.nx, ny: p.ny, button },
-        target,
+        target: target ?? {},
         url: st?.url ?? pageUrl,
         tab: st?.tabId ?? "",
       }));
@@ -578,7 +846,7 @@ export function LiveBrowserPane({
     // ack so the value travels with the interaction rather than after it.
     let selectedText = "";
     if (sid && down && Math.hypot(p.nx - down.p.nx, p.ny - down.p.ny) * vp.width >= SELECTION_MIN_PX) {
-      selectedText = await readSelection(sid, ticketRef.current ?? ticket ?? "", { base });
+      selectedText = (await readSelectionHealing()) ?? "";
     }
 
     sock.send({ type: "mouse", phase: "up", nx: p.nx, ny: p.ny, button, clicks }, (st) => {
@@ -657,17 +925,19 @@ export function LiveBrowserPane({
     e.preventDefault();
   };
 
-  /** Paste as one atomic change. Typing it character by character would produce a
-   *  different event stream — and a different recorded trajectory — from what the
-   *  annotator actually did. */
-  const onPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+  /** Send `text` to the remote focused field as ONE atomic change.
+   *
+   *  Shared by the Cmd/Ctrl+V accelerator and the native `paste` event, so both
+   *  routes record the same step. Typing it character by character would produce
+   *  a different event stream — and a different recorded trajectory — from what
+   *  the annotator actually did; it also folds into a `fill` on the backend,
+   *  which is what makes a pasted order id replayable.
+   */
+  const sendPaste = (text: string): boolean => {
     const sock = sockRef.current;
-    if (!sock) return;
-    e.preventDefault();
-    const text = e.clipboardData.getData("text");
-    if (!text) return;
+    if (!sock || !text) return false;
     const tgt = targetRef.current;
-    sock.send({ type: "paste", text }, (st) => ({
+    return sock.send({ type: "paste", text }, (st) => ({
       kind: "paste",
       payload: { text, value: (st?.focus as Record<string, unknown> | undefined)?.value,
                  valueHtml: (st?.focus as Record<string, unknown> | undefined)?.valueHtml, t: Date.now() },
@@ -675,6 +945,93 @@ export function LiveBrowserPane({
       url: st?.url ?? pageUrl,
       tab: st?.tabId ?? "",
     }));
+  };
+
+  /** The FALLBACK paste route: the browser's own `paste` event.
+   *
+   *  Still here, and still necessary, because reading the clipboard
+   *  programmatically is the one half browsers guard hardest — Chrome gates
+   *  `readText` behind a permission prompt and Safari refuses it outright — while
+   *  a real paste event carries the same data with no permission at all. It only
+   *  ever fires because the Cmd+V handler deliberately does NOT preventDefault
+   *  when it could not read the clipboard itself: preventing the default on that
+   *  keydown suppresses the paste event entirely, which is why this handler was
+   *  dead code and pasting did nothing whatsoever.
+   */
+  const onPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (!sockRef.current) return;
+    e.preventDefault();
+    // The event arrived, so the API fallback armed by the keydown must stand down
+    // or the same text is pasted twice.
+    if (pasteWaitRef.current) {
+      clearTimeout(pasteWaitRef.current);
+      pasteWaitRef.current = null;
+    }
+    const text = e.clipboardData.getData("text");
+    if (!text) {
+      setNotice("Your clipboard is empty.");
+      return;
+    }
+    if (sendPaste(text)) setNotice(`Pasted ${text.length} character${text.length === 1 ? "" : "s"}.`);
+  };
+
+  /**
+   * Cmd/Ctrl+C — put the REMOTE page's selection on the ANNOTATOR's clipboard.
+   *
+   * Handled locally rather than forwarded, because the two clipboards are not the
+   * same clipboard: the page is in a remote headless Chromium, so a forwarded
+   * Cmd+C copies into an OS clipboard nothing on this machine can read. Reading
+   * the selection over REST and writing it here is the only way the annotator can
+   * carry an order id out of ShopMail and into ShopGym, which is most of the
+   * cross-app corpus.
+   *
+   * Recorded as a `select_text`, the kind that already exists for "the annotator
+   * READ this" — it is not replayed (there is nothing to replay) but the value
+   * they took is part of how the task was done, and the description shows it.
+   */
+  const copySelection = async (): Promise<void> => {
+    const text = await readSelectionHealing();
+    if (text === null) {
+      setNotice("Could not read the page's selection — the copy did not happen.");
+      return;
+    }
+    if (!text) {
+      setNotice("Nothing is selected in the page — drag across some text first.");
+      return;
+    }
+    const ok = await writeClipboard(text);
+    setNotice(ok
+      ? `Copied ${text.length} character${text.length === 1 ? "" : "s"}.`
+      : "Your browser refused clipboard access, so nothing was copied.");
+    if (!ok) return;
+    recRef.current?.push({
+      kind: "select_text",
+      payload: { text, via: "copy", t: Date.now() },
+      target: targetRef.current,
+      url: pageUrl,
+    });
+  };
+
+  /**
+   * The paste FALLBACK: read the clipboard ourselves.
+   *
+   * Only runs when the browser did not send a `paste` event within the grace
+   * window (Firefox does not send one to a non-editable element). Reading needs
+   * the `clipboard-read` permission, so this is the route that can be refused —
+   * and when it is, the annotator is told, because a paste that silently does
+   * nothing is how a wrong value ends up in the trajectory.
+   */
+  const pasteFromClipboardApi = async (): Promise<void> => {
+    const text = await readClipboard();
+    if (text === null) {
+      setNotice("Your browser would not let the page read the clipboard — allow clipboard access and paste again.");
+      return;
+    }
+    if (!text) {
+      setNotice("Your clipboard is empty.");
+      return;
+    }
+    if (sendPaste(text)) setNotice(`Pasted ${text.length} character${text.length === 1 ? "" : "s"}.`);
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -706,7 +1063,18 @@ export function LiveBrowserPane({
   const syncFocus = async () => {
     if (!sid || !ticket) return;
     try {
-      targetRef.current = await describeFocused(sid, ticketRef.current ?? ticket, { base });
+      // Re-ticket and ask again when the question could not be asked. A 403 read
+      // as "nothing is focused" is how one word became two `fill` steps: the
+      // backend coalesces consecutive keystrokes only while they name the SAME
+      // element, and an empty target matches nothing — not even another empty one
+      // — so the run split at whichever keystroke happened to land after the
+      // ticket died. "monito" then "monitor", from one uninterrupted word.
+      let got = await describeFocused(sid, ticketRef.current ?? ticket, { base });
+      if (got === null) {
+        const fresh = await reticket();
+        if (fresh) got = await describeFocused(sid, fresh, { base });
+      }
+      targetRef.current = got ?? {};
     } catch {
       targetRef.current = {};
     }
@@ -718,9 +1086,10 @@ export function LiveBrowserPane({
     if (!sock) return;
     if (["Shift", "Alt", "Meta", "Control", "CapsLock"].includes(e.key)) return;
     // Reserve only what the ANNOTATOR needs for their own browser. Everything
-    // else — including Cmd/Ctrl+A, +C, +V — belongs to the remote page: this
-    // used to return early on any modifier, so a task that needed a shortcut
-    // simply could not be done, and the keystroke was never even sent.
+    // else — including Cmd/Ctrl+A — belongs to the remote page: this used to
+    // return early on any modifier, so a task that needed a shortcut simply could
+    // not be done, and the keystroke was never even sent. Copy and paste are the
+    // exception and are handled locally; see below for why they have to be.
     const mods: string[] = [];
     if (e.shiftKey) mods.push("Shift");
     if (e.altKey) mods.push("Alt");
@@ -728,6 +1097,38 @@ export function LiveBrowserPane({
     if (e.metaKey) mods.push("Meta");
     const accel = e.metaKey || e.ctrlKey;
     if (accel && ["r", "t", "w", "n", "q"].includes(e.key.toLowerCase())) return;
+
+    // COPY and PASTE are handled here, on this side of the wire, and not
+    // forwarded. The page is in a remote headless Chromium: a forwarded Cmd+C
+    // writes to the remote OS clipboard, which nothing on the annotator's machine
+    // can read, and a forwarded Cmd+V pastes whatever that remote clipboard holds
+    // rather than what they copied. Both used to be forwarded, so the entire
+    // read-a-value-here-and-type-it-there half of the corpus was unannotatable.
+    //
+    // Cmd/Ctrl+A is NOT intercepted: select-all belongs to the page, and it
+    // arrives there correctly (verified against the service — the page reports a
+    // 3104-character selection after it).
+    if (accel && !e.altKey && e.key.toLowerCase() === "c") {
+      e.preventDefault();
+      void copySelection();
+      return;
+    }
+    if (accel && !e.altKey && e.key.toLowerCase() === "v") {
+      // Deliberately NOT preventDefault, and that is the fix rather than an
+      // oversight. Preventing the default on this keydown suppresses the browser's
+      // own `paste` event — which is why the onPaste handler below was dead code
+      // and pasting did nothing at all. The paste event is also the BETTER source:
+      // it carries the clipboard with no permission prompt, where
+      // `navigator.clipboard.readText()` needs one. So the event is given a moment
+      // to arrive, and the API is the fallback for the browsers that never send
+      // one to a non-editable element.
+      if (pasteWaitRef.current) clearTimeout(pasteWaitRef.current);
+      pasteWaitRef.current = setTimeout(() => {
+        pasteWaitRef.current = null;
+        void pasteFromClipboardApi();
+      }, PASTE_EVENT_GRACE_MS);
+      return;
+    }
     e.preventDefault();
     const printable = e.key.length === 1 && !accel;
     // A keystroke we cannot attribute must not be attributed to the WRONG field.
@@ -777,6 +1178,13 @@ export function LiveBrowserPane({
     void syncFocus();
   };
 
+  const toggleDock = () => {
+    setDockOpen((v) => {
+      try { window.localStorage.setItem(DOCK_PREF_KEY, v ? "0" : "1"); } catch { /* a lost preference is not worth a failure */ }
+      return !v;
+    });
+  };
+
   const go = () => {
     const sock = sockRef.current;
     const url = urlDraft.trim();
@@ -823,12 +1231,20 @@ export function LiveBrowserPane({
 
   return (
     <div style={card}>
+      {apps && apps.length > 0 && (
+        <BrowserTabBar
+          apps={apps}
+          activeApp={resolvedActiveApp}
+          disabled={live.status !== "live" || !live.controller}
+          onSwitch={switchApp}
+        />
+      )}
       {/* The status lamp lives IN the toolbar now. It used to own a full-width
           row of its own, and so did the input counters at the bottom — four
           stacked bars of chrome above a stage that was only 492px tall, which is
           not enough page to work in. Both were a lamp and a few numbers; neither
           needed a row. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 12px", borderBottom: `1px solid ${t.n7}`, background: t.n9 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", borderBottom: `1px solid ${t.n7}`, background: t.n9, flexShrink: 0 }}>
         <StatusLamp live={live} sessionId={session?.sessionId ?? null} viewport={vp} />
         {/* Back / forward. The service has understood these all along; the pane
             simply had no buttons, so an annotator who followed a link had no way
@@ -852,7 +1268,7 @@ export function LiveBrowserPane({
           }}
           placeholder="https://…"
           style={{
-            flex: 1, height: 32, padding: "0 12px", background: t.n85, border: `1px solid ${t.n7}`,
+            flex: 1, height: 26, padding: "0 11px", background: t.n85, border: `1px solid ${t.n7}`,
             borderRadius: t.radius2xl, fontFamily: t.fontMono, fontSize: "0.78rem", color: t.n1, outline: "none",
           }}
         />
@@ -861,6 +1277,16 @@ export function LiveBrowserPane({
           <Icon name="reload" size={13} />
         </Pill>
         <Zoom zoom={zoom} fitPct={fitPct} wholePage={wholePage} onZoom={setZoom} />
+        {/* The dock's switch, up here rather than as a strip of its own: a
+            permanently visible "show the previews" row would cost the height the
+            collapse exists to reclaim. */}
+        {apps && apps.length > 1 && (
+          <Pill onClick={toggleDock}
+                title={dockOpen ? "Hide the other apps' windows and give the page their height" : "Show the other apps as mini windows"}>
+            <Icon name={dockOpen ? "collapse" : "expand"} size={13} stroke={2.2} />
+            Apps {apps.length - 1}
+          </Pill>
+        )}
         <Pill onClick={() => setFull((v) => !v)}
               title={full ? "Leave fullscreen (Esc)" : "Fill the window with the gym"}>
           <Icon name={full ? "collapse" : "expand"} size={13} stroke={2.2} />
@@ -878,7 +1304,7 @@ export function LiveBrowserPane({
           the ShopGym header could not be scrolled back to. `margin: auto`
           centres it while it fits and gives the scroll its start edge once it
           does not. */}
-      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", background: t.n85, padding: 8, overflow: (zoom === "fit" || zoom === "page") ? "hidden" : "auto" }}>
+      <div ref={stageRef} style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", background: t.n85, padding: STAGE_PADDING, overflow: (zoom === "fit" || zoom === "page") ? "hidden" : "auto" }}>
         {session ? (
           <div
             ref={surfaceRef}
@@ -900,7 +1326,7 @@ export function LiveBrowserPane({
               flexShrink: 0,        // or the stage squeezes it back instead of scrolling
               margin: "auto",       // centres while it fits; see the note on the stage
               background: t.n0,
-              borderRadius: 4,
+              borderRadius: t.radiusSm,
               overflow: "hidden",
               outline: focused && driving ? `2px solid ${t.primary6}` : `1px solid ${t.n7}`,
               cursor: driving ? "crosshair" : "not-allowed",
@@ -940,60 +1366,35 @@ export function LiveBrowserPane({
                 Click the page to send keystrokes
               </div>
             )}
+            {/* Copy and paste change nothing on screen, so the only way to tell a
+                working one from a silently refused one is to say so. Bottom-right,
+                out of the way of the keystroke hint. */}
+            {notice && (
+              <div role="status" aria-live="polite"
+                   style={{ position: "absolute", right: 10, bottom: 10, maxWidth: "60%", padding: "5px 10px",
+                            borderRadius: t.radiusLg, background: `color-mix(in srgb, ${t.n0} 78%, transparent)`,
+                            color: t.n9, fontSize: "0.72rem", fontWeight: weight.semibold }}>
+                {notice}
+              </div>
+            )}
           </div>
         ) : (
           <Empty startUrl={startUrl} opening={opening} error={openError} onOpen={() => void open()} />
         )}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "0 12px",
-                    borderTop: `1px solid ${t.n7}`, background: t.n9, flexShrink: 0 }}>
-      {apps && apps.length > 0 && (
-        <AppTabs
+      {apps && apps.length > 1 && dockOpen && (
+        <AppBrowserDock
           apps={apps}
-          // Before the annotator switches tabs, the highlighted app must be the
-          // one actually on screen — the task's PRIMARY app, which is not always
-          // apps[0]. Derive it from the streamed page's origin so a mail task
-          // does not sit on the ShopGym tab while showing the mailbox.
-          activeApp={activeApp ?? appForUrl(apps, pageUrl) ?? apps[0]?.app}
+          activeApp={resolvedActiveApp}
+          snapshots={snapshots}
           disabled={live.status !== "live" || !live.controller}
-          onSwitch={(a) => {
-            // Switch over the socket so the service rebinds the screencast AND
-            // the mouse to that tab. Optimistic: the ack carries the tab it
-            // actually landed on, and reconciles this if they disagree.
-            //
-            // RECORDED, like every other action — moving between apps is the
-            // whole shape of a cross-app task ("read the order id in mail, then
-            // cancel it in shop"), and without a record factory here the
-            // trajectory showed the two halves with nothing between them.
-            // Recorded on the ACK, so a switch the service refuses (another
-            // connection holds control) never becomes a step.
-            const ok = sockRef.current?.send(
-              { type: "switch_tab", app: a.app, url: a.url },
-              (st) => ({
-                kind: "switch_tab",
-                // The url is the address, and deliberately the only one. This
-                // also recorded the app's position in the STRIP as `tabIndex`,
-                // which is a different number from the browser tab index: the
-                // strip lists every app the task spans, but only visited apps
-                // have tabs. Replay addressed by that index, so a switch landed
-                // on whichever tab happened to sit at that position — and on
-                // tab 0 when the key was missing, which never fails.
-                payload: { app: a.app, url: a.url, t: Date.now() },
-                target: { app: a.app, title: a.title, targetKey: `app:${a.app}` },
-                url: st?.url ?? a.url,
-                tab: st?.tabId ?? a.app,
-              }),
-            ) ?? false;
-            if (ok) {
-              setActiveApp(a.app);
-              setPageUrl(a.url);
-            }
-            return ok;
-          }}
+          onFocus={switchApp}
         />
       )}
 
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "0 10px",
+                    borderTop: `1px solid ${t.n7}`, background: t.n9, flexShrink: 0 }}>
         <InputBar live={live} recording={!!attemptId} onRetry={() => sockRef.current?.retry()} onStop={() => sockRef.current?.disconnect()} />
       </div>
     </div>
@@ -1035,7 +1436,7 @@ function StatusLamp({ live, sessionId, viewport }: {
       <span
         style={{
           fontSize: "0.6875rem", fontWeight: weight.bold, textTransform: "uppercase", letterSpacing: "0.05em",
-          padding: "4px 9px", borderRadius: t.radiusMd,
+          padding: "2px 8px", borderRadius: t.radiusMd,
           color: live.controller ? t.greenDark : t.yellowDark,
           background: `color-mix(in srgb, ${live.controller ? t.green : t.yellow} 14%, transparent)`,
         }}
@@ -1110,7 +1511,7 @@ function InputBar({ live, recording, onRetry, onStop }: { live: LiveState; recor
     </span>
   );
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, padding: "6px 0" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, padding: "3px 0" }}>
       {stat("sent", live.lastInputId, t.n2)}
       {stat("pending", live.pendingInputs, live.pendingInputs ? t.n1 : t.n3)}
       {stat("unacked", live.unackedInputs, live.unackedInputs ? t.redDark : t.n3)}
@@ -1155,7 +1556,7 @@ function Pill({ children, onClick, disabled, title }: {
       title={title}
       onClick={disabled ? undefined : onClick}
       style={{
-        display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: t.radiusLg,
+        display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: t.radiusLg,
         border: `1px solid ${t.n6}`, background: t.n9, color: disabled ? t.n4 : t.primary6,
         fontSize: "0.75rem", fontWeight: weight.semibold, cursor: disabled ? "default" : "pointer", whiteSpace: "nowrap",
       }}
@@ -1197,7 +1598,7 @@ function Zoom({ zoom, fitPct, wholePage, onZoom }: {
                   : `Whole page, no scrolling — currently ${fitPct}%, which is small by nature`)
               : `Render at ${Math.round(z * 100)}% — the pane scrolls`}
             style={{
-              padding: "5px 9px", fontSize: "0.72rem", fontWeight: weight.semibold, cursor: "pointer",
+              padding: "3px 8px", fontSize: "0.72rem", fontWeight: weight.semibold, cursor: "pointer",
               background: on ? t.primary6 : t.n9, color: on ? t.n9 : t.n2,
               borderLeft: z === "fit" ? "none" : `1px solid ${t.n7}`, whiteSpace: "nowrap",
             }}

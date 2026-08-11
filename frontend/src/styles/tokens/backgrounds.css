@@ -1,0 +1,37 @@
+/* ============================================================
+   Deccan AI Experts — the wash
+   Every DS surface sits on the same mesh: white across the top,
+   warming to lilac (left), coral (centre) and apricot/butter
+   (right) along the bottom. Title surfaces add the wave field.
+
+   The DS authors the mesh for a 1920×1080 slide. An app page is
+   taller, denser and mostly covered by cards, so working surfaces
+   get the DS's own softer variant and only hero surfaces (login)
+   get the full mesh plus waves — which is how the DS itself splits
+   title slides from content slides.
+   ============================================================ */
+
+:root {
+  /* Wash stops (DS) */
+  --wash-top: #ffffff;
+  --wash-lilac: #f5e2e9;
+  --wash-coral: #fecfc5;
+  --wash-apricot: #fee9d9;
+  --wash-butter: #fdf2dc;
+
+  /* Working surfaces — the DS soft wash. */
+  --bg-wash:
+    radial-gradient(120% 80% at 50% 125%, var(--wash-apricot) 0%, rgba(254, 233, 217, 0) 70%),
+    linear-gradient(180deg, #ffffff 0%, #fff7f2 100%);
+
+  /* Hero surfaces — the full DS mesh. */
+  --bg-wash-full:
+    radial-gradient(120% 85% at 18% 118%, var(--wash-lilac) 0%, rgba(245, 226, 233, 0) 62%),
+    radial-gradient(95% 80% at 52% 122%, var(--wash-coral) 0%, rgba(254, 207, 197, 0) 66%),
+    radial-gradient(110% 90% at 88% 112%, var(--wash-butter) 0%, rgba(253, 242, 220, 0) 64%),
+    radial-gradient(140% 70% at 78% 92%, var(--wash-apricot) 0%, rgba(254, 233, 217, 0) 70%),
+    linear-gradient(180deg, var(--wash-top) 0%, var(--wash-top) 26%, #fffaf7 58%, #fff1e8 100%);
+
+  /* The title-slide wave field, extracted from the DS master. */
+  --asset-waves: url("/ds/waves-band.png");
+}

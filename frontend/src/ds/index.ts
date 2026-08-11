@@ -1,4 +1,4 @@
-export { t, weight, tint, ACTION_COLOR, VERIFIER_LEVEL } from "./tokens";
+export { t, weight, tint, avatarColor, ACTION_COLOR, VERIFIER_LEVEL } from "./tokens";
 export type { ActionType, VerifierLevel } from "./tokens";
 export { Icon } from "./Icon";
 export type { IconName } from "./Icon";

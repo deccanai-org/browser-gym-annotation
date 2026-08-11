@@ -588,12 +588,21 @@ describe("live browser REST", () => {
     const target = await describeAt("sid", "tkt", { nx: 0.25, ny: 0.5 }, { base: "http://live.test", fetchImpl: impl });
     expect(calls[0].url).toBe("http://live.test/live/sessions/sid/describe");
     expect(calls[0].body).toEqual({ x: 0.25, y: 0.5, ticket: "tkt" });
-    expect(target.testId).toBe("checkout");
+    expect(target?.testId).toBe("checkout");
   });
 
-  it("yields no target when describe is unreachable, so the click still goes through", async () => {
-    const { impl } = fakeFetch(() => ({ ok: false }));
-    expect(await describeAt("sid", "tkt", { nx: 0, ny: 0 }, { fetchImpl: impl })).toEqual({});
+  it("answers null when it could not ASK, and {} when the answer was empty", async () => {
+    // The distinction is the whole of the bare-`click` bug. An expired ticket
+    // makes the service answer 403 to every REST call while the already-authorised
+    // websocket keeps applying input, so the pane went on driving the browser and
+    // recording clicks with no locator — a trajectory of anonymous clicks. Both
+    // cases used to collapse to `{}`, so the pane could not tell "nothing is
+    // there" from "I never found out" and had nothing to react to.
+    const denied = fakeFetch(() => ({ ok: false, status: 403 }));
+    expect(await describeAt("sid", "stale", { nx: 0, ny: 0 }, { fetchImpl: denied.impl })).toBeNull();
+
+    const empty = fakeFetch(() => ({ ok: true, json: {} }));
+    expect(await describeAt("sid", "tkt", { nx: 0, ny: 0 }, { fetchImpl: empty.impl })).toEqual({});
   });
 
   it("reads the open response's snake_case session_id", async () => {
@@ -618,15 +627,21 @@ describe("describeFocused", () => {
     const out = await describeFocused("s-1", "tk", { fetchImpl: impl, base: "http://live" });
     expect(calls[0].url).toBe("http://live/live/sessions/s-1/focused");
     expect(calls[0].body).toEqual({ ticket: "tk" });
-    expect(out.type).toBe("password");
+    expect(out?.type).toBe("password");
   });
 
-  it("returns an empty target rather than a stale one when the call fails", async () => {
-    // The backend treats an unnamed target as SENSITIVE, so an empty result is
-    // the safe answer. Inventing or reusing a target is how a password ends up
+  it("never returns a stale target when the call fails", async () => {
+    // The backend treats an unnamed target as SENSITIVE, so losing the name is the
+    // safe direction to fail in: inventing or reusing one is how a password ends up
     // attributed to the email field and written in the clear.
-    const { impl } = fakeFetch(() => ({ ok: false }));
-    expect(await describeFocused("s-1", "tk", { fetchImpl: impl })).toEqual({});
+    //
+    // Null rather than `{}`, so the caller can re-ticket and ask again. Read as
+    // "nothing is focused", a failure also breaks keystroke coalescing — the
+    // backend groups consecutive keystrokes only while they name the same element,
+    // and an empty target matches nothing, which is how one typed word was
+    // recorded as `fill "monito"` followed by `fill "monitor"`.
+    const { impl } = fakeFetch(() => ({ ok: false, status: 403 }));
+    expect(await describeFocused("s-1", "tk", { fetchImpl: impl })).toBeNull();
   });
 
   it("is the only way to learn focus, because clicking is not how focus always moves", async () => {
@@ -641,8 +656,8 @@ describe("describeFocused", () => {
     );
     const clicked = await describeAt("s-1", "tk", { nx: 0.1, ny: 0.1 }, { fetchImpl: impl });
     const reallyFocused = await describeFocused("s-1", "tk", { fetchImpl: impl });
-    expect(clicked.type).toBe("email");
-    expect(reallyFocused.type).toBe("password");
+    expect(clicked?.type).toBe("email");
+    expect(reallyFocused?.type).toBe("password");
     expect(calls.map((c) => c.url.split("/").pop())).toEqual(["describe", "focused"]);
   });
 });

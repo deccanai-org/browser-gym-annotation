@@ -1,4 +1,4 @@
-import { FocusBadge, Icon, t, weight } from "../../../ds";
+import { avatarColor, FocusBadge, Icon, t, weight } from "../../../ds";
 import type { Annotator } from "../../auth/authApi";
 
 function Rule() {
@@ -74,10 +74,10 @@ export function Header({ onBrowseGym, gymTaskId, gymAdhoc, onExitGym, annotator,
         title="Your profile — view stats or log out"
         style={{ display: "inline-flex", alignItems: "center", gap: 9, cursor: "pointer", padding: "4px 8px 4px 4px", borderRadius: t.radiusFull, border: `1px solid ${t.n7}` }}
       >
-        <span style={{ width: 32, height: 32, borderRadius: t.radiusFull, background: annotator ? `hsl(${annotator.avatarHue} 62% 52%)` : t.primary7, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: "0.8rem", fontWeight: weight.bold, flexShrink: 0 }}>{initial}</span>
+        <span style={{ width: 32, height: 32, borderRadius: t.radiusFull, background: annotator ? avatarColor(annotator.avatarHue) : t.primary7, color: t.n9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: "0.8rem", fontWeight: weight.bold, flexShrink: 0 }}>{initial}</span>
         <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.15, marginRight: 2 }}>
           <span style={{ fontSize: "0.78rem", fontWeight: weight.semibold, color: t.n1 }}>{name}</span>
-          <span style={{ fontSize: "0.62rem", color: t.n3, textTransform: "uppercase", letterSpacing: "0.05em" }}>{annotator?.role ?? ""}</span>
+          <span style={{ fontSize: "0.62rem", color: t.n3, textTransform: "uppercase", letterSpacing: t.trackingEyebrow }}>{annotator?.role ?? ""}</span>
         </span>
       </span>
     </header>

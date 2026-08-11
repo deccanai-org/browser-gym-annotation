@@ -73,7 +73,8 @@ class FakeLiveBrowser:
         if method == "POST" and path == "/live/sessions":
             self.opens += 1
             sid = f"live-{self.opens}"
-            self.sessions[sid] = {"url": body["url"], "owner": body["owner"]}
+            self.sessions[sid] = {"url": body["url"], "owner": body["owner"],
+                                  "extra_urls": body.get("extra_urls") or []}
             return 200, {"session_id": sid, "ticket": self._mint(sid, body["owner"]), "viewport": self.viewport}
 
         parts = path.strip("/").split("/")  # live/sessions/<sid>[/<verb>]

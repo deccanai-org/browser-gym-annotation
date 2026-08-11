@@ -1,30 +1,49 @@
 /* ============================================================
-   Deccan AI — Motion & effects tokens
-   Snappy 0.2s ease for UI; slower cubic-bezier for layout
-   shifts. Always honor prefers-reduced-motion.
+   Deccan AI Experts — Motion & effects tokens
+   The DS moves one way only: elements fade up ~18px over 320ms on
+   cubic-bezier(.22,.61,.36,1), staggered 140ms apart. Nothing
+   bounces, spins or scales from zero. Always honor
+   prefers-reduced-motion.
    ============================================================ */
 
 :root {
-  /* ---- Transitions ---------------------------------------- */
-  /* Transitions — buttons/inputs, sidebar, page mount */
-  --transition-ui: 0.2s ease-in-out; /* @kind other */
-  --transition-layout: 380ms cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
-  --transition-mount: 0.35s cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
-  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
+  /* ---- Easing + duration (DS) ----------------------------- */
+  --ease-standard: cubic-bezier(0.22, 0.61, 0.36, 1); /* @kind other */ /* DS --ease-out */
+  --ease-in-out: cubic-bezier(0.45, 0.05, 0.55, 0.95); /* @kind other */
+  --dur-fast: 180ms; /* @kind other */
+  --dur-base: 320ms; /* @kind other */
+  --dur-slow: 560ms; /* @kind other */
+  --stagger: 140ms; /* @kind other */  /* delay between successive rows appearing */
+  --rise: 18px;                        /* travel of a fade-up */
+
+  /* ---- Transitions — buttons/inputs, layout shifts, mount -- */
+  --transition-ui: var(--dur-fast) var(--ease-standard); /* @kind other */
+  --transition-layout: var(--dur-base) var(--ease-standard); /* @kind other */
+  --transition-mount: var(--dur-base) var(--ease-standard); /* @kind other */
+
+  /* ---- Interaction states (DS) ---------------------------- */
+  --hover-lift: -2px;
+  --press-scale: 0.985; /* @kind other */
+  --disabled-opacity: 0.45; /* @kind other */
 
   /* ---- Focus outline (alternative to --shadow-focus) ------ */
   --focus-outline: 2px solid var(--primary-6);
   --focus-outline-offset: 2px;
 
-  /* ---- Scrollbar ------------------------------------------ */
+  /* ---- Scrollbar — warm, per "no greys as fills" ---------- */
   --scrollbar-width: 8px;
-  --scrollbar-track: var(--primary-0);
-  --scrollbar-thumb: var(--accent-blue-lite);
-  --scrollbar-thumb-hover: var(--neutrals-3);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: var(--neutrals-5);
+  --scrollbar-thumb-hover: var(--neutrals-4);
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root {
+    --dur-fast: 1ms; /* @kind other */
+    --dur-base: 1ms; /* @kind other */
+    --dur-slow: 1ms; /* @kind other */
+    --stagger: 0ms; /* @kind other */
+    --rise: 0px;
     --transition-ui: 0.01ms; /* @kind other */
     --transition-layout: 0.01ms; /* @kind other */
     --transition-mount: 0.01ms; /* @kind other */

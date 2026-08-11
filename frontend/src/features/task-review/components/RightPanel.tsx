@@ -42,7 +42,7 @@ export function RightPanel({ task, summary, onSavePrompt, rerunsOnSave }: { task
       {/* fixed header (§4.1) */}
       <div style={{ padding: "16px 18px 14px", borderBottom: `1px solid ${t.n7}`, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", padding: "3px 8px", background: t.deltaTagId, border: `1px solid ${t.n6}`, borderRadius: 5, color: t.n1 }}>{task.id}</span>
+          <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", padding: "3px 8px", background: t.deltaTagId, border: `1px solid ${t.n6}`, borderRadius: t.radiusSm, color: t.n1 }}>{task.id}</span>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: "0.75rem", fontWeight: weight.semibold, color: t.redDark }}>
             <span style={{ width: 7, height: 7, borderRadius: t.radiusFull, background: t.red }} />
             {task.priority}
@@ -120,7 +120,7 @@ export function RightPanel({ task, summary, onSavePrompt, rerunsOnSave }: { task
         {summary.length > 0 && (
           <div>
             <Label>Run summary</Label>
-            <div style={{ background: t.n85, border: `1px solid ${t.n7}`, borderRadius: 10, padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 12, columnGap: 16 }}>
+            <div style={{ background: t.n85, border: `1px solid ${t.n7}`, borderRadius: t.radiusLg, padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 12, columnGap: 16 }}>
               {summary.map((m) => (
                 <div key={m.label}>
                   <div style={{ fontFamily: t.fontMono, fontSize: "1.0625rem", fontWeight: weight.bold, lineHeight: 1, color: metricColor(m.tone) }}>{m.value}</div>

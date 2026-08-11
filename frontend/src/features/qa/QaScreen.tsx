@@ -84,7 +84,7 @@ export function QaScreen({ onExit }: { onExit: () => void }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: t.n85, display: "flex", flexDirection: "column" }}>
+    <div style={{ minHeight: "100vh", background: t.surfacePage, display: "flex", flexDirection: "column" }}>
       <header style={{ height: 56, flexShrink: 0, display: "flex", alignItems: "center", gap: 14,
                        padding: "0 20px", background: t.n9, borderBottom: `1px solid ${t.n7}` }}>
         <Button variant="soft" onClick={onExit}>← My tasks</Button>
@@ -123,7 +123,7 @@ export function QaScreen({ onExit }: { onExit: () => void }) {
                         {row.title || row.taskExternalId}
                       </span>
                       <span style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-                        <span style={{ fontSize: "0.68rem", padding: "2px 7px", borderRadius: 999,
+                        <span style={{ fontSize: "0.68rem", padding: "2px 7px", borderRadius: t.radiusPill,
                                        background: b.bg, color: b.fg, fontWeight: weight.semibold }}>
                           {b.txt}
                         </span>
@@ -159,7 +159,7 @@ export function QaScreen({ onExit }: { onExit: () => void }) {
                                   borderRadius: t.radiusLg, padding: 14 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: weight.semibold, fontSize: "0.84rem" }}>{s.annotator}</span>
-                    <span style={{ fontSize: "0.72rem", padding: "2px 8px", borderRadius: 999,
+                    <span style={{ fontSize: "0.72rem", padding: "2px 8px", borderRadius: t.radiusPill,
                                    background: s.reward === 1 ? tint(t.green, 14) : tint(t.yellow, 16),
                                    color: s.reward === 1 ? t.greenDark : t.n1, fontWeight: weight.semibold }}>
                       reward {s.reward}

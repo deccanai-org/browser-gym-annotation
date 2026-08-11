@@ -1,16 +1,19 @@
 /* ============================================================
-   Deccan AI — Radius tokens
-   Default for new components is --radius-lg (8px). Always use a
-   token; never hardcode px radii.
+   Deccan AI Experts — Radius tokens
+   "Nothing is square." The DS runs 6 / 8 / 12 / 16 / 20 / 24 / 28
+   plus a full pill; every step below is one of those. Default for
+   new components is --radius-lg (12px). Always use a token; never
+   hardcode px radii.
    ============================================================ */
 
 :root {
-  --radius-none: 0;          /* tables, code blocks */
-  --radius-sm: 0.25rem;      /* 4px  — inline chips, tight badges */
-  --radius-md: 0.375rem;     /* 6px  — small buttons, tooltips */
-  --radius-lg: 0.5rem;       /* 8px  — DEFAULT: inputs, buttons, cards */
-  --radius-xl: 0.75rem;      /* 12px — panels, larger cards, focus badges */
-  --radius-2xl: 1rem;        /* 16px — modals, drawers, floating panels */
-  --radius-pill: 9999px;     /* status pills, tag chips */
-  --radius-full: 50%;        /* avatars, circular icon buttons */
+  --radius-none: 0;          /* tables, code blocks, the browser viewport */
+  --radius-sm: 6px;          /* DS --r-xs  — inline chips, tight badges */
+  --radius-md: 8px;          /* DS --r-sm  — small buttons, tooltips, step pills */
+  --radius-lg: 12px;         /* DS --r-md  — DEFAULT: inputs, buttons, cards */
+  --radius-xl: 16px;         /* DS --r-lg  — panels, larger cards, focus badges */
+  --radius-2xl: 24px;        /* DS --r-2xl — modals, drawers, floating panels */
+  --radius-3xl: 28px;        /* DS --r-3xl — the big white card */
+  --radius-pill: 999px;      /* DS --r-pill — status pills, tag chips */
+  --radius-full: 50%;        /* avatars, circular icon buttons, icon discs */
 }

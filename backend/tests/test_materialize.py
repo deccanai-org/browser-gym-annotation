@@ -479,3 +479,81 @@ def test_a_confirm_read_that_fails_says_nothing_rather_than_no_change(db_session
         assert st.world_delta is None, (
             "an unreadable confirm is not evidence that nothing changed"
         )
+
+
+# --------------------------------------------------------------------------- descriptions
+#
+# A trajectory of anonymous clicks is not reviewable and is worth nothing as
+# training data, and "click" on its own is what every click read as whenever the
+# pane's describe round trip came back empty. These pin the wording.
+
+
+def _click(db, attempt, target, **payload):
+    base = _settled_base()
+    _ev(db, attempt, 1, "mouseDown", base, target, nx=0.5, ny=0.5, button="left", **payload)
+    _ev(db, attempt, 2, "mouseUp", base + 30, target, nx=0.5, ny=0.5, button="left", clicks=1, **payload)
+    db.commit()
+    made = materialize.materialize(db, attempt)
+    db.commit()
+    return made[0]
+
+
+def test_a_click_is_described_by_what_the_element_says(db_session, attempt):
+    """The element's own words, because that is what a reviewer can check against
+    the screenshot. `data-test-id=add-to-cart-42` is not something anyone can
+    recognise; "Add to cart" is."""
+    step = _click(db_session, attempt, {
+        "targetKey": "add-to-cart-42", "testId": "add-to-cart-42",
+        "text": "Add to cart", "role": "button",
+    })
+    assert step.action_type == "click"
+    assert step.description == 'click "Add to cart" button'
+
+
+def test_a_link_is_called_a_link_and_not_an_a(db_session, attempt):
+    """`describe` reports `role` as the aria role or else the TAG NAME, so most
+    roles arriving here are html — and "click the a" reads like a typo."""
+    step = _click(db_session, attempt, {
+        "targetKey": "nav-orders", "text": "Your orders", "role": "a",
+    })
+    assert step.description == 'click "Your orders" link'
+
+
+def test_a_click_with_no_name_says_so_and_says_where(db_session, attempt):
+    """The honest fallback. It must not fabricate a name, and it must not read as
+    a bare "click" either — the position is the only detail there is, and it is
+    what the step's own coordinate fallback will replay from."""
+    step = _click(db_session, attempt, {"targetKey": "x"})
+    assert step.description == "click an unidentified element at 50%, 50% of the page"
+    assert "click" == step.action_type, "the description must not change what it IS"
+
+
+def test_an_unnamed_element_of_a_known_kind_is_described_by_its_kind(db_session, attempt):
+    step = _click(db_session, attempt, {"targetKey": "y", "role": "button"})
+    assert step.description == "click an unnamed button at 50%, 50% of the page"
+
+
+def test_a_copy_is_described_as_a_copy_with_the_value_taken(db_session, attempt):
+    """Reading a value in one app and carrying it to another is the pivot most
+    cross-app tasks turn on, so the step has to show WHAT was taken. It is not
+    replayed — there is nothing to replay about a copy — but a reviewer checking
+    whether the annotator carried the right order id has only this to look at."""
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "select_text", base, {"targetKey": "order-total", "testId": "order-total"},
+        text="ORD-10432", via="copy")
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert [s.description for s in made] == ['copy "ORD-10432" in order-total']
+
+
+def test_a_plain_selection_is_still_called_a_selection(db_session, attempt):
+    """Only a copy is called a copy: highlighting to read is a different intent
+    from taking the value away, and the recorder marks the difference."""
+    base = _settled_base()
+    _ev(db_session, attempt, 1, "select_text", base, {"targetKey": "order-total", "testId": "order-total"},
+        text="ORD-10432")
+    db_session.commit()
+    made = materialize.materialize(db_session, attempt)
+    db_session.commit()
+    assert [s.description for s in made] == ['select "ORD-10432" in order-total']

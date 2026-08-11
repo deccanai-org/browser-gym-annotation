@@ -190,6 +190,7 @@ const nav = {
 const LEGACY_SUBMIT = /Approve & submit to dataset/;
 const LEGACY_CORRECT = "Correct";
 const VERSION_GUIDE = /How this attempt is corrected and shipped/;
+const VERSION_SHIP = /Ship the approved version/;
 
 /**
  * Mount the screen and wait until it has DECIDED which path this attempt is on.
@@ -203,7 +204,9 @@ const mount = async (data: ReviewData, opts?: { undecided?: boolean }) => {
   await screen.findByText(/Autosaved/); // the attempt is saved
   if (opts?.undecided) return;
   await waitFor(() => {
-    const decided = screen.queryByText(LEGACY_CORRECT) ?? screen.queryByText(VERSION_GUIDE);
+    const decided = screen.queryByText(LEGACY_CORRECT)
+      ?? screen.queryByText(VERSION_GUIDE)
+      ?? screen.queryByText(VERSION_SHIP);
     expect(decided, "one correction path — and only then, the rest of the screen").not.toBeNull();
   });
 };
@@ -224,8 +227,8 @@ const mount = async (data: ReviewData, opts?: { undecided?: boolean }) => {
  *  annotator actually presses. */
 const generateSuite = () => fireEvent.click(screen.getByText("Generate verifier suite"));
 const runBenchmark = async () => {
-  fireEvent.click(screen.getByText("Run benchmark"));
-  await screen.findByText("Re-run benchmark");
+  fireEvent.click(screen.getByText("Run on benchmark"));
+  await screen.findByText("Re-run on benchmark");
 };
 
 /**
@@ -298,7 +301,8 @@ describe("an attempt that has a version graph", () => {
     expect(screen.queryByText(LEGACY_CORRECT), "the step card's Correct pill is gone").toBeNull();
     expect(screen.queryByText(/Drive forward/), "so is the drive-forward continuation").toBeNull();
     expect(screen.queryByText(/Edit state/), "and the world editor that re-verifies outside the graph").toBeNull();
-    expect(screen.getByText(/mark each one Verified or Wrong/), "verifying a step moved onto the version path, and stays").toBeDefined();
+    expect(screen.queryByText(/mark each one Verified or Wrong/), "the version guide is not on gym attempts").toBeNull();
+    expect(screen.queryByText("Version lineage"), "the lineage explorer is not on gym attempts").toBeNull();
   });
 
   it("never calls the guarded submit route, on any click a shipping annotator makes", async () => {
@@ -335,7 +339,7 @@ describe("an attempt that has a version graph", () => {
     expect(screen.getByText(/2 steps · reward 1/)).toBeDefined();
   });
 
-  it("will not ship a version nobody approved, and names who has to approve it", async () => {
+  it("will not ship a version nobody approved, and offers approval in step 3", async () => {
     // finalize.py raises NotApproved for this, so an enabled button here would
     // spend a replay to deliver a refusal the screen could have explained first.
     // The blockers come from the SERVER now (`prepare-ship` reads the same
@@ -352,8 +356,7 @@ describe("an attempt that has a version graph", () => {
     generateSuite();
     await runBenchmark();
 
-    // the gate is read from the server, so wait for that answer
-    expect(await screen.findByText(/nobody has approved it/)).toBeDefined();
+    expect(await screen.findByText(/Approve v2 to ship/)).toBeDefined();
     expect(screen.queryByText(/Replay v2 and ship it/)).toBeNull();
     expect(posted(calls, "/finalize"), "nothing is sent until it can succeed").toEqual([]);
   });
@@ -400,17 +403,15 @@ describe("an attempt that has a version graph", () => {
     expect(screen.queryByText(/Shipped/), "a refused finalize ships nothing").toBeNull();
   });
 
-  it("explains the version path in the same words its buttons use", async () => {
-    // The guide and the fork buttons read from FORK_COPY, so an annotator cannot
-    // be told one thing and shown a button that does another.
+  it("does not show the version-path guide on gym attempts", async () => {
+    // The guide and fork buttons read from FORK_COPY on fixture attempts. Gym
+    // attempts ship through step 3 without the lineage explorer.
     stubApi(versioned());
     await mount(gymAttempt);
 
-    const guide = screen.getByText(new RegExp(FORK_COPY.before.action));
-    expect(guide.textContent).toContain(FORK_COPY.after.action);
-    expect(guide.textContent, "rejecting a step means it is absent from the child").toContain("will not appear in the new version");
-    expect(screen.getByText(/right now that is v2/), "which version is head is stated, not inferred").toBeDefined();
-    expect(screen.getByText(/Finalize \(step 3 below\) replays v2/), "and so is what shipping will do to it").toBeDefined();
+    expect(screen.queryByText(new RegExp(FORK_COPY.before.action))).toBeNull();
+    expect(screen.queryByText(/right now that is v2/)).toBeNull();
+    expect(screen.getByText(/Ship the approved version/)).toBeDefined();
   });
 
   it("says that rounds recorded on the retired path will not ship, instead of hiding them", async () => {

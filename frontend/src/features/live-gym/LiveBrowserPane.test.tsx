@@ -1,6 +1,6 @@
 import { Profiler, type ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedSession } from "../../lib/liveBrowser";
 import { LiveBrowserPane } from "./LiveBrowserPane";
 
@@ -68,13 +68,26 @@ function stubFetch(reply: (url: string) => unknown, hold?: (url: string) => Prom
     calls.push({ url: String(url), body: init?.body === undefined ? undefined : (JSON.parse(String(init.body)) as unknown) });
     const wait = hold?.(String(url));
     if (wait) await wait;
-    return { ok: true, status: 200, json: async () => reply(String(url)) } as Response;
+    const body = reply(String(url));
+    const status = (body as { __status?: number } | null)?.__status;
+    if (status) return { ok: false, status, json: async () => ({}) } as Response;
+    return { ok: true, status: 200, json: async () => body } as Response;
   });
   return calls;
 }
 
+/** Answer a request the way an EXPIRED TICKET is answered. The socket is
+ *  authorised once at handshake and keeps working, so this is the state the pane
+ *  used to enter silently: input still applies, every describe is refused. */
+const DENIED = { __status: 403 };
+
 const REPLY = (url: string): unknown =>
   url.endsWith("/describe") ? { testId: "add-to-cart", role: "button" } : { url: "http://shop.test/cart" };
+
+const APPS = [
+  { app: "shop", mock_key: "amazon_mock", title: "ShopGym", attempt_sid: "s1", start_path: "/", url: "https://shop.gym.local/" },
+  { app: "mail", mock_key: "gmail_mock", title: "ShopMail", attempt_sid: "s2", start_path: "/", url: "https://mail.gym.local/" },
+];
 
 const SESSION: OpenedSession = {
   sessionId: "abc123def456",
@@ -172,6 +185,9 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  // The dock's open/closed choice is remembered, so it would otherwise carry
+  // into the next test and make its default depend on run order.
+  window.localStorage.clear();
 });
 
 // --------------------------------------------------------------------------- dead stream
@@ -406,15 +422,27 @@ describe("a click on the surface", () => {
     // Two empty answers is a click with no locator. It is still dispatched —
     // refusing to drive the browser would be worse — but the annotator is told
     // now rather than meeting an unshippable step at the last gate.
+    //
+    // Told as an UNNAMED step, not as a dropped interaction. It used to be counted
+    // as a drop, which fired "N interactions were lost — the trajectory is
+    // incomplete from here" over clicks that had in fact applied and been
+    // recorded. Both facts are worth reporting; conflating them turned a naming
+    // problem into an instruction to redo the task.
     const dropped: number[] = [];
-    const h = await mountPane({ onDropped: (n) => dropped.push(n) }, undefined,
-      (url) => (url.endsWith("/describe") ? {} : { url: "http://shop.test/cart" }));
+    const unnamed: number[] = [];
+    const h = await mountPane(
+      { onDropped: (n) => dropped.push(n), onUnnamedTarget: (n) => unnamed.push(n) },
+      undefined,
+      (url) => (url.endsWith("/describe") ? {} : { url: "http://shop.test/cart" }),
+    );
     await h.hello(true);
     sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
 
     await h.clickAt(225, 338);
 
-    await waitFor(() => expect(dropped[dropped.length - 1]).toBeGreaterThan(0));
+    await waitFor(() => expect(unnamed[unnamed.length - 1]).toBeGreaterThan(0));
+    expect(dropped.filter((n) => n > 0), "the click applied and was recorded — nothing was lost")
+      .toHaveLength(0);
   });
 
   it("offers the options instead of dispatching a click a headless browser ignores", async () => {
@@ -485,11 +513,36 @@ describe("a click on the surface", () => {
       const body = asked?.body as { width: number; height: number };
       // The stage minus its padding, not the raw box — asking for the full box
       // overflows the surface and grows a scrollbar.
-      expect(body.width).toBe(1900 - 16);
-      expect(body.height).toBe(700 - 16);
+      expect(body.width).toBe(1900 - 8);
+      expect(body.height).toBe(700 - 8);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("sends one scroll for a whole wheel gesture, not one per event", async () => {
+    // A trackpad emits 60-120 wheel events a second and the service handles
+    // input in ONE sequential loop, so a message per event queued dozens of CDP
+    // round trips and the page kept moving a second or two after the fingers
+    // stopped. Coalescing is also the honest recording: one gesture is one step.
+    const h = await mountPane();
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 1280, height: 800 });
+
+    await act(async () => {
+      for (let i = 0; i < 12; i++) {
+        h.surface.dispatchEvent(
+          new WheelEvent("wheel", { bubbles: true, cancelable: true, clientX: 640, clientY: 400, deltaY: 10 }),
+        );
+      }
+      // The flush is scheduled on an animation frame; let it run.
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    });
+
+    const scrolls = h.sock().messages.filter((m) => m.type === "scroll");
+    expect(scrolls, "twelve wheel events must not become twelve round trips").toHaveLength(1);
+    // Nothing is lost by coalescing: the gesture's full distance still travels.
+    expect(scrolls[0].dy as number).toBeCloseTo(120, 6);
   });
 
   it("drives browser history and records where it landed", async () => {
@@ -566,7 +619,7 @@ describe("a click on the surface", () => {
 
       const asked = h.calls.filter((c) => c.url.endsWith("/fit-page"));
       expect(asked.length, "choosing Page must ask for a page-shaped viewport").toBeGreaterThan(0);
-      expect((asked[0].body as { width: number }).width).toBe(1144 - 16);
+      expect((asked[0].body as { width: number }).width).toBe(1144 - 8);
     } finally {
       vi.useRealTimers();
     }
@@ -595,6 +648,21 @@ describe("a click on the surface", () => {
     }
   });
 
+  it("does not spend the page's height on the mini-window dock until it is asked for", async () => {
+    // The dock is about 150px — a third of the stage on a laptop — and it is a
+    // shortcut, not the only way to reach another app: the tab strip switches to
+    // any of them. Costing every annotator that height by default is what made
+    // the working area a letterbox.
+    await mountPane({ apps: APPS });
+
+    expect(screen.queryByLabelText("Other gym apps"), "the dock must not be on by default").toBeNull();
+    expect(screen.getByRole("tablist"), "and the apps are still reachable without it").toBeTruthy();
+
+    await act(async () => { fireEvent.click(screen.getByText(/Apps 1/)); });
+    expect(screen.getByLabelText("Other gym apps"), "the toggle has to actually bring it back").toBeTruthy();
+    expect(window.localStorage.getItem("gym.dock.open"), "and the choice is remembered").toBe("1");
+  });
+
   it("is recorded against the attempt when the pane is torn down mid-session", async () => {
     // The recorder batches, so a pane that closes without flushing loses exactly
     // the interactions somebody was mid-way through making.
@@ -613,6 +681,68 @@ describe("a click on the surface", () => {
     expect(events.map((e) => e.kind)).toEqual(["mouseDown", "mouseUp"]);
     expect(events[0].target.testId, "a pixel is not a locator").toBe("add-to-cart");
     expect(events[1].url, "the URL comes from the ack, not from what we believed").toBe("https://shop.gym.local/");
+  });
+});
+
+// --------------------------------------------------------------------------- the app dock
+
+describe("the dock of other gym apps", () => {
+  const APPS = [
+    { app: "shop", mock_key: "amazon_mock", title: "ShopGym", attempt_sid: "s1", start_path: "/", url: "http://localhost:5201/" },
+    { app: "mail", mock_key: "gmail_mock", title: "ShopMail", attempt_sid: "s2", start_path: "/", url: "http://localhost:5203/" },
+  ];
+  const dockImg = () => screen.getByLabelText("Other gym apps").querySelector("img");
+
+  // The dock is closed by default and its previews are only fetched while it is
+  // showing, so these tests are about the state an annotator who wants it is in.
+  beforeEach(() => window.localStorage.setItem("gym.dock.open", "1"));
+  afterEach(() => window.localStorage.removeItem("gym.dock.open"));
+
+  it("previews an app the annotator has never opened", async () => {
+    // Every app is a real loaded tab from the first frame, but only one is
+    // screencast — so the rest used to draw placeholders and the ecosystem
+    // looked half-empty exactly where its whole point is that it is not.
+    const h = await mountPane({ apps: APPS }, undefined, (url) => {
+      if (url.endsWith("/thumbnails")) {
+        return { thumbs: [{ tabId: "t2", url: "http://localhost:5203/#/inbox", active: false, data: "TUFJTA==" }] };
+      }
+      return { url: "http://localhost:5201/" };
+    });
+    await h.hello(true);
+
+    await waitFor(() => expect(dockImg()?.src).toBe("data:image/jpeg;base64,TUFJTA=="));
+    expect(h.sock().messages.filter((m) => m.type === "switch_tab"),
+           "the preview must not cost a visit to the app").toHaveLength(0);
+    const asked = h.calls.find((c) => c.url.endsWith("/thumbnails"));
+    expect(asked?.body, "a picture of somebody's session is read behind the ticket")
+      .toEqual({ ticket: SESSION.ticket });
+  });
+
+  it("re-photographs it, so an effect in a tab nobody is watching shows up", async () => {
+    // An order placed in ShopGym produces an email in ShopMail. A dock frozen at
+    // the empty inbox it was opened with hides exactly the effect the annotator
+    // is being asked to produce.
+    vi.useFakeTimers();
+    try {
+      let round = 0;
+      const h = await mountPane({ apps: APPS }, undefined, (url) => {
+        if (url.endsWith("/thumbnails")) {
+          round += 1;
+          return { thumbs: [{ tabId: "t2", url: "http://localhost:5203/", active: false,
+                              data: round === 1 ? "RU1QVFk=" : "TUFJTA==" }] };
+        }
+        return { url: "http://localhost:5201/" };
+      });
+      await h.hello(true);
+      await act(async () => {});
+      expect(dockImg()?.src).toBe("data:image/jpeg;base64,RU1QVFk=");
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+      expect(dockImg()?.src).toBe("data:image/jpeg;base64,TUFJTA==");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -693,6 +823,59 @@ describe("interactions that can never be recorded", () => {
     expect(dropped[dropped.length - 1], "the world moved and the trajectory cannot say why").toBe(1);
   });
 
+  it("does not call a click that WAS recorded a lost interaction", async () => {
+    // The "5 interactions were lost — the trajectory is incomplete from here"
+    // alert, fired at an annotator whose trajectory was complete. An expired
+    // ticket makes every describe answer 403 while the already-authorised socket
+    // keeps applying input, so these clicks happened, applied, and were recorded
+    // — they just had no locator. Telling someone to redo an hour of work over
+    // that is worse than the missing names.
+    const dropped: number[] = [];
+    const unnamed: number[] = [];
+    const h = await mountPane(
+      { onDropped: (n) => dropped.push(n), onUnnamedTarget: (n) => unnamed.push(n) },
+      undefined,
+      (url) => (url.endsWith("/describe") || url.endsWith("/live") ? DENIED : { url: "https://shop.gym.local/" }),
+    );
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await h.clickAt(225, 338);
+
+    expect(unnamed[unnamed.length - 1], "it is a step with no locator, and that is what to say").toBe(1);
+    expect(dropped, "nothing was lost — the click applied and was recorded").toEqual([]);
+  });
+
+  it("re-tickets and asks again rather than recording a nameless click", async () => {
+    // The root cause, and the recovery. `describeAt` used to turn a 403 into `{}`,
+    // indistinguishable from "nothing under the pointer", so the pane had nothing
+    // to react to and went on recording anonymous clicks for the rest of the
+    // session. A refusal is now visible, and the answer to it is a fresh ticket.
+    let refuse = true;
+    const h = await mountPane({}, undefined, (url) => {
+      if (url.endsWith("/live")) return { sessionId: SESSION.sessionId, ticket: "fresh.tkt", viewport: SESSION.viewport, url: "http://live.test" };
+      if (url.endsWith("/describe")) {
+        if (refuse) { refuse = false; return DENIED; }
+        return { testId: "add-to-cart", role: "button" };
+      }
+      return { url: "https://shop.gym.local/" };
+    });
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+
+    await h.clickAt(225, 338);
+    await act(async () => cleanup());
+
+    const posted = h.calls.find((c) => c.url === "/api/sessions/A-1/events");
+    const events = (posted?.body ?? []) as { kind: string; target?: Record<string, string> }[];
+    const down = events.find((e) => e.kind === "mouseDown");
+    expect(down?.target?.testId, "the retry is only worth doing if its answer is the one recorded")
+      .toBe("add-to-cart");
+    const asked = h.calls.filter((c) => c.url.endsWith("/describe"));
+    expect(asked.length, "refused once, re-ticketed, asked again").toBeGreaterThanOrEqual(2);
+    expect(asked[asked.length - 1].body).toMatchObject({ ticket: "fresh.tkt" });
+  });
+
   it("are flushed with a beacon when the annotator closes the tab", async () => {
     // A fetch started during unload dies with the document, so a fill still
     // inside the 1.2s batch window — plus the click that terminated it — used to
@@ -713,5 +896,169 @@ describe("interactions that can never be recorded", () => {
     await act(async () => { window.dispatchEvent(new Event("pagehide")); });
 
     expect(beacons).toEqual(["/api/sessions/A-1/events"]);
+  });
+});
+
+// --------------------------------------------------------------------------- clipboard
+//
+// The page runs in a REMOTE headless Chromium, so there are two clipboards and
+// they are not the same clipboard. Forwarding Cmd+C to the page copies onto the
+// remote one, which nothing on the annotator's machine can read; forwarding Cmd+V
+// pastes whatever that remote one holds rather than what they copied. Every
+// cross-app task that asks them to carry an order id or a total between two apps
+// depends on the bridge these tests pin down.
+
+describe("copy and paste between the page and the annotator", () => {
+  /** The ANNOTATOR's clipboard. `userAgent` is kept because jsdom and React both
+   *  read it, and this replaces the whole navigator. */
+  function fakeClipboard(over: {
+    writeText?: (t: string) => Promise<void>;
+    readText?: () => Promise<string>;
+    absent?: boolean;
+  } = {}) {
+    const wrote: string[] = [];
+    const reads: number[] = [];
+    const clipboard = {
+      writeText: over.writeText ?? (async (t: string) => { wrote.push(t); }),
+      readText: over.readText ?? (async () => { reads.push(1); return "ORD-10432"; }),
+    };
+    vi.stubGlobal("navigator", { userAgent: "test", ...(over.absent ? {} : { clipboard }) });
+    return { wrote, reads };
+  }
+
+  const withSelection = (text: string) => (url: string) =>
+    url.endsWith("/selection") ? { text } : REPLY(url);
+
+  const pastes = (h: { sock: () => FakeSocket }) => h.sock().messages.filter((m) => m.type === "paste");
+
+  async function mounted(reply: (url: string) => unknown = withSelection("ORD-10432")) {
+    const h = await mountPane({}, undefined, reply);
+    await h.hello(true);
+    sizeSurface(h.surface, { left: 0, top: 0, width: 900, height: 563 });
+    return h;
+  }
+
+  it("puts the remote page's selection on the annotator's own clipboard", async () => {
+    const h = await mounted();
+    const cb = fakeClipboard();
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "c", metaKey: true }); });
+
+    expect(cb.wrote).toEqual(["ORD-10432"]);
+    expect(h.sock().messages.filter((m) => m.type === "key"),
+           "forwarding it would copy onto the remote clipboard, which is unreachable from here")
+      .toHaveLength(0);
+  });
+
+  it("records the copy, with the value that was taken", async () => {
+    // Reading a value in one app and carrying it to another is the pivot most
+    // cross-app tasks turn on. A trajectory that shows the paste but not where the
+    // value came from cannot be reviewed for whether it was the RIGHT value.
+    const h = await mounted();
+    fakeClipboard();
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "c", metaKey: true }); });
+    await act(async () => cleanup());
+
+    const posted = h.calls.find((c) => c.url === "/api/sessions/A-1/events");
+    const events = (posted?.body ?? []) as { kind: string; payload: Record<string, unknown> }[];
+    const copied = events.find((e) => e.kind === "select_text");
+    expect(copied?.payload.text).toBe("ORD-10432");
+    expect(copied?.payload.via, "so the step can read 'copy' rather than 'select'").toBe("copy");
+  });
+
+  it("says nothing was selected rather than silently emptying the clipboard", async () => {
+    // An empty write is the worst outcome available: the annotator pastes what
+    // they copied five minutes ago into the next app and the trajectory records
+    // them entering a value they never chose.
+    const h = await mounted(withSelection(""));
+    const cb = fakeClipboard();
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "c", metaKey: true }); });
+
+    expect(cb.wrote).toEqual([]);
+    expect(await screen.findByText(/nothing is selected/i)).toBeDefined();
+  });
+
+  it("falls back to a hidden textarea where the clipboard API is unavailable", async () => {
+    // `navigator.clipboard` needs a secure context. http://localhost is one, so
+    // the dev stack is fine — but a hosted deploy reached over plain http on a LAN
+    // address is not, and there the API is simply undefined. A copy that silently
+    // no-ops is the failure this fallback exists to prevent.
+    const h = await mounted();
+    fakeClipboard({ absent: true });
+    const copied: (string | undefined)[] = [];
+    (document as unknown as { execCommand: (c: string) => boolean }).execCommand = (cmd: string) => {
+      if (cmd === "copy") copied.push((document.activeElement as HTMLTextAreaElement | null)?.value);
+      return true;
+    };
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "c", metaKey: true }); });
+
+    expect(copied).toEqual(["ORD-10432"]);
+    expect(document.querySelectorAll("textarea"), "and it does not leave its scratch element behind")
+      .toHaveLength(0);
+  });
+
+  it("does not preventDefault on Cmd+V, because that suppresses the paste event", async () => {
+    // The precise reason pasting did nothing at all: the keydown handler cancelled
+    // every accelerator, which stops the browser ever raising `paste` — so the
+    // onPaste handler was unreachable code and there was no other route in.
+    const h = await mounted();
+    const ev = new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true });
+
+    await act(async () => { h.surface.dispatchEvent(ev); });
+
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("sends a pasted value as one atomic paste rather than as keystrokes", async () => {
+    // A paste is one change. Typed character by character it produces a different
+    // event stream, and a different recorded trajectory, from what happened.
+    const h = await mounted();
+
+    await act(async () => {
+      fireEvent.paste(h.surface, { clipboardData: { getData: () => "ORD-10432" } });
+    });
+
+    expect(pastes(h)).toMatchObject([{ type: "paste", text: "ORD-10432" }]);
+  });
+
+  it("reads the clipboard itself when the browser sends no paste event", async () => {
+    // Firefox does not raise `paste` on a non-editable element, and the surface is
+    // a plain div. Without this route Cmd+V would work in Chrome and silently do
+    // nothing there.
+    const h = await mounted();
+    fakeClipboard();
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "v", metaKey: true }); });
+
+    await waitFor(() => expect(pastes(h)).toMatchObject([{ type: "paste", text: "ORD-10432" }]));
+  });
+
+  it("pastes once, not twice, when the browser does send a paste event", async () => {
+    // The guard on the fallback above: both routes firing would paste the order id
+    // twice into the field, which the annotator then has to notice and undo.
+    const h = await mounted();
+    const cb = fakeClipboard();
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "v", metaKey: true }); });
+    await act(async () => {
+      fireEvent.paste(h.surface, { clipboardData: { getData: () => "ORD-10432" } });
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 250)); });
+
+    expect(pastes(h)).toHaveLength(1);
+    expect(cb.reads, "the event carried the data, so the API was never needed").toEqual([]);
+  });
+
+  it("still forwards select-all to the page", async () => {
+    // Cmd+A is the page's, not the pane's: it selects in the remote document,
+    // which is what a copy then reads.
+    const h = await mounted();
+
+    await act(async () => { fireEvent.keyDown(h.surface, { key: "a", metaKey: true }); });
+
+    expect(h.sock().messages.filter((m) => m.type === "key"))
+      .toMatchObject([{ type: "key", key: "a", modifiers: ["Meta"] }]);
   });
 });

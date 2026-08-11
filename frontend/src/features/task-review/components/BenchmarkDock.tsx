@@ -12,6 +12,7 @@ export function BenchmarkDock({
   onRun,
   onSubmit,
   submitNote,
+  canRun = true,
 }: {
   reward: number | null;
   benchmarkRun: boolean;
@@ -30,12 +31,16 @@ export function BenchmarkDock({
   /** What stands in for the button when there is no legacy submit. Says where
    *  shipping happens instead, so the empty corner is never a dead end. */
   submitNote?: string;
+  /** False until a suite exists — the empty card still shows the button in the
+   *  bottom-right so the next action is visible, but it cannot score nothing. */
+  canRun?: boolean;
 }) {
   const numeralColor = reward == null ? t.n4 : reward === 1 ? t.greenDark : t.redDark;
   const numeral = reward == null ? "—" : String(reward);
 
   let sub: string;
-  if (!benchmarkRun) sub = "Run the benchmark to score every verifier on the final state.";
+  if (!canRun) sub = "Generate a verifier suite first, then score it on the final world state.";
+  else if (!benchmarkRun) sub = "Run the benchmark to score every verifier on the final state.";
   else if (reward === 1)
     // Strict gate: for a built suite reward 1 means every verifier passed.
     // A gym review carries the gym's own authoritative success verdict, which
@@ -65,7 +70,7 @@ export function BenchmarkDock({
             const bg = good ? t.greenLite : submittedKind === "flagged" ? t.redLite : t.n7;
             const fg = good ? t.greenDark : submittedKind === "flagged" ? t.redDark : t.n1;
             return (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 16px", borderRadius: 8, background: bg, color: fg, fontSize: "0.84rem", fontWeight: weight.bold }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 16px", borderRadius: t.radiusMd, background: bg, color: fg, fontSize: "0.84rem", fontWeight: weight.bold }}>
                 <Icon name="check" size={15} stroke={2.4} color={fg} /> Submitted to dataset · reward {reward} · {submittedKind ?? (reward === 1 ? "golden" : "breaker")}
               </span>
             );
@@ -75,8 +80,13 @@ export function BenchmarkDock({
             {submitError && (
               <span style={{ fontSize: "0.78rem", fontWeight: weight.semibold, color: t.redDark, maxWidth: 280 }}>{submitError}</span>
             )}
-            <Button variant={benchmarkRun ? "secondary" : "primary"} onClick={onRun} style={{ minHeight: 44 }}>
-              {benchmarkRun ? "Re-run benchmark" : "Run benchmark"}
+            <Button
+              variant={benchmarkRun ? "secondary" : "primary"}
+              disabled={!canRun}
+              onClick={onRun}
+              style={{ minHeight: 44 }}
+            >
+              {benchmarkRun ? "Re-run on benchmark" : "Run on benchmark"}
             </Button>
             {onSubmit ? (
               <Button variant="primary" disabled={!canSubmit} onClick={onSubmit} style={{ minHeight: 44 }}>

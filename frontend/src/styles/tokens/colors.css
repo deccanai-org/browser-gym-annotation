@@ -1,81 +1,114 @@
 /* ============================================================
-   Deccan AI — Color tokens
-   Base palette (lifted from src/styles/core/_tokens.scss) plus
-   semantic aliases. Use the semantic aliases in product code;
-   reach for raw scale steps only when no alias fits.
+   Deccan AI Experts — Color tokens
+   Retargeted to the Deccan AI Experts design system: a single warm
+   ramp (red → coral → orange → gold) over warm ink and warm tints.
+   The DS rule is "no greys as fills, ever" — every neutral surface
+   here is a warm tint, and there is no blue/cyan/violet left in the
+   UI layer.
+
+   Scale names (--primary-*, --neutrals-*, --delta-*) are kept as-is
+   so `t` and every consumer keep working; only the values moved.
+   Use the semantic aliases in product code; reach for raw scale
+   steps only when no alias fits.
+
+   Values marked (DS) are lifted verbatim from the design system's
+   tokens/colors.css. Values marked (derived) are interpolated from
+   a DS stop because the app needs a step the slide system never
+   had to draw — see the note at each one.
    ============================================================ */
 
 :root {
-  /* ---- Primary (Blue) ------------------------------------- */
-  --primary-0: #eef8ff;   /* tinted surface backgrounds */
-  --primary-1: #d9eeff;   /* hover surfaces, light fills */
-  --primary-2: #bbe3ff;   /* borders on light primary elements */
-  --primary-3: #8cd2ff;   /* decorative glows, gradient stops */
-  --primary-4: #56b9ff;   /* decorative, non-interactive */
-  --primary-5: #2f9aff;   /* background glow / gradient accents */
-  --primary-6: #1279f7;   /* CTA, links, active, focus ring */
-  --primary-7: #1165e4;   /* button hover, focus badge bg */
-  --primary-8: #1551b8;   /* pressed */
-  --primary-9: #174791;   /* dark emphasis */
-  --primary-10: #132c58;  /* deep — avoid in UI chrome */
+  /* ---- Primary — the DS warm ramp, hotter as it gets more
+         interactive. Links are --primary-6 and hover to --primary-7,
+         which is the DS's own orange-600 → red-600 link behaviour. */
+  --primary-0: #fdf0e3;   /* (DS tint-cream)    tinted surface backgrounds */
+  --primary-1: #ffe3ce;   /* (DS tint-apricot)  hover surfaces, light fills */
+  --primary-2: #fce3bc;   /* (DS tint-butter)   borders on light primary elements */
+  --primary-3: #ffcb5f;   /* (DS gold-400)      decorative, gradient stops */
+  --primary-4: #ffa800;   /* (DS amber-500)     decorative, non-interactive */
+  --primary-5: #ff792a;   /* (DS orange-500)    background glow / gradient accents */
+  --primary-6: #ff6400;   /* (DS orange-600)    CTA, links, active, focus ring */
+  --primary-7: #f52d1e;   /* (DS red-600)       button hover, focus badge */
+  --primary-8: #d42413;   /* (derived)          pressed — one stop under red-600 */
+  --primary-9: #a81c0e;   /* (derived)          dark emphasis */
+  --primary-10: #5e1207;  /* (derived)          deep — avoid in UI chrome */
 
-  /* ---- Neutrals (Grayscale) ------------------------------- */
-  --neutrals-0: #0d0d0d;  /* body text, headings */
-  --neutrals-1: #3b3b3b;  /* secondary headings, strong UI text */
-  --neutrals-2: #666666;  /* muted text, descriptions, labels */
-  --neutrals-3: #808080;  /* placeholders, disabled text, icons */
-  --neutrals-4: #b3b3b3;  /* dividers, subtle borders */
-  --neutrals-5: #cccccc;  /* input borders (rest) */
-  --neutrals-6: #d9d9d9;  /* hairline borders, table rules */
-  --neutrals-7: #e6e6e6;  /* card borders, subtle separators */
-  --neutrals-8: #f2f2f2;  /* alternate row, chip backgrounds */
-  --neutrals-85: #f5f5f5; /* default page / sidebar background */
-  --neutrals-9: #ffffff;  /* white — cards, inputs */
+  /* Heading reds — the DS colours titles separately from CTAs. */
+  --heading-red: #ee4e2b;     /* (DS) section + screen titles */
+  --heading-orange: #f26d3d;  /* (DS) hero / display headline */
+
+  /* ---- Neutrals — the DS warm ink ramp. 0 = text … 9 = white.
+         Nothing here is a true grey below step 3; the DS forbids
+         grey fills, so the light end runs through its warm tints. */
+  --neutrals-0: #17120b;  /* (DS ink-900) body text, headings */
+  --neutrals-1: #3d3833;  /* (DS ink-700) secondary headings, strong UI text */
+  --neutrals-2: #585858;  /* (DS ink-600) muted text, descriptions, labels */
+  --neutrals-3: #95918b;  /* (DS ink-400) placeholders, disabled text, icons */
+  --neutrals-4: #c7bfb4;  /* (derived)    dividers — between ink-400 and ink-200 */
+  --neutrals-5: #dcd6cf;  /* (DS ink-200) input borders (rest) */
+  --neutrals-6: #e9dfd3;  /* (derived)    hairline borders, table rules */
+  --neutrals-7: #f2e7da;  /* (derived)    card borders, subtle separators */
+  --neutrals-8: #fdf0e3;  /* (DS tint-cream) alternate row, chip backgrounds */
+  --neutrals-85: #fff7f0; /* (derived)    flat page / sidebar tint */
+  --neutrals-9: #ffffff;  /* (DS white)   cards, inputs */
 
   /* ---- Accent · Red — errors, destructive ----------------- */
-  --accent-red-lite: #eedcda;
-  --accent-red-dull: #eaaca5;
-  --accent-red: #ce2c31;
-  --accent-red-dark: #641818;
+  --accent-red-lite: #ffd1d1;  /* (DS tint-pink) */
+  --accent-red-dull: #ff9a8e;  /* (derived) */
+  --accent-red: #f52d1e;       /* (DS red-600) */
+  --accent-red-dark: #9e1b0f;  /* (derived) readable on --accent-red-lite */
 
-  /* ---- Accent · Green — success, positive ----------------- */
-  --accent-green-lite: #d7e6dd;
-  --accent-green-dull: #a1c9b2;
-  --accent-green: #218358;
-  --accent-green-dark: #006d43;
+  /* ---- Accent · Green — success, positive -----------------
+         The DS has no green in its UI layer; its only green is the
+         spot-illustration sage. A pass/fail meter cannot be read if
+         both states are warm, so success is that sage, deepened
+         until it carries text contrast. Documented deviation. */
+  --accent-green-lite: #e6e5d6;  /* (derived from illo-sage) */
+  --accent-green-dull: #b0ae8e;  /* (derived) */
+  --accent-green: #7c7a55;       /* (derived) DS illo-sage #8C8A6B, deepened */
+  --accent-green-dark: #4f4e33;  /* (derived) readable on --accent-green-lite */
 
   /* ---- Accent · Yellow — warnings, caution ---------------- */
-  --accent-yellow-lite: #fde1b1;
-  --accent-yellow-dull: #efbd61;
-  --accent-yellow: #e7a300;
-  --accent-yellow-dark: #8a5c00;
+  --accent-yellow-lite: #fdeba8;  /* (DS tint-lemon) */
+  --accent-yellow-dull: #ffcb5f;  /* (DS gold-400) */
+  --accent-yellow: #ffa800;       /* (DS amber-500) */
+  --accent-yellow-dark: #8a5200;  /* (derived) readable on --accent-yellow-lite */
 
-  /* ---- Accent · Purple — annotations, metadata ------------ */
-  --accent-purple-lite: #b9beed;
-  --accent-purple-dull: #6b71cf;
-  --accent-purple: #45478d;
-  --accent-purple-dark: #303063;
+  /* ---- Accent · Purple — annotations, metadata ------------
+         Repointed to the DS's dark plum illustration outline; the
+         DS has no purple in the UI layer. */
+  --accent-purple-lite: #dcd0d6;  /* (derived) */
+  --accent-purple-dull: #8f7a85;  /* (derived) */
+  --accent-purple: #4a3b44;       /* (DS illo-outline) */
+  --accent-purple-dark: #332830;  /* (derived) */
 
-  /* ---- Accent · Blue — informational, links --------------- */
-  --accent-blue-lite: #cbddef;
-  --accent-blue-dull: #8db1dd;
-  --accent-blue: #0d74ce;
-  --accent-blue-dark: #0062bb;
+  /* ---- Accent · Blue — informational ----------------------
+         There is no blue anywhere in the DS. "Informational" is the
+         calmest warm the DS owns: the terracotta spot colour. */
+  --accent-blue-lite: #f3e0d6;  /* (derived from illo-terracotta) */
+  --accent-blue-dull: #dfae99;  /* (derived) */
+  --accent-blue: #c97b5f;       /* (DS illo-terracotta) */
+  --accent-blue-dark: #7a4030;  /* (derived) readable on --accent-blue-lite */
 
-  /* ---- Delta / Tag colors — timeline chips, data tags ----- */
-  --delta-pink: #d6006e;
-  --delta-cyan: #0097a7;
-  --delta-violet: #8b3fd9;
-  --delta-blue: var(--accent-blue);
-  --delta-emerald: var(--accent-green);
-  --delta-amber: var(--accent-yellow);
-  --delta-rose: var(--accent-red);
-  --delta-tag-id: #f5ebdc;   /* ID tag background */
+  /* ---- Delta / Tag colors — timeline chips, data tags -----
+         Seven categorical hues for the seven agent action types.
+         The DS only ever needs four (it walks red → coral → orange
+         → gold in order), so this set extends that ramp with the
+         spot-illustration palette rather than inventing hues. The
+         legacy key names are kept so `t`/ACTION_COLOR don't churn. */
+  --delta-pink: #4a3b44;             /* (DS illo-outline)  tab */
+  --delta-cyan: #ff6a59;             /* (DS coral-500)     type */
+  --delta-violet: #ff792a;           /* (DS orange-500)    click */
+  --delta-blue: var(--accent-blue);      /* terracotta     navigate */
+  --delta-emerald: var(--accent-green);  /* sage           submit */
+  --delta-amber: var(--accent-yellow);   /* amber          extract */
+  --delta-rose: var(--accent-red);       /* red-600        error */
+  --delta-tag-id: #fdf0e3;           /* (DS tint-cream)    ID tag background */
 
-  /* ---- Overlay / Scrim ------------------------------------ */
-  --overlay-subtle: rgba(13, 13, 13, 0.05);   /* hover tints */
-  --overlay-medium: rgba(13, 13, 13, 0.10);   /* pressed overlays */
-  --overlay-backdrop: rgba(13, 13, 13, 0.50); /* modal backdrop */
+  /* ---- Overlay / Scrim — warm, keyed to ink-900 ----------- */
+  --overlay-subtle: rgba(23, 18, 11, 0.05);   /* hover tints */
+  --overlay-medium: rgba(23, 18, 11, 0.10);   /* pressed overlays */
+  --overlay-backdrop: rgba(23, 18, 11, 0.50); /* modal backdrop */
 
   /* ========================================================
      Semantic aliases — prefer these in product code
@@ -89,20 +122,26 @@
   --text-disabled: var(--neutrals-3);
   --text-on-primary: var(--neutrals-9);
   --text-link: var(--primary-6);
+  --text-title: var(--heading-red);
+  --text-hero: var(--heading-orange);
 
-  /* Surfaces */
-  --surface-page: var(--neutrals-85);
+  /* Surfaces. --surface-page is the DS mesh wash, not a flat colour:
+     it is only ever used as a full-page `background`. Use
+     --neutrals-85 where a flat warm tint is needed instead. */
+  --surface-page: var(--bg-wash);
   --surface-card: var(--neutrals-9);
   --surface-alt: var(--neutrals-8);
   --surface-sidebar: var(--neutrals-85);
   --surface-tint: var(--primary-0);
 
-  /* Borders */
-  --border-hairline: var(--neutrals-6);
+  /* Borders. The hairline is the DS's own warm alpha rule rather
+     than a solid step, so it reads the same on white and on tint. */
+  --border-hairline: rgba(196, 120, 90, 0.22);  /* (DS) */
   --border-card: var(--neutrals-7);
-  --border-input: var(--accent-blue-lite);
+  --border-input: var(--neutrals-5);
   --border-divider: var(--neutrals-4);
   --border-strong: var(--neutrals-5);
+  --border-dashed: rgba(238, 78, 43, 0.28);     /* (DS) step connectors */
 
   /* Interactive */
   --interactive-primary: var(--primary-6);

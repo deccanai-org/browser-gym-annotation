@@ -91,9 +91,12 @@ describe("the review screen", () => {
     expect(html).not.toContain("Replay");
   });
 
-  it("mounts the version lineage next to the trajectory it describes", () => {
-    expect(html).toContain("Version lineage");
-    expect(html).toContain("Steps in this version");
+  it("does not mount the version lineage explorer on a gym attempt", () => {
+    // Human-do pilot: the live ActionLog is the trajectory. The version-graph
+    // panel is agent-review chrome — it stayed after the copy was fixed, but it
+    // does not belong on the screen an annotator works on.
+    expect(html).not.toContain("Version lineage");
+    expect(html).not.toContain("Steps in this version");
   });
 
   it("leaves out the sections it has nothing to put in", () => {

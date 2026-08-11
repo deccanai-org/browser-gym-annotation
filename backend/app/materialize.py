@@ -129,6 +129,58 @@ def _acted_at(ev: models.InteractionEvent | None) -> datetime | None:
     return datetime.fromtimestamp(t / 1000, tz=timezone.utc).replace(tzinfo=None)
 
 
+#: Tag names as a person would say them. `describe` reports `role` as the aria
+#: role or, failing that, the tag name — so most of what arrives here is HTML, and
+#: "click the a" reads like a typo rather than a link.
+_ROLE_WORDS = {
+    "a": "link", "button": "button", "input": "field", "textarea": "field",
+    "select": "dropdown", "img": "image", "li": "item", "td": "cell",
+    "th": "column header", "label": "label", "summary": "disclosure",
+}
+
+
+def _at_phrase(payload: dict) -> str:
+    """Where on the page, as a percentage. Only used when there is nothing better."""
+    try:
+        nx = float(payload["nx"])
+        ny = float(payload["ny"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return f" at {round(nx * 100)}%, {round(ny * 100)}% of the page"
+
+
+def _click_phrase(tgt: dict, payload: dict) -> str:
+    """What a click says it landed on.
+
+    A bare "click" is the least useful thing this module can emit, and it is what
+    every click said whenever the pane's describe round trip came back empty: a
+    trajectory of anonymous clicks cannot be reviewed and is worth nothing as
+    training data.
+
+    The element's own WORDS come first, because that is what a reviewer can check
+    against the screenshot — an annotator recognises "Add to cart", not
+    `data-test-id=add-to-cart-42`. Note this is the opposite order from
+    `_locator`, deliberately: that one wants the most stable handle, this one wants
+    the most recognisable. When there is genuinely no name anywhere, it says so and
+    gives the position, rather than inventing one.
+    """
+    # What the element SAYS is quoted; what it is CALLED internally is not. A
+    # reviewer reads `click "Add to cart" button` straight off the screenshot,
+    # whereas quoting `btn-cart` only dresses up an identifier as a label.
+    said = " ".join(str(tgt.get("text") or "").split())[:40] or str(tgt.get("label") or "").strip()
+    ident = str(tgt.get("name") or "").strip() or str(tgt.get("testId") or "").strip()
+    role = str(tgt.get("role") or "").strip().lower()
+    # An unrecognised long role is somebody's custom aria value; pass a short one
+    # through, but never paste a sentence into the description.
+    word = _ROLE_WORDS.get(role, role if role and len(role) < 20 else "")
+    if said:
+        return f'"{said}" {word}'.strip()
+    if ident:
+        return f"{ident} {word}".strip()
+    where = _at_phrase(payload)
+    return f"an unnamed {word}{where}" if word else f"an unidentified element{where}"
+
+
 def _describe(action: dict) -> str:
     """A one-line human summary — what the step list actually shows.
 
@@ -157,12 +209,20 @@ def _describe(action: dict) -> str:
     if kind == "select_text":
         # The TEXT is the substance of this step — it is the value the annotator
         # went and read. "select_text order-total" says nothing they can check.
+        #
+        # A copy is called a copy: reading a value and carrying it to another app
+        # is a different intent from merely highlighting, and on a cross-app task
+        # it is usually the pivot the whole trajectory turns on.
         text = str(payload.get("text") or "")[:60]
-        return f'select "{text}"' + (f" in {name}" if name else "")
+        verb = "copy" if payload.get("via") == "copy" else "select"
+        return f'{verb} "{text}"' + (f" in {name}" if name else "")
+    if kind in ("click", "dblclick"):
+        verb = "double-click" if kind == "dblclick" else "click"
+        return f"{verb} {_click_phrase(tgt, payload)}"
     if kind == "right_click":
-        return f"right-click {name}".strip()
+        return f"right-click {_click_phrase(tgt, payload)}"
     if kind == "middle_click":
-        return f"middle-click {name}".strip()
+        return f"middle-click {_click_phrase(tgt, payload)}"
     if kind == "press":
         # "press Enter", not "press input-search": the KEY is the action here, and
         # the field is only where it landed.

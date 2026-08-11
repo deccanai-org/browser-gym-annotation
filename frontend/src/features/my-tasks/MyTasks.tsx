@@ -40,7 +40,7 @@ function StatusPill({ status }: { status: MyTaskStatus }) {
       borderRadius: t.radiusPill, background: s.bg, color: s.fg,
       fontSize: "0.72rem", fontWeight: weight.semibold, whiteSpace: "nowrap",
     }}>
-      <span aria-hidden style={{ width: 6, height: 6, borderRadius: 999, background: s.fg }} />
+      <span aria-hidden style={{ width: 6, height: 6, borderRadius: t.radiusFull, background: s.fg }} />
       {s.label}
     </span>
   );
@@ -52,7 +52,7 @@ function Sites({ row }: { row: MyTaskRow }) {
   const hue = APP_COLOR[first.app as AppKey] ?? t.n4;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: "0.8rem", fontFamily: t.fontMono, color: t.n2 }}>
-      <span aria-hidden style={{ width: 7, height: 7, borderRadius: 999, background: hue, flexShrink: 0 }} />
+      <span aria-hidden style={{ width: 7, height: 7, borderRadius: t.radiusFull, background: hue, flexShrink: 0 }} />
       {first.domain}
       {rest.length > 0 && <span style={{ color: t.n4 }}>+{rest.length}</span>}
     </span>
@@ -68,7 +68,7 @@ function StartButton({ row, onOpen }: { row: MyTaskRow; onOpen: (id: string) => 
       style={{
         display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 16px",
         borderRadius: t.radiusMd, border: "none", cursor: "pointer", whiteSpace: "nowrap",
-        background: done ? t.n7 : t.greenDark, color: done ? t.n1 : "#fff",
+        background: done ? t.n7 : t.primary6, color: done ? t.n1 : t.n9,
         fontSize: "0.8rem", fontWeight: weight.semibold,
       }}
     >
@@ -113,15 +113,15 @@ function QuotaCard({ board }: { board: MyTasksBoard }) {
       minWidth: 260, padding: "14px 18px", border: `1px solid ${t.n7}`,
       borderRadius: t.radiusLg, background: t.n9,
     }}>
-      <div style={{ fontSize: "0.66rem", fontWeight: weight.bold, letterSpacing: "0.08em", color: t.n3, marginBottom: 8 }}>
+      <div style={{ fontSize: "0.66rem", fontWeight: weight.bold, letterSpacing: t.trackingEyebrow, color: t.n3, marginBottom: 8 }}>
         SUBMITTED
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 10 }}>
         <span style={{ fontSize: "1.5rem", fontWeight: weight.bold, color: t.n0, fontVariantNumeric: "tabular-nums" }}>{submitted}</span>
         <span style={{ fontSize: "0.9rem", color: t.n3, fontVariantNumeric: "tabular-nums" }}>/ {target}</span>
       </div>
-      <div style={{ height: 6, borderRadius: 999, background: t.n7, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: t.greenDark, borderRadius: 999, transition: "width .3s" }} />
+      <div style={{ height: 6, borderRadius: t.radiusPill, background: t.n7, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: t.greenDark, borderRadius: t.radiusPill, transition: `width ${t.transitionLayout}` }} />
       </div>
       {typeof accepted === "number" && (
         // Two numbers because one person controls each: what you finished, and
@@ -193,7 +193,7 @@ export function MyTasks({ onOpenTask, onOpenQa }: {
         <span style={{ padding: "6px 14px", borderRadius: t.radiusPill, border: `1px solid ${t.primary7}`, color: t.primary6, fontSize: "0.8rem", fontWeight: weight.semibold }}>
           Multitab · Web Navigation
         </span>
-        <button onClick={() => setProfileOpen(true)} title={name} style={{ width: 34, height: 34, borderRadius: 999, border: "none", cursor: "pointer", background: t.primary6, color: "#fff", fontWeight: weight.bold, fontSize: "0.85rem" }}>
+        <button onClick={() => setProfileOpen(true)} title={name} style={{ width: 34, height: 34, borderRadius: t.radiusFull, border: "none", cursor: "pointer", background: t.primary6, color: t.n9, fontWeight: weight.bold, fontSize: "0.85rem" }}>
           {initial}
         </button>
       </header>

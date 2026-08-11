@@ -1,17 +1,25 @@
 /* ============================================================
-   Deccan AI — Typography tokens
-   Inter Display for all UI & body text (confirmed against the
-   live product). Season Mix for brand/display moments only.
-   JetBrains Mono for code / data values / IDs.
+   Deccan AI Experts — Typography tokens
+   Figtree for all UI & body text; Poppins for the display /
+   wordmark voice; Playfair Display for the "Experts" serif, used
+   sparingly. JetBrains Mono for code / data values / IDs — not a
+   DS face (the DS is a slide system and never needed a mono), but
+   IDs, counts and meters here need tabular figures.
+
+   Sizes stay on the app's role-based rem scale. The DS's own scale
+   is authored for a 1920×1080 slide (20px body, 40px titles) and
+   does not transfer to a dense review tool; what does transfer is
+   the family, the weights, the tracking and the line heights, and
+   those are matched below.
    ============================================================ */
 
 :root {
   /* ---- Font families -------------------------------------- */
-  --font-primary: "Inter Display", system-ui, -apple-system,
-    "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-family-sans: "Inter Display", system-ui, -apple-system,
-    "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-display: "Season Mix", "Inter Display", system-ui, sans-serif;
+  --font-primary: "Figtree", "Circular Std", "Sofia Pro", system-ui,
+    -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-family-sans: var(--font-primary);
+  --font-display: "Poppins", "Gilroy", "Figtree", system-ui, sans-serif;
+  --font-serif: "Playfair Display", Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
     Consolas, "Liberation Mono", monospace;
 
@@ -26,18 +34,26 @@
   --text-caption: 0.75rem;         /* 12px / 700 */
   --text-micro: 0.65rem;           /* 10.4px / 600 — domain pill */
 
-  /* ---- Font weights --------------------------------------- */
+  /* ---- Font weights ---------------------------------------
+         Figtree is variable 300–900, so 600 is a real SemiBold
+         here; under the previous face it snapped to Bold. */
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
+  --weight-extrabold: 800;
 
-  /* ---- Line heights --------------------------------------- */
-  --leading-heading: 1.23;   /* 123% */
-  --leading-body: 1.5;
-  --leading-tight: 1;        /* buttons / labels */
+  /* ---- Line heights (DS) ---------------------------------- */
+  --leading-heading: 1.2;    /* DS --lh-title */
+  --leading-body: 1.55;      /* DS --lh-body */
+  --leading-card: 1.45;      /* DS --lh-card */
+  --leading-tight: 1;        /* buttons / labels — must stay 1 to centre */
 
-  /* ---- Letter spacing ------------------------------------- */
-  --tracking-heading: -1.12px;
+  /* ---- Letter spacing (DS) --------------------------------
+         The DS keeps everything at or just under normal tracking;
+         only the all-caps eyebrow is tracked out. */
+  --tracking-hero: -0.5px;    /* DS --ls-hero */
+  --tracking-heading: -0.2px; /* DS --ls-title */
+  --tracking-eyebrow: 1.5px;  /* DS --ls-eyebrow — tracked all-caps labels */
   --tracking-normal: 0;
 }

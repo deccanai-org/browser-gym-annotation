@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Icon, Meter, t, weight, VERIFIER_LEVEL } from "../../../ds";
+import { Button, Icon, Meter, t, tint, weight, VERIFIER_LEVEL } from "../../../ds";
 import type { VerifierLevel } from "../../../ds";
 import type { ReviewState, Verifier } from "../../../lib/types";
 import {
@@ -15,34 +15,19 @@ import { BenchmarkDock } from "./BenchmarkDock";
 
 const LEVELS = Object.keys(VERIFIER_LEVEL) as VerifierLevel[];
 
-function LevelChip({ level }: { level: VerifierLevel }) {
-  const L = VERIFIER_LEVEL[level];
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 11px", borderRadius: t.radiusPill, background: t.n85, border: `1px solid ${t.n7}`, fontSize: "0.75rem", fontWeight: weight.semibold, color: t.n2 }}>
-      <span style={{ width: 8, height: 8, borderRadius: 2, background: L.color }} />
-      {L.label}
-    </span>
-  );
-}
-
 function EmptyState({ unlocked, onGenerate }: { unlocked: boolean; onGenerate: () => void }) {
   return (
     <div style={{ padding: "48px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
-      <span style={{ width: 52, height: 52, borderRadius: 14, background: t.primary0, color: t.primary6, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+      <span style={{ width: 52, height: 52, borderRadius: t.radiusXl, background: t.primary0, color: t.primary6, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
         <Icon name="checkSquare" size={26} color={t.primary6} />
       </span>
       <div style={{ marginTop: 16, fontSize: "1rem", fontWeight: weight.bold, color: t.n0 }}>
         {unlocked ? "Steps approved — ready to build verifiers" : "Approve the steps first"}
       </div>
-      <div style={{ marginTop: 6, fontSize: "0.8125rem", color: t.n2, maxWidth: 440, lineHeight: 1.55 }}>
+      <div style={{ marginTop: 6, marginBottom: 22, fontSize: "0.8125rem", color: t.n2, maxWidth: 440, lineHeight: 1.55 }}>
         {unlocked
           ? "Generate a verifier suite. Each level gets multiple typed checks you can edit and extend before running the benchmark."
           : "Review and correct the agent run above, then approve all steps. The verifier suite unlocks once the trace is approved."}
-      </div>
-      <div style={{ margin: "22px 0", display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
-        {LEVELS.map((lv) => (
-          <LevelChip key={lv} level={lv} />
-        ))}
       </div>
       <Button disabled={!unlocked} onClick={onGenerate} style={{ minHeight: 48, fontSize: "1rem", padding: "0 1.75rem" }}>Generate verifier suite</Button>
     </div>
@@ -55,7 +40,7 @@ function VerifierRow({ v, state, benchmarkRun, first, onOverride, onEdit }: { v:
   const [code, setCode] = useState(v.code);
 
   const startEdit = () => { setAssertion(v.assertion); setCode(v.code); setEditing(true); };
-  const inputStyle = { width: "100%", boxSizing: "border-box" as const, padding: "8px 10px", borderRadius: 7, border: `1px solid ${t.primary6}`, fontFamily: t.fontPrimary, fontSize: "0.78rem", fontWeight: weight.semibold, color: t.n0, outline: "none" };
+  const inputStyle = { width: "100%", boxSizing: "border-box" as const, padding: "8px 10px", borderRadius: t.radiusMd, border: `1px solid ${t.primary6}`, fontFamily: t.fontPrimary, fontSize: "0.78rem", fontWeight: weight.semibold, color: t.n0, outline: "none" };
 
   if (editing) {
     return (
@@ -86,11 +71,11 @@ function VerifierRow({ v, state, benchmarkRun, first, onOverride, onEdit }: { v:
           <>
             <Meter state={meterState} />
             {benchmarkRun && vs === "fail" && (
-              <span onClick={() => onOverride(v.id)} style={{ cursor: "pointer", padding: "3px 8px", borderRadius: 6, border: `1px solid ${t.n6}`, fontSize: "0.656rem", fontWeight: weight.bold, color: t.n2, whiteSpace: "nowrap" }}>Override</span>
+              <span onClick={() => onOverride(v.id)} style={{ cursor: "pointer", padding: "3px 8px", borderRadius: t.radiusSm, border: `1px solid ${t.n6}`, fontSize: "0.656rem", fontWeight: weight.bold, color: t.n2, whiteSpace: "nowrap" }}>Override</span>
             )}
           </>
         )}
-        <span onClick={startEdit} title="Edit verifier" style={{ cursor: "pointer", width: 24, height: 24, borderRadius: 6, display: "inline-flex", alignItems: "center", justifyContent: "center", color: t.n3 }}>
+        <span onClick={startEdit} title="Edit verifier" style={{ cursor: "pointer", width: 24, height: 24, borderRadius: t.radiusSm, display: "inline-flex", alignItems: "center", justifyContent: "center", color: t.n3 }}>
           <Icon name="pencil" size={13} color={t.n3} />
         </span>
       </div>
@@ -141,9 +126,34 @@ export function VerifierSuite({
   const [adding, setAdding] = useState(false);
 
   const cardShell = { background: t.n9, border: `1px solid ${t.n7}`, borderRadius: t.radiusXl, boxShadow: t.shadowMd, overflow: "hidden" } as const;
+  const suiteReady = state.stepsApproved && state.verifiersGenerated;
 
-  if (!state.stepsApproved) return <div style={cardShell}><EmptyState unlocked={false} onGenerate={onGenerate} /></div>;
-  if (!state.verifiersGenerated) return <div style={cardShell}><EmptyState unlocked onGenerate={onGenerate} /></div>;
+  const dock = (
+    <BenchmarkDock
+      reward={reward(state)}
+      benchmarkRun={state.benchmarkRun}
+      failing={failingCount(state)}
+      total={allVerifiers(state).length}
+      canSubmit={canSubmit(state)}
+      submitted={state.submitted}
+      submittedKind={state.serverSubmission?.kind ?? null}
+      submitError={state.submitError}
+      canRun={suiteReady}
+      onRun={onRun}
+      onSubmit={onSubmit}
+      submitNote={submitNote}
+    />
+  );
+
+  // The run control lives in the card footer even before a suite exists — the
+  // pink-corner "what's next" slot — so annotators are not left looking at a
+  // blank bottom-right after approving steps.
+  if (!state.stepsApproved) {
+    return <div style={cardShell}><EmptyState unlocked={false} onGenerate={onGenerate} />{dock}</div>;
+  }
+  if (!state.verifiersGenerated) {
+    return <div style={cardShell}><EmptyState unlocked onGenerate={onGenerate} />{dock}</div>;
+  }
 
   const L = VERIFIER_LEVEL[state.activeLevel];
   const group = levelVerifiers(state, state.activeLevel);
@@ -160,7 +170,7 @@ export function VerifierSuite({
           const V = VERIFIER_LEVEL[lv];
           return (
             <div key={lv} onClick={() => onSetLevel(lv)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 14px", cursor: "pointer", borderBottom: active ? `2px solid ${t.primary6}` : "2px solid transparent", marginBottom: -1 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: V.color }} />
+              <span style={{ width: 8, height: 8, borderRadius: t.radiusSm, background: V.color }} />
               <span style={{ fontSize: "0.8125rem", fontWeight: weight.semibold, color: active ? t.n0 : t.n3 }}>{V.label}</span>
               <span style={{ fontFamily: t.fontMono, fontSize: "0.6875rem", fontWeight: weight.bold, color: scoreColorFor(sc.pass, sc.total) }}>{state.benchmarkRun ? `${sc.pass} / ${sc.total}` : `${sc.total} checks`}</span>
             </div>
@@ -172,9 +182,9 @@ export function VerifierSuite({
       <div style={{ padding: "16px 20px" }}>
         <div style={{ maxWidth: 780, border: `1px solid ${t.n7}`, borderRadius: t.radiusXl, overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "11px 14px", background: t.n85, borderBottom: `1px solid ${t.n7}` }}>
-            <span style={{ width: 9, height: 9, borderRadius: 3, background: L.color }} />
+            <span style={{ width: 9, height: 9, borderRadius: t.radiusSm, background: L.color }} />
             <span style={{ fontSize: "0.8125rem", fontWeight: weight.bold, color: t.n0 }}>{L.label}</span>
-            <span style={{ fontSize: "0.625rem", fontWeight: weight.bold, textTransform: "uppercase", letterSpacing: "0.04em", color: L.color, background: `color-mix(in srgb, ${L.color} 12%, transparent)`, padding: "2px 7px", borderRadius: 5 }}>{L.chip}</span>
+            <span style={{ fontSize: "0.625rem", fontWeight: weight.bold, textTransform: "uppercase", letterSpacing: t.trackingEyebrow, color: L.color, background: tint(L.color, 12), padding: "2px 7px", borderRadius: t.radiusSm }}>{L.chip}</span>
             <span style={{ flex: 1 }} />
             <span style={{ fontFamily: t.fontMono, fontSize: "0.719rem", fontWeight: weight.bold, color: scoreColorFor(groupSc.pass, group.length) }}>{state.benchmarkRun ? `${groupSc.pass} / ${group.length}` : `${group.length} checks`}</span>
           </div>
@@ -193,19 +203,7 @@ export function VerifierSuite({
         </div>
       </div>
 
-      <BenchmarkDock
-        reward={reward(state)}
-        benchmarkRun={state.benchmarkRun}
-        failing={failingCount(state)}
-        total={allVerifiers(state).length}
-        canSubmit={canSubmit(state)}
-        submitted={state.submitted}
-        submittedKind={state.serverSubmission?.kind ?? null}
-        submitError={state.submitError}
-        onRun={onRun}
-        onSubmit={onSubmit}
-        submitNote={submitNote}
-      />
+      {dock}
     </div>
   );
 }

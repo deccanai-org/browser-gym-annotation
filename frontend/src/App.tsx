@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { t } from "./ds";
 import { AuthProvider, useAuth } from "./features/auth/AuthContext";
 import { LoginScreen } from "./features/auth/LoginScreen";
 import { MyTasks } from "./features/my-tasks/MyTasks";
@@ -20,7 +21,7 @@ function Gate() {
 
   if (loading) {
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#8b94a3", fontFamily: "ui-sans-serif, system-ui, sans-serif", fontSize: 14 }}>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: t.n3, fontFamily: t.fontPrimary, fontSize: 14 }}>
         Loading…
       </div>
     );
