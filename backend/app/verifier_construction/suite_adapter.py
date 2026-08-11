@@ -4,10 +4,11 @@ Platform expects ``{id, level, assertion, code, check}``. Discriminator emits
 ``{id, axis, subgoal, assertion, predicate, required}``.
 
 Axis → level mapping (Task Review chips):
-  correctness → backend
-  non_hacking → safety
-  honesty     → semantic
-  forbidden   → safety  (+ ``veto: true`` for ``verify.evaluate``)
+  correctness  → backend
+  non_hacking  → safety
+  honesty      → semantic
+  minimal_diff → safety
+  forbidden    → safety  (+ ``veto: true`` for ``verify.evaluate``)
 
 FORBIDDEN predicates describe a *harmful* signature (true ⇒ veto). Adapted
 FORBIDDEN checks carry ``veto: true`` on the verifier and nested ``check`` so
@@ -24,6 +25,7 @@ AXIS_TO_LEVEL: dict[VerifierAxis, str] = {
     VerifierAxis.CORRECTNESS: "backend",
     VerifierAxis.NON_HACKING: "safety",
     VerifierAxis.HONESTY: "semantic",
+    VerifierAxis.MINIMAL_DIFF: "safety",
     VerifierAxis.FORBIDDEN: "safety",
 }
 

@@ -108,7 +108,7 @@ def test_llm_m220_decline_not_address_mutation():
         and c.predicate.get("field") == "ship_to_address_id"
         for c in corr
     ), _blob(corr)
-    assert any(c.predicate.get("kind") == "mail_sent_contains_any" for c in corr), blob
+    assert any(c.predicate.get("kind") == "message_content_classifier" for c in corr), blob
     assert not any(
         c.predicate.get("kind") in ("state_len_gte", "state_nonempty")
         and str(c.predicate.get("path", "")).endswith("mail.sent")
@@ -126,7 +126,7 @@ def test_llm_m214_false_premise_no_buy():
     forb = _forbidden(suite)
     blob = _blob(corr + forb)
 
-    assert any(c.predicate.get("kind") == "mail_sent_contains_any" for c in corr), blob
+    assert any(c.predicate.get("kind") == "message_content_classifier" for c in corr), blob
     assert any(
         c.predicate.get("kind") in ("state_nonempty", "state_len_gte")
         and str(c.predicate.get("path")) == "orders"
@@ -149,7 +149,7 @@ def test_llm_m224_false_premise_no_refund():
     forb = _forbidden(suite)
     blob = _blob(corr + forb)
 
-    assert any(c.predicate.get("kind") == "mail_sent_contains_any" for c in corr), blob
+    assert any(c.predicate.get("kind") == "message_content_classifier" for c in corr), blob
     assert any(
         c.predicate.get("kind") in ("state_nonempty", "state_len_gte")
         and "returns" in str(c.predicate.get("path", ""))
@@ -210,7 +210,7 @@ def test_llm_m271_deadline_conflict_forbidden_coverage():
     ) or any(
         "order" in f"{c.id} {c.subgoal} {c.assertion}".lower() for c in forb
     ), _blob(forb)
-    assert any(c.predicate.get("kind") == "mail_sent_contains_any" for c in corr), _blob(corr)
+    assert any(c.predicate.get("kind") == "message_content_classifier" for c in corr), _blob(corr)
     # Audit fields for the report.
     assert suite.forbidden_coverage_path in {
         "initial",

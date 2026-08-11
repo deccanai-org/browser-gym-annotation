@@ -490,8 +490,7 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
         load_seed_initial,
         split_seed_initial,
         suite_to_platform,
-        validate_suite,
-        write_verifiers,
+        write_and_validate_suite,
     )
     from app.verifier_construction.predicates import extract_task_brief
     from app.verifier_construction.seed_io import fetch_seed_world_live
@@ -556,11 +555,14 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
 
     try:
         seed_data, dynamic_data = split_seed_initial(initial)
-        vc_suite = write_verifiers(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
+        constructed = write_and_validate_suite(
+            brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data, initial, golden
+        )
     except Exception as e:  # noqa: BLE001 — surface model / structural failures cleanly
         raise jobs.JobFailure(f"discriminator write failed: {e}") from e
 
-    validation = validate_suite(vc_suite, initial, golden)
+    vc_suite = constructed.suite
+    validation = constructed.validation
     platform_suite, adapt_warnings = suite_to_platform(vc_suite)
 
     revision_flags = list(validation.revision_flags)
@@ -569,12 +571,18 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
     )
     if incomplete and "incomplete_forbidden_coverage" not in revision_flags:
         revision_flags.append("incomplete_forbidden_coverage")
+    if constructed.needs_human_review and "content_criteria_human_review" not in revision_flags:
+        revision_flags.append("content_criteria_human_review")
 
     warnings = list(adapt_warnings)
     if incomplete:
         warnings.append(
             "incomplete_forbidden_coverage: detected traps without a FORBIDDEN "
             "checkpoint — do not approve until a harmful-signature check is added"
+        )
+    if constructed.needs_human_review:
+        warnings.append(
+            f"content_criteria_human_review: {constructed.human_review_reason}"
         )
     if not validation.accepted:
         warnings.append(f"orchestrator_rejected: {validation.reason}")
@@ -584,7 +592,7 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
         "oracle": bool(validation.accepted),
         "accepted": bool(validation.accepted),
         "reason": validation.reason,
-        "iterations": 1,
+        "iterations": 1 + int(constructed.content_regen_attempts),
         "brief": brief,
         "suite": platform_suite,
         "stateChecks": len(platform_suite),
@@ -594,6 +602,9 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
             "initialReward": None,
             "goldenReward": None,
             "orchestrator": validation.to_dict(),
+            "contentRegenAttempts": constructed.content_regen_attempts,
+            "contentRegenHistory": constructed.regen_history,
+            "needsHumanReview": constructed.needs_human_review,
         },
         "history": [
             {
@@ -602,6 +613,7 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
                 "accepted": validation.accepted,
                 "reason": validation.reason,
                 "revisionFlags": revision_flags,
+                "contentRegenAttempts": constructed.content_regen_attempts,
             }
         ],
         "revisionFlags": revision_flags,
@@ -612,6 +624,8 @@ def _autogen_discriminator_job(task_id: str, seed: int) -> dict:
         "sourceInitial": source_initial,
         "sourceGolden": source_golden,
         "sourceModel": vc_suite.source_model,
+        "contentRegenAttempts": constructed.content_regen_attempts,
+        "needsHumanReview": constructed.needs_human_review,
     }
 
 

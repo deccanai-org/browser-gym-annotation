@@ -510,8 +510,35 @@ def run_one(
         brief = brief_csv
 
     seed_data, dynamic_data = split_seed_initial(seed_initial)
+    constructed = None
     try:
-        suite = write_verifiers(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
+        if golden is not None:
+            from app.verifier_construction import write_and_validate_suite
+
+            try:
+                constructed = write_and_validate_suite(
+                    brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data, seed_initial, golden
+                )
+                suite = constructed.suite
+            except ValueError as exc:
+                if "no valid correctness" not in str(exc).lower():
+                    raise
+                brief_retry = (
+                    brief
+                    + "\n\n[Discriminator note: emit at least one correctness-axis durable-state "
+                    "disclosure or safe-outcome checkpoint with a whitelist predicate.]"
+                )
+                constructed = write_and_validate_suite(
+                    brief_retry,
+                    BRIDGED_ENVIRONMENT,
+                    seed_data,
+                    dynamic_data,
+                    seed_initial,
+                    golden,
+                )
+                suite = constructed.suite
+        else:
+            suite = write_verifiers(brief, BRIDGED_ENVIRONMENT, seed_data, dynamic_data)
     except ValueError as exc:
         # One retry with a slightly expanded dynamic view tip in brief — rare coerce wipe.
         if "no valid correctness" not in str(exc).lower():
@@ -526,10 +553,17 @@ def run_one(
     orch = None
     validation_status = "validated"
     if golden is not None:
-        orch_result = Orchestrator().validate(suite, seed_initial, golden)
+        if constructed is not None:
+            orch_result = constructed.validation
+        else:
+            orch_result = Orchestrator().validate(suite, seed_initial, golden)
         orch = orch_result.to_dict()
         orch["skipped"] = False
         orch["unvalidated"] = False
+        if constructed is not None:
+            orch["content_regen_attempts"] = constructed.content_regen_attempts
+            orch["needs_human_review"] = constructed.needs_human_review
+            orch["content_regen_history"] = constructed.regen_history
     else:
         # Explicit unvalidated — do NOT treat as Orchestrator accept/reject.
         orch = {
