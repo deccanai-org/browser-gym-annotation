@@ -109,11 +109,11 @@ verify → 0|1 → QC → package tar
 |---|---|
 | Annotation UI | `https://browser-agent.delta.soulhq.ai/` |
 | Studio | Existing form-builder shell (embeds the UI) |
-| Amazon | `https://cua-hub-amazon.delta.deccanexperts.ai` |
-| Gmail | `https://cua-hub-gmail.delta.deccanexperts.ai` |
-| eBay | `https://cua-hub-ebay.delta.deccanexperts.ai` |
-| Uber Eats | `https://cua-hub-uber-eats.delta.deccanexperts.ai` |
-| Calendar | `https://cua-hub-google-calendar.delta.deccanexperts.ai` |
+| Amazon | `https://xmazon.delta.deccanexperts.ai` |
+| Gmail | `https://xmail.delta.deccanexperts.ai` |
+| eBay | `https://xbay.delta.deccanexperts.ai` |
+| Uber Eats | `https://xber-eats.delta.deccanexperts.ai` |
+| Calendar | `https://xoogle-calendar.delta.deccanexperts.ai` |
 | DB | `souldb` → `cua-gym` @ `10.0.141.72:5432` |
 
 App keys **must** match `mock_states.mock`:
@@ -427,13 +427,13 @@ Behavior: load task apps → clone each seed → insert `bg_session` → return 
       "app_key": "amazon_mock",
       "attempt_sid": "…",
       "start_url": "/orders",
-      "url": "https://cua-hub-amazon.delta.deccanexperts.ai/orders?sid=…"
+      "url": "https://xmazon.delta.deccanexperts.ai/orders?sid=…"
     },
     {
       "app_key": "gmail_mock",
       "attempt_sid": "…",
       "start_url": "/#/inbox",
-      "url": "https://cua-hub-gmail.delta.deccanexperts.ai/?sid=…#/inbox"
+      "url": "https://xmail.delta.deccanexperts.ai/?sid=…#/inbox"
     }
   ]
 }
