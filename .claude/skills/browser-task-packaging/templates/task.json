@@ -1,0 +1,74 @@
+{
+  "//": "Contract-B payload — one per rollout, at trajectory/<task>/<model>/rollout_.../task.json.",
+  "//generate": "From the platform record (export.py::build_sample) plus the four added fields marked NEW.",
+
+  "sample_id": "<session or iteration uuid>",
+
+  "task": {
+    "id": "<gym>/<task>",
+    "prompt": "<the brief verbatim — must equal tasks/<task>/instruction.md>",
+    "category": "Computer use",
+    "difficulty": "hard",
+    "seed": 0,
+
+    "//NEW-1": "applications[] — derive from the timeline's switch_gym events + the preloaded gym",
+    "applications": [
+      { "key": "Xsn", "role": "preloaded", "base_url": "http://xsn-gym.your-gym-host/" },
+      { "key": "Xalendly", "role": "visited", "base_url": "http://xalendly-gym.your-gym-host/" }
+    ],
+
+    "//NEW-2": "workflows[] — derive from a fixed table->workflow map over the VERIFIER SUITE's tables, not the observed diff; a workflow the agent failed is still in scope",
+    "workflows": [
+      { "id": "create_lead_list", "app": "Xsn", "tables": ["contactLists", "listContactAssociation"] },
+      { "id": "book_meeting", "app": "Xalendly", "tables": ["meetings"] }
+    ]
+  },
+
+  "initial_state": { "//": "the seed-0 world per gym; already in build_sample as initial_state" },
+
+  "verifiers": [
+    {
+      "id": "meetings-added-1",
+      "app": "Xalendly",
+      "table": "meetings",
+      "assertion": "<human-readable expectation>",
+      "check": { "op": "row_added", "assertions": [] },
+      "//": "ship the SUITE SPEC only — never the matched rows, which bloat the file and leak state"
+    }
+  ],
+
+  "//NEW-3": "model_response — the final assistant turn plus run accounting",
+  "model_response": {
+    "text": "<final assistant message>",
+    "source": "model_output",
+    "terminal_label": "<TASK_COMPLETE | TASK_INCOMPLETE>",
+    "message_count": 0,
+    "action_count": 0,
+    "tokens": { "prompt": 0, "completion": 0 }
+  },
+
+  "//NEW-4": "db_diff — summary inline, full detail by reference so task.json stays readable",
+  "db_diff": {
+    "summary": { "<GymKey>": { "added": 0, "modified": 0, "deleted": 0 } },
+    "detail_ref": "db_diff.json"
+  },
+
+  "reward": 0.0,
+  "//reward": "0.0 if any forbidden check fires; else the fraction/weighted sum of satisfied positives",
+  "verification": { "passed": false, "failed": ["<expectationId>"] },
+
+  "artifacts": {
+    "replay": "replay.html",
+    "trajectory": "trajectory.json",
+    "episode": "gym_episode.jsonl",
+    "screenshots": "images/"
+  },
+
+  "metadata": {
+    "task_version": "<stamp it; an export with no taskId is untraceable to a task record>",
+    "prompt_hash": "<sha256 of prompt>",
+    "session_id": "<uuid>",
+    "max_steps": 250,
+    "created_at": "<iso8601>"
+  }
+}

@@ -1,0 +1,85 @@
+# Canonical browser task.toml. Declare the schema version you actually target;
+# 1.4 is what the shipped harbor packs use. Fill every field from an artifact —
+# a zero is honest, an estimate presented as measured is not.
+schema_version = "1.4"
+artifacts = ["/logs/verifier/final_state.json"]   # browser analogue of the SWE agent.patch
+
+[task]
+name = "<org>/<slug-with-dashes>"
+version = "1.0.0"
+description = "<what the agent must accomplish, and the constraint that makes it hard>"
+authors = [{ name = "<Your Org>" }]                # never a gym persona address
+keywords = ["browser-use", "<domain>", "<mechanism>"]
+
+[browser]                                          # browser-only; owns the harness config
+gym_task_id = "<gym>/<task>"
+start_path = "/"                                   # single-app
+# gyms = ["Xsn", "Xalendly", "Xubspot", "<gym-persona>", "Xira"]   # multi-app: roster instead
+# preload_gym = "Xsn"
+apps = ["shop", "mail", "calendar"]
+frozen_time = "2026-05-22T09:00:00Z"               # required if the brief turns on a date
+
+[metadata]
+author_name = "<Your Org>"
+author_organization = "<Your Org>"
+category = "Computer use"
+subcategory = "Web browsing (multi-app)"
+tags = ["browser-use", "<domain>", "<mechanism>"]
+expert_time_estimate_min = 25
+brief_version_delivered = "<vN_short_label>"
+confirmation_status = "<confirmed_confirmed | sol_only | unconfirmed>"
+difficulty_explanation = """
+<Why a frontier model fails. Name the drivers, and keep every one seed-observable and fair:
+where each hard fact lives, which plausible partial solution still fails, and what the
+per-seed scores actually were.>
+"""
+solution_explanation = """
+<The gold path as a sequence of UI actions, then how solve.sh reproduces it, then the oracle
+evidence (film id) if one exists. the per-component quality standards asks whether the solution has instructional value.>
+"""
+verification_explanation = """
+<Every required milestone with its weight, every forbidden milestone, the success rule, and the
+threshold. State the veto explicitly: forbidden fired => reward 0.0. Then state known
+false-negative surfaces (e.g. a token-matching disclosure check) rather than leaving them found.>
+"""
+
+[verifier]
+timeout_sec = 120.0
+environment_mode = "separate"                      # verifier must not run in the agent's context
+
+[[verifier.collect]]
+command = "curl -sf http://127.0.0.1:8000/_harness/state > /logs/verifier/final_state.json || true"
+
+[verifier.env]
+
+[agent]
+timeout_sec = 3600.0
+
+[environment]
+os = "linux"
+cpus = 2
+memory_mb = 4096                                   # integer MB (the per-component quality standards config lint)
+storage_mb = 10240
+gpus = 0
+build_timeout_sec = 600.0
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]
+
+[rollout_baseline.gpt56sol]
+name = "openai/<frontier-model>"
+harness = "<harness>"
+rollout_n = 5                                      # MUST equal the rollout dir count on disk
+reward_mean = 0.0                                  # recompute AFTER the veto rule
+reward_std = 0.0
+reward_min = 0.0
+reward_max = 0.0
+pass_rate = 0.0                                    # oracle rollouts excluded from the denominator
+mean_steps = 0.0
+mean_cost_usd = 0.0
+mean_prompt_tokens = 0
+mean_completion_tokens = 0
+token_mean_kind = "cumulative_per_episode"         # pixel/SoM replays prior screenshots — say so
+notes = "<per-seed dispositions + oracle film id + anything a reader could otherwise misread>"
